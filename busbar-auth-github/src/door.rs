@@ -61,12 +61,13 @@ const REWRITES: &[Rewrite] = &[Rewrite {
 }];
 /// The index of the one need in [`NEEDS`].
 const NEED: u32 = 0;
-/// The one need: outbound https to the IdP, its target named per hop (token, `/user`,
-/// `/user/orgs`), bounded by 1.5.5's per-hop timeout.
+/// The one need: outbound to the IdP over the `http` transport (the scheme the http framer
+/// claims; an `https` target is secured by the connector), its target named per hop (token,
+/// `/user`, `/user/orgs`), bounded by 1.5.5's per-hop timeout.
 const NEEDS: &[Need] = &[Need {
     direction: DIRECTION_OUTBOUND,
     egress_class: EGRESS_DEFAULT,
-    transport: abi_str("https"),
+    transport: abi_str("http"),
     auth: ABSENT,
     target_from: ABSENT,
     trust_from: ABSENT,
