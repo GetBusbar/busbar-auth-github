@@ -1,0 +1,57 @@
+{
+  "settings": {
+    "client_id": "conformance-client",
+    "api_base": "https://api.github.conformance.example",
+    "authorize_base": "https://github.conformance.example",
+    "token_base": "https://github.conformance.example"
+  },
+  "far_ends": [
+    {
+      "url": "https://github.conformance.example/login/oauth/access_token",
+      "cert_pem": null,
+      "status": 200,
+      "body": "{\"access_token\": \"gho_conformance_token\", \"token_type\": \"bearer\", \"scope\": \"read:user,read:org\"}"
+    },
+    {
+      "url": "https://api.github.conformance.example/user",
+      "cert_pem": null,
+      "status": 200,
+      "body": "{\"login\": \"octo-conformance\", \"id\": 4242, \"name\": \"Octo Conformance\"}"
+    },
+    {
+      "url": "https://api.github.conformance.example/user/orgs?per_page=100",
+      "cert_pem": null,
+      "status": 200,
+      "body": "[{\"login\": \"busbar-org\"}]"
+    }
+  ],
+  "auth": {
+    "bad_settings": [
+      "{}",
+      {
+        "client_id": 5
+      }
+    ],
+    "never_echoed": [
+      "gho_conformance_token"
+    ],
+    "login": {
+      "begin": {
+        "redirect_uri": "https://node.example/auth/token",
+        "state": "conformance-state",
+        "code_challenge": "conformance-challenge",
+        "nonce": "conformance-nonce"
+      },
+      "authorize_prefix": "https://github.conformance.example/login/oauth/authorize?",
+      "complete": {
+        "code": "conformance-code",
+        "state": "conformance-state",
+        "nonce": "conformance-nonce",
+        "redirect_uri": "https://node.example/auth/token",
+        "code_verifier": "conformance-verifier"
+      },
+      "complete_verdict": "identity:github:octo-conformance",
+      "complete_crossings": 1
+    }
+  }
+}

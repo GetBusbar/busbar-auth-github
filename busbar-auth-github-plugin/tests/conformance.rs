@@ -15,12 +15,22 @@
 //! a ticket-less `complete_login` (REFUSED: the token exchange waits on I/O, so it runs on a
 //! ticket), `refresh` accepted and refused, `tick` and `close`. The two transcripts must be equal.
 //!
-//! THE RED ARMS, same file: the dropped-in door opened over ANOTHER config answers a different
+//! THE RED ARMS, each its own test: the dropped-in door opened over ANOTHER config answers a different
 //! transcript (so the equality is not vacuous); the door asked for as another kind is refused,
 //! linked and dropped in. A missing cdylib PANICS: this test IS the dropped-in door's proof, and
 //! never skips.
 
 use std::path::PathBuf;
+
+// BUSBAR'S PUBLISHED CONFORMANCE SUITE (plugin-ci's conformance step): the linked door and this
+// crate's cdylib through the one loader, driven by the auth kind's script over the login family
+// (the token exchange and the `/user` and `/user/orgs` hops reach the far ends in
+// `conformance.json`), exact crossings, both folds equal, its RED arms kept.
+busbar_plugin_loader::conformance_suite! {
+    door: busbar_auth_github::door::door,
+    cdylib: "busbar_auth_github_plugin",
+    inputs: include_str!("conformance.json"),
+}
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -126,7 +136,10 @@ fn dropped(d: &Dispatcher) -> Plugin<Auth> {
         statement: Some(hex),
         ..Manifest::default()
     };
-    let dir = std::env::temp_dir().join(format!("auth-github-conf-{}", std::process::id()));
+    // One directory per call: the tests of this target run in parallel and each packs its own.
+    static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let dir = std::env::temp_dir().join(format!("auth-github-conf-{}-{n}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     let signed = sign(&release(), manifest, &lib);
@@ -285,27 +298,29 @@ const ABSENT: Span = Span {
     len: 0,
 };
 
+/// An all-zero `T`: every `in`/`out` here is plain C data, all-zero a valid value of each (the
+/// fields a test does not name stay zero, so a field the ABI appends needs no edit here).
+fn z<T>() -> T {
+    // SAFETY: plain C data; all-zero is a valid value of each type this file zeroes.
+    unsafe { std::mem::zeroed() }
+}
+
 fn identify_out() -> IdentifyOut {
-    IdentifyOut {
-        head: out_head(),
-        verdict: 0,
-        needed_groups: 0,
-        needed_bytes: 0,
-        identity: IdentityOut {
-            subject: ABSENT,
-            key_id: ABSENT,
-            key_name: ABSENT,
-            user: ABSENT,
-            provider: ABSENT,
-            name: ABSENT,
-            claims: ABSENT,
-            claims_fmt: 0,
-            flags: 0,
-            ttl_secs: 0,
-            groups_len: 0,
-            _reserved: 0,
-        },
+    let mut o: IdentifyOut = z();
+    o.head = out_head();
+    let i: &mut IdentityOut = &mut o.identity;
+    for span in [
+        &mut i.subject,
+        &mut i.key_id,
+        &mut i.key_name,
+        &mut i.user,
+        &mut i.provider,
+        &mut i.name,
+        &mut i.claims,
+    ] {
+        *span = ABSENT;
     }
+    o
 }
 
 /// The host's identity buffer over `bytes` and `groups`.
@@ -322,26 +337,18 @@ fn identity_buf(bytes: &mut [u8], groups: &mut [Span]) -> IdentityBuf {
 fn verify(p: &Plugin<Auth>) -> String {
     let (mut bytes, mut groups) = (vec![0u8; 256], vec![ABSENT; 4]);
     let credential = b"gho_opaque";
-    let mut f = Frame::new(
-        VerifyIn {
-            head: in_head(),
-            credential: secret_blob(credential),
-            carrier: std::ptr::null(),
-            carrier_len: 0,
-            request: RequestFacts {
-                method: s("GET"),
-                authority: s("node.example"),
-                canonical_path: s("/v1/models"),
-                query: NO_STR,
-                timestamp: 0,
-                body_hash: [0; 32],
-                body_hash_present: 0,
-                _reserved: 0,
-            },
-            out_buf: identity_buf(&mut bytes, &mut groups),
-        },
-        identify_out(),
-    );
+    let mut i: VerifyIn = z();
+    i.head = in_head();
+    i.credential = secret_blob(credential);
+    i.request = RequestFacts {
+        method: s("GET"),
+        authority: s("node.example"),
+        canonical_path: s("/v1/models"),
+        query: NO_STR,
+        ..z()
+    };
+    i.out_buf = identity_buf(&mut bytes, &mut groups);
+    let mut f = Frame::new(i, identify_out());
     spelled(&p.call(auth::slot::VERIFY, &mut f))
 }
 
@@ -391,19 +398,14 @@ fn begin_login(p: &Plugin<Auth>) -> Vec<String> {
 fn complete_login(p: &Plugin<Auth>) -> String {
     let (mut bytes, mut groups) = (vec![0u8; 256], vec![ABSENT; 4]);
     let (code, verifier) = (b"the-code", b"conformance-verifier");
-    let mut f = Frame::new(
-        CompleteLoginIn {
-            head: in_head(),
-            code: secret_blob(code),
-            state: s("conformance-state"),
-            redirect_uri: s("https://node.example/auth/token"),
-            code_verifier: secret_blob(verifier),
-            submitted: std::ptr::null(),
-            submitted_len: 0,
-            out_buf: identity_buf(&mut bytes, &mut groups),
-        },
-        identify_out(),
-    );
+    let mut i: CompleteLoginIn = z();
+    i.head = in_head();
+    i.code = secret_blob(code);
+    i.state = s("conformance-state");
+    i.redirect_uri = s("https://node.example/auth/token");
+    i.code_verifier = secret_blob(verifier);
+    i.out_buf = identity_buf(&mut bytes, &mut groups);
+    let mut f = Frame::new(i, identify_out());
     let c = p.call(auth::slot::COMPLETE_LOGIN, &mut f);
     format!("complete_login {} verdict={}", spelled(&c), f.out.verdict)
 }
@@ -443,8 +445,8 @@ fn transcript(p: &Plugin<Auth>, cfg: &str) -> Vec<String> {
     t
 }
 
-/// The GitHub login plugin answers as ONE plugin through either door, and the RED arms show the
-/// comparison is not vacuous.
+/// The GitHub login plugin answers as ONE plugin through either door (the RED arms below show the
+/// comparison is not vacuous).
 #[test]
 fn the_linked_and_the_dropped_in_github_login_are_one_plugin() {
     let d = dispatcher();
@@ -483,8 +485,14 @@ fn the_linked_and_the_dropped_in_github_login_are_one_plugin() {
     ] {
         assert!(text.contains(line), "missing {line:?} in:\n{text}");
     }
+}
 
-    // RED ARM 1: the dropped-in door under a different operator config is a different transcript.
+/// RED ARM 1: the dropped-in door under a different operator config is a different transcript, so
+/// the equality in the both-ways test is not vacuous.
+#[test]
+fn a_different_operator_config_is_a_different_transcript() {
+    let d = dispatcher();
+    let linked = transcript(&linked(&d), CFG);
     let other = transcript(
         &dropped(&d),
         r#"{"client_id":"Iv1.someone-else","fetch_orgs":false}"#,
@@ -493,8 +501,12 @@ fn the_linked_and_the_dropped_in_github_login_are_one_plugin() {
         other, linked,
         "a different config must not read as the same plugin"
     );
+}
 
-    // RED ARM 2: the door asked for as another kind is refused, linked and dropped in.
+/// RED ARM 2: the door asked for as another kind is refused, linked and dropped in.
+#[test]
+fn an_auth_door_loaded_as_another_kind_is_refused() {
+    let d = dispatcher();
     assert!(
         load_linked::<Secret>(&row(), bind(&d)).is_err(),
         "an auth door must not load as secret"
