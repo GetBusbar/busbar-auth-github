@@ -21,6 +21,16 @@
 //! never skips.
 
 use std::path::PathBuf;
+
+// BUSBAR'S PUBLISHED CONFORMANCE SUITE (plugin-ci's conformance step): the linked door and this
+// crate's cdylib through the one loader, driven by the auth kind's script over the login family
+// (the token exchange and the `/user` and `/user/orgs` hops reach the far ends in
+// `conformance.json`), exact crossings, both folds equal, its RED arms kept.
+busbar_plugin_loader::conformance_suite! {
+    door: busbar_auth_github::door::door,
+    cdylib: "busbar_auth_github_plugin",
+    inputs: include_str!("conformance.json"),
+}
 use std::sync::Arc;
 use std::time::Duration;
 

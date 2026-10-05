@@ -22,7 +22,9 @@ busbar-auth-github = { path = "../busbar-auth-github" }
 # Dev-only: the linked + dropped-in conformance test (tests/conformance.rs) signs, packs, scans and
 # opens the built cdylib over the REAL loader, and the live plugin-side e2e (tests/e2e.rs) locates it
 # with the loader's filename helper. Same pinned rev as busbar-contract, so one busbar source resolves.
-busbar-plugin-loader = { workspace = true }
+# `conformance`: busbar's PUBLISHED conformance suite (`tests/conformance.rs`'s
+# `conformance_suite!`), run against the busbar commit this repo pins.
+busbar-plugin-loader = { workspace = true, features = ["conformance"] }
 base64 = { workspace = true }
 reqwest = { workspace = true, features = ["json", "blocking"] }
 serde_json = { workspace = true }
