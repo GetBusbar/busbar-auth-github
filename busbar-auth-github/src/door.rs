@@ -26,7 +26,9 @@ use busbar_contract::abi::auth::{
     BEGIN_AUTHORIZE, CANCEL_ABANDONED, CAP_LOGIN, IDENTITY_HAS_TTL, LOGIN_BAD_CREDENTIAL,
     LOGIN_IDENTITY, LOGIN_KIND_REDIRECT, LOGIN_OUTAGE, SPAN_ABSENT,
 };
-use busbar_contract::abi::host::conn::connector::{Need, DIRECTION_OUTBOUND, EGRESS_DEFAULT};
+use busbar_contract::abi::host::conn::connector::{
+    Need, DIRECTION_OUTBOUND, EGRESS_DEFAULT, KEEP_NAMED,
+};
 use busbar_contract::abi::mechanism::call::{AbiStr, Blob, Outcome, Span, BLOB_ABSENT};
 use busbar_contract::abi::mechanism::door::{KindTailHead, Rewrite, Statement, REWRITE_ALIAS};
 use busbar_contract::abi::mechanism::ticket::Ticket;
@@ -61,12 +63,13 @@ const REWRITES: &[Rewrite] = &[Rewrite {
 }];
 /// The index of the one need in [`NEEDS`].
 const NEED: u32 = 0;
-/// The one need: outbound https to the IdP, its target named per hop (token, `/user`,
-/// `/user/orgs`), bounded by 1.5.5's per-hop timeout.
+/// The one need: outbound to the IdP over the `http` transport (the scheme the http framer
+/// claims; an `https` target is secured by the connector), its target named per hop (token,
+/// `/user`, `/user/orgs`), bounded by 1.5.5's per-hop timeout.
 const NEEDS: &[Need] = &[Need {
     direction: DIRECTION_OUTBOUND,
     egress_class: EGRESS_DEFAULT,
-    transport: abi_str("https"),
+    transport: abi_str("http"),
     auth: ABSENT,
     target_from: ABSENT,
     trust_from: ABSENT,
@@ -74,6 +77,10 @@ const NEEDS: &[Need] = &[Need {
     keep_response_headers: std::ptr::null(),
     keep_response_headers_len: 0,
     timeout_ms: crate::login::HOP_TIMEOUT_MS,
+    keep_mode: KEEP_NAMED,
+    _reserved: 0,
+    deny_response_headers: std::ptr::null(),
+    deny_response_headers_len: 0,
 }];
 /// A redirect login, nothing else.
 const TAIL: AuthTail = AuthTail {
@@ -84,9 +91,13 @@ const TAIL: AuthTail = AuthTail {
     caps: CAP_LOGIN,
     facts: 0,
     login_kind: LOGIN_KIND_REDIRECT,
-    _reserved: 0,
+    // No inbound point: the plugin does not verify (the tail states no `CAP_INBOUND`).
+    inbound_points: 0,
     styles: std::ptr::null(),
     styles_len: 0,
+    operator_principal: abi_str(""),
+    credential_kinds: std::ptr::null(),
+    credential_kinds_len: 0,
 };
 
 /// This plugin's Statement.

@@ -305,6 +305,8 @@ fn github_get_flow_mints_key_via_core_executed_hops() {
         format!(
             "listen: \"127.0.0.1:{data_port}\"\n\
              public_url: \"https://gate.busbar.e2e\"\n\
+             store: {{ module: memory }}\n\
+             advanced:\n  allow_destinations: [\"127.0.0.1\", \"localhost\"]\n\
              identity-providers:\n  admin-tokens: {{ module: admin-tokens, token: {{ env: BUSBAR_ADMIN_TOKEN }} }}\n\
              \x20 github:\n    module: github\n    browser_login:\n      client_id: \"Iv1.e2eclient\"\n\
              \x20     client_secret: {{ env: BUSBAR_GH_CLIENT_SECRET }}\n\
