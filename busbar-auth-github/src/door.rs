@@ -91,9 +91,13 @@ const TAIL: AuthTail = AuthTail {
     caps: CAP_LOGIN,
     facts: 0,
     login_kind: LOGIN_KIND_REDIRECT,
-    _reserved: 0,
+    // No inbound point: the plugin does not verify (the tail states no `CAP_INBOUND`).
+    inbound_points: 0,
     styles: std::ptr::null(),
     styles_len: 0,
+    operator_principal: abi_str(""),
+    credential_kinds: std::ptr::null(),
+    credential_kinds_len: 0,
 };
 
 /// This plugin's Statement.

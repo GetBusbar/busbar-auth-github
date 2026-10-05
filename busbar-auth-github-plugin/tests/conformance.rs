@@ -288,27 +288,29 @@ const ABSENT: Span = Span {
     len: 0,
 };
 
+/// An all-zero `T`: every `in`/`out` here is plain C data, all-zero a valid value of each (the
+/// fields a test does not name stay zero, so a field the ABI appends needs no edit here).
+fn z<T>() -> T {
+    // SAFETY: plain C data; all-zero is a valid value of each type this file zeroes.
+    unsafe { std::mem::zeroed() }
+}
+
 fn identify_out() -> IdentifyOut {
-    IdentifyOut {
-        head: out_head(),
-        verdict: 0,
-        needed_groups: 0,
-        needed_bytes: 0,
-        identity: IdentityOut {
-            subject: ABSENT,
-            key_id: ABSENT,
-            key_name: ABSENT,
-            user: ABSENT,
-            provider: ABSENT,
-            name: ABSENT,
-            claims: ABSENT,
-            claims_fmt: 0,
-            flags: 0,
-            ttl_secs: 0,
-            groups_len: 0,
-            _reserved: 0,
-        },
+    let mut o: IdentifyOut = z();
+    o.head = out_head();
+    let i: &mut IdentityOut = &mut o.identity;
+    for span in [
+        &mut i.subject,
+        &mut i.key_id,
+        &mut i.key_name,
+        &mut i.user,
+        &mut i.provider,
+        &mut i.name,
+        &mut i.claims,
+    ] {
+        *span = ABSENT;
     }
+    o
 }
 
 /// The host's identity buffer over `bytes` and `groups`.
@@ -325,26 +327,18 @@ fn identity_buf(bytes: &mut [u8], groups: &mut [Span]) -> IdentityBuf {
 fn verify(p: &Plugin<Auth>) -> String {
     let (mut bytes, mut groups) = (vec![0u8; 256], vec![ABSENT; 4]);
     let credential = b"gho_opaque";
-    let mut f = Frame::new(
-        VerifyIn {
-            head: in_head(),
-            credential: secret_blob(credential),
-            carrier: std::ptr::null(),
-            carrier_len: 0,
-            request: RequestFacts {
-                method: s("GET"),
-                authority: s("node.example"),
-                canonical_path: s("/v1/models"),
-                query: NO_STR,
-                timestamp: 0,
-                body_hash: [0; 32],
-                body_hash_present: 0,
-                _reserved: 0,
-            },
-            out_buf: identity_buf(&mut bytes, &mut groups),
-        },
-        identify_out(),
-    );
+    let mut i: VerifyIn = z();
+    i.head = in_head();
+    i.credential = secret_blob(credential);
+    i.request = RequestFacts {
+        method: s("GET"),
+        authority: s("node.example"),
+        canonical_path: s("/v1/models"),
+        query: NO_STR,
+        ..z()
+    };
+    i.out_buf = identity_buf(&mut bytes, &mut groups);
+    let mut f = Frame::new(i, identify_out());
     spelled(&p.call(auth::slot::VERIFY, &mut f))
 }
 
@@ -394,19 +388,14 @@ fn begin_login(p: &Plugin<Auth>) -> Vec<String> {
 fn complete_login(p: &Plugin<Auth>) -> String {
     let (mut bytes, mut groups) = (vec![0u8; 256], vec![ABSENT; 4]);
     let (code, verifier) = (b"the-code", b"conformance-verifier");
-    let mut f = Frame::new(
-        CompleteLoginIn {
-            head: in_head(),
-            code: secret_blob(code),
-            state: s("conformance-state"),
-            redirect_uri: s("https://node.example/auth/token"),
-            code_verifier: secret_blob(verifier),
-            submitted: std::ptr::null(),
-            submitted_len: 0,
-            out_buf: identity_buf(&mut bytes, &mut groups),
-        },
-        identify_out(),
-    );
+    let mut i: CompleteLoginIn = z();
+    i.head = in_head();
+    i.code = secret_blob(code);
+    i.state = s("conformance-state");
+    i.redirect_uri = s("https://node.example/auth/token");
+    i.code_verifier = secret_blob(verifier);
+    i.out_buf = identity_buf(&mut bytes, &mut groups);
+    let mut f = Frame::new(i, identify_out());
     let c = p.call(auth::slot::COMPLETE_LOGIN, &mut f);
     format!("complete_login {} verdict={}", spelled(&c), f.out.verdict)
 }
