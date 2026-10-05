@@ -26,7 +26,9 @@ use busbar_contract::abi::auth::{
     BEGIN_AUTHORIZE, CANCEL_ABANDONED, CAP_LOGIN, IDENTITY_HAS_TTL, LOGIN_BAD_CREDENTIAL,
     LOGIN_IDENTITY, LOGIN_KIND_REDIRECT, LOGIN_OUTAGE, SPAN_ABSENT,
 };
-use busbar_contract::abi::host::conn::connector::{Need, DIRECTION_OUTBOUND, EGRESS_DEFAULT};
+use busbar_contract::abi::host::conn::connector::{
+    Need, DIRECTION_OUTBOUND, EGRESS_DEFAULT, KEEP_NAMED,
+};
 use busbar_contract::abi::mechanism::call::{AbiStr, Blob, Outcome, Span, BLOB_ABSENT};
 use busbar_contract::abi::mechanism::door::{KindTailHead, Rewrite, Statement, REWRITE_ALIAS};
 use busbar_contract::abi::mechanism::ticket::Ticket;
@@ -75,6 +77,10 @@ const NEEDS: &[Need] = &[Need {
     keep_response_headers: std::ptr::null(),
     keep_response_headers_len: 0,
     timeout_ms: crate::login::HOP_TIMEOUT_MS,
+    keep_mode: KEEP_NAMED,
+    _reserved: 0,
+    deny_response_headers: std::ptr::null(),
+    deny_response_headers_len: 0,
 }];
 /// A redirect login, nothing else.
 const TAIL: AuthTail = AuthTail {
