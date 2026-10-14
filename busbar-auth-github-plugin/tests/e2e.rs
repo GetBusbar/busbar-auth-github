@@ -124,7 +124,9 @@ fn pack_github(pack_bin: &std::path::Path, so: &std::path::Path, out: &std::path
             "--kind",
             "auth",
             "--version",
-            "0.0.0-e2e",
+            // The release version is the plugin's own, the one its Statement states (the pack tool
+            // refuses any other).
+            env!("CARGO_PKG_VERSION"),
             "--publisher",
             "busbar",
             "--description",

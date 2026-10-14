@@ -7,14 +7,14 @@ Thanks for your interest in improving `busbar-auth-github`.
 - Be respectful and constructive in all project spaces (see
   [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md)).
 - By contributing, you agree your contributions are licensed under the project's
-  [MIT](LICENSE) license.
+  [Apache-2.0](LICENSE) license.
 - Security issues go through [SECURITY.md](SECURITY.md), **not** public issues.
 
 ## Layout
 
 Every busbar plugin repo has the same skeleton. This one is a two-crate Cargo workspace: `auth-github/` holds the plugin's logic and `auth-github-plugin/` is the thin `cdylib` that packages it as a droppable `kind: auth` plugin. busbar itself is a git dependency
 pinned to the commit in `.busbar-ref`. The CI, release, dependency and lint configuration
-are rendered by `busbar-release plugin sync` from the fleet template (GetBusbar/busbar-release
+are rendered by `busbar-release plugin heal` from the fleet template (GetBusbar/busbar-release
 `template/`), [busbar's plugin registry](https://github.com/GetBusbar/busbar/blob/main/plugins.yaml)
 and busbar's dependency policy (`.github/fleet/deps.toml` and the root `[workspace.dependencies]`
 at the pin); change them there, not here.
