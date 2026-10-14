@@ -97,7 +97,10 @@ fn bind(d: &Dispatcher) -> Bind {
         max_inflight_cap: 64,
         sink: Arc::new(NoSink),
         dispatcher: d.adopter(),
-        conns: busbar_plugin_loader::dispatch::ConnTable::NoNeeds,
+        // The door declares its `http` need (the login's token exchange); this transcript binds it
+        // as a PROBE, with no connection table (nothing opened to the network), as it bound before
+        // the loader named the table.
+        conns: busbar_plugin_loader::dispatch::ConnTable::Probe,
     }
 }
 
