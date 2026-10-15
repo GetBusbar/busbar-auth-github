@@ -30,13 +30,13 @@
 //! [`LoginFlow`] per ticket and each [`Exchange`] one framed `exchange()` over the plugin's need.
 
 use crate::guard::{collect_allowed_hosts, sanitize_hop_header, vet_hop_url, Refused};
+use crate::held::Held;
 use crate::{
     build_github_authorize_url, build_orgs_get, build_principal, build_token_exchange,
     build_userinfo_get, is_json_array, parse_access_token, parse_org_groups, parse_user, GhUser,
     GitHubConfig,
 };
 use busbar_contract::auth::{CompleteLogin, LoginHop, LoginHttpResponse, LoginOutcome, Principal};
-use busbar_contract::Redacted;
 use serde_json::Value;
 use std::collections::HashSet;
 use std::fmt;
@@ -122,7 +122,7 @@ pub enum LoginStep {
 /// The state 1.5.5 kept per flow between hops (its `PendingLogin`), owned by the flow.
 #[derive(Default)]
 struct FlowState {
-    access_token: Option<Redacted<String>>,
+    access_token: Option<Held<String>>,
     user: Option<GhUser>,
 }
 
@@ -136,7 +136,7 @@ pub struct LoginFlow {
     inflight: Option<HopRequest>,
     done: Option<LoginStep>,
     /// The nonce the kernel minted at begin (`CompleteLoginIn.nonce`), bound to any `id_token`.
-    nonce: Option<Redacted<String>>,
+    nonce: Option<Held<String>>,
 }
 
 impl fmt::Debug for LoginFlow {
@@ -153,7 +153,7 @@ impl fmt::Debug for LoginFlow {
 /// The GitHub login, holding its own client secret.
 pub struct GithubLogin {
     cfg: GitHubConfig,
-    client_secret: Option<Redacted<String>>,
+    client_secret: Option<Held<String>>,
     allowed_hosts: HashSet<String>,
 }
 
@@ -191,7 +191,7 @@ impl GithubLogin {
             cfg,
             client_secret: client_secret
                 .filter(|s| !s.is_empty())
-                .map(|s| Redacted::new(s.to_string())),
+                .map(|s| Held::new(s.to_string())),
             allowed_hosts: collect_allowed_hosts(&raw),
         })
     }
@@ -235,7 +235,7 @@ impl GithubLogin {
             turns: 0,
             inflight: None,
             done: None,
-            nonce: nonce.map(|n| Redacted::new(n.to_string())),
+            nonce: nonce.map(|n| Held::new(n.to_string())),
         }
     }
 
@@ -276,7 +276,7 @@ impl GithubLogin {
                     // trusted. GitHub issues no id_token, so this never fires against github.com.
                     if !id_token_nonce_binds(
                         &body,
-                        flow.nonce.as_ref().map(|n| n.expose_secret().as_str()),
+                        flow.nonce.as_ref().map(|n| n.reveal().as_str()),
                     ) {
                         return finish(flow, LoginStep::SecurityCheckFailed);
                     }
@@ -325,7 +325,7 @@ impl GithubLogin {
         if let Some(token) = parse_access_token(&resp.body) {
             let hop = build_userinfo_get(&self.cfg, &token);
             flow.state = FlowState {
-                access_token: Some(Redacted::new(token)),
+                access_token: Some(Held::new(token)),
                 user: None,
             };
             return LoginOutcome::Exchange(hop);
@@ -351,7 +351,7 @@ impl GithubLogin {
         let Some(token) = &flow.state.access_token else {
             return LoginOutcome::Reject;
         };
-        let hop = build_orgs_get(&self.cfg, token.expose_secret());
+        let hop = build_orgs_get(&self.cfg, token.reveal());
         flow.state.user = Some(user);
         LoginOutcome::Exchange(hop)
     }
@@ -367,9 +367,9 @@ impl GithubLogin {
             match &self.client_secret {
                 Some(secret) => {
                     if let Some(slot) = form.iter_mut().find(|(k, _)| k == field) {
-                        slot.1 = secret.expose_secret().clone();
+                        slot.1 = secret.reveal().clone();
                     } else {
-                        form.push((field.to_string(), secret.expose_secret().clone()));
+                        form.push((field.to_string(), secret.reveal().clone()));
                     }
                 }
                 None => form.retain(|(k, _)| k != field),

@@ -47,13 +47,14 @@
 
 pub mod door;
 pub mod guard;
+mod held;
 pub mod login;
 
+use crate::held::Held;
 use busbar_contract::auth::{
     AuthModule, AuthVerdict, BeginLogin, CompleteLogin, LoginHop, LoginHttpResponse, LoginModule,
     LoginOutcome, Principal,
 };
-use busbar_contract::Redacted;
 use serde::Deserialize;
 use serde_json::Value;
 use std::collections::HashMap;
@@ -480,7 +481,7 @@ const PENDING_MAX: usize = 4096;
 struct PendingLogin {
     /// The opaque GitHub bearer, wrapped so a stray `{:?}` on this struct, or on the map that holds
     /// it, cannot print it. Nothing formats these today; this is to keep it that way.
-    access_token: Redacted<String>,
+    access_token: Held<String>,
     user: Option<GhUser>,
     /// When this entry was stashed, for the TTL sweep.
     inserted_at: Instant,
@@ -629,7 +630,7 @@ impl GithubModule {
         pending.insert(
             key.to_string(),
             PendingLogin {
-                access_token: Redacted::new(token),
+                access_token: Held::new(token),
                 user: None,
                 inserted_at: Instant::now(),
             },
@@ -674,10 +675,7 @@ impl GithubModule {
         entry.user = Some(user);
         // The `/user/orgs` GET is authenticated with the SAME opaque access token stashed at the token
         // step, attached via the ABI v2 `headers` field.
-        LoginOutcome::Exchange(build_orgs_get(
-            &self.cfg,
-            entry.access_token.expose_secret(),
-        ))
+        LoginOutcome::Exchange(build_orgs_get(&self.cfg, entry.access_token.reveal()))
     }
 
     /// `/user/orgs` array was fed back: pair the stashed `/user` identity with the parsed
