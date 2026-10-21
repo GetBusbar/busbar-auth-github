@@ -196,7 +196,8 @@ impl GithubLogin {
         })
     }
 
-    /// The parsed config.
+    /// The parsed config (the tests read it; nothing else in the crate does).
+    #[cfg(test)]
     #[must_use]
     pub fn config(&self) -> &GitHubConfig {
         &self.cfg
