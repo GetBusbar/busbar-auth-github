@@ -5,7 +5,7 @@
 //! conformance on the auth kind's memory ABI (v3), run against the busbar rev this repo pins
 //! (`.busbar-ref`).
 //!
-//! The plugin is held two ways at once: LINKED (the logic crate's `door::door`, as a compiled-in
+//! The plugin is held two ways at once: LINKED (the logic crate's `door`, as a compiled-in
 //! row through the loader's `load_linked`) and DROPPED IN (this crate's built cdylib, its door's
 //! Statement rendered and signed into the manifest's `statement` as the pack tool does, packed into
 //! a temp `plugins/` directory, admitted by the loader's scan, and bound from the verified bytes
