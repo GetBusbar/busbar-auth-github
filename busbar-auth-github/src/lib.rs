@@ -40,8 +40,9 @@
 //! On busbar 1.6.0 the plugin holds its own client secret and runs the hop chain itself over its own
 //! need ([`login`]: the same step machine, driven over a one-shot pending exchange; [`guard`]: the
 //! hop guard 1.5.5's core applied). [`door`] is the auth kind's door over it: a compiled-in build
-//! links [`door`], and the `busbar-auth-github-plugin` image exports it. [`GithubModule`] is
-//! the 1.5.5 core-driven shape of the same steps, kept for a custom build that links it statically.
+//! links [`door`], and the `busbar-auth-github-plugin` image exports it. The 1.5.5 core-driven shape
+//! of the same steps (`GithubModule`) is the unit tests' pure model of them: it is built for tests
+//! only and no build links it.
 
 #![forbid(unsafe_code)]
 
