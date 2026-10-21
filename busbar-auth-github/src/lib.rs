@@ -53,15 +53,23 @@ mod login;
 /// THE DOOR: this plugin's one public item (BUSBAR-1.6.0.md l.3567, Crate shape).
 pub use door::door;
 
-use crate::held::Held;
-use busbar_contract::auth::{
-    AuthModule, AuthVerdict, BeginLogin, CompleteLogin, LoginHop, LoginHttpResponse, LoginModule,
-    LoginOutcome, Principal,
-};
+use busbar_contract::auth::{LoginHop, Principal};
 use serde::Deserialize;
 use serde_json::Value;
+
+// What only the test-built `GithubModule` (the module's pure model, driven by the unit tests) names.
+#[cfg(test)]
+use crate::held::Held;
+#[cfg(test)]
+use busbar_contract::auth::{
+    AuthModule, AuthVerdict, BeginLogin, CompleteLogin, LoginHttpResponse, LoginModule,
+    LoginOutcome,
+};
+#[cfg(test)]
 use std::collections::HashMap;
+#[cfg(test)]
 use std::sync::Mutex;
+#[cfg(test)]
 use std::time::Instant;
 
 /// The default OAuth scopes requested: `read:org` (to enumerate the caller's org memberships → groups)
@@ -477,11 +485,14 @@ fn identity_from_user_and_orgs(user_body: &str, orgs_body: Option<&str>) -> Logi
 /// unbounded, every abandoned flow retained a LIVE GitHub access token for the process lifetime and
 /// an anonymous caller could grow the map without limit just by starting flows and letting the
 /// second hop fail. Generous against a real browser round trip, far short of a token's usefulness.
+#[cfg(test)]
 const PENDING_TTL_SECS: u64 = 600;
 
 /// A hard ceiling, independent of the TTL, so a burst cannot outrun the sweep.
+#[cfg(test)]
 const PENDING_MAX: usize = 4096;
 
+#[cfg(test)]
 #[derive(Debug, Clone)]
 struct PendingLogin {
     /// The opaque GitHub bearer, wrapped so a stray `{:?}` on this struct, or on the map that holds
@@ -495,12 +506,14 @@ struct PendingLogin {
 /// The runtime GitHub login module. Verify-path (`AuthModule`) is a deliberate `Pass` (a GitHub opaque
 /// bearer cannot be verified offline; identity is established through the LOGIN flow, which mints a
 /// busbar key the `tokens` module then verifies). The login path (`LoginModule`) drives the hop chain.
+#[cfg(test)]
 struct GithubModule {
     cfg: GitHubConfig,
     /// Per-flow hop state keyed by the flow correlator (see [`correlation_key`]).
     pending: Mutex<HashMap<String, PendingLogin>>,
 }
 
+#[cfg(test)]
 impl GithubModule {
     pub fn new(cfg: GitHubConfig) -> Self {
         Self {
@@ -524,6 +537,7 @@ impl GithubModule {
 /// fallback key would make every uncorrelatable concurrent flow share one `""` slot and
 /// interleave/overwrite each other's stashed token + identity. An uncorrelatable multi-hop flow
 /// cannot be safely threaded, so the hop handlers `Reject` on `None` instead.
+#[cfg(test)]
 fn correlation_key(req: &CompleteLogin) -> Option<String> {
     req.code_verifier
         .clone()
@@ -531,6 +545,7 @@ fn correlation_key(req: &CompleteLogin) -> Option<String> {
         .filter(|s| !s.is_empty())
 }
 
+#[cfg(test)]
 impl AuthModule for GithubModule {
     fn name(&self) -> &'static str {
         "github"
@@ -549,6 +564,7 @@ impl AuthModule for GithubModule {
     }
 }
 
+#[cfg(test)]
 impl LoginModule for GithubModule {
     /// Start browser login: return the GitHub authorize URL (with the CORE-minted `state` and PKCE
     /// `code_challenge`). GitHub CSRF/state is the CORE's job; the module only echoes what the ABI
@@ -600,6 +616,7 @@ impl LoginModule for GithubModule {
     }
 }
 
+#[cfg(test)]
 impl GithubModule {
     /// First `complete_login` call: require the `code`+`redirect_uri`+`code_verifier` triple and emit
     /// the token-exchange `POST` (the CORE injects `client_secret`). A callback missing any of the
