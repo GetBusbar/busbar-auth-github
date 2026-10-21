@@ -27,7 +27,7 @@ use std::path::PathBuf;
 // (the token exchange and the `/user` and `/user/orgs` hops reach the far ends in
 // `conformance.json`), exact crossings, both folds equal, its RED arms kept.
 busbar_plugin_loader::conformance_suite! {
-    door: busbar_auth_github::door::door,
+    door: busbar_auth_github::door::MACRO_DOOR,
     cdylib: "busbar_auth_github_plugin",
     inputs: include_str!("conformance.json"),
 }
@@ -106,7 +106,7 @@ fn bind(d: &Dispatcher) -> Bind {
 
 /// THE LINKED DOOR: the logic crate's door as a compiled-in row.
 fn row() -> LinkedRow {
-    LinkedRow::of(busbar_auth_github::door::door).expect("the door states its row")
+    LinkedRow::of_macro(busbar_auth_github::door::MACRO_DOOR).expect("the door states its row")
 }
 
 fn linked(d: &Dispatcher) -> Plugin<Auth> {
@@ -173,34 +173,31 @@ fn dropped(d: &Dispatcher) -> Plugin<Auth> {
 }
 
 fn json(bytes: &[u8]) -> Blob {
-    Blob {
-        ptr: bytes.as_ptr(),
-        len: bytes.len(),
-        fmt: BLOB_JSON,
-        flags: 0,
+    // SAFETY: the caller keeps `bytes` alive across the call that reads the blob.
+    #[allow(unused_unsafe)]
+    unsafe {
+        Blob::from_raw_parts(bytes.as_ptr(), bytes.len(), BLOB_JSON, 0)
     }
 }
 
 fn secret_blob(bytes: &[u8]) -> Blob {
-    Blob {
-        ptr: bytes.as_ptr(),
-        len: bytes.len(),
-        fmt: BLOB_OCTETS,
-        flags: busbar_contract::abi::mechanism::call::BLOB_SECRET,
+    // SAFETY: the caller keeps `bytes` alive across the call that reads the blob.
+    #[allow(unused_unsafe)]
+    unsafe {
+        Blob::from_raw_parts(
+            bytes.as_ptr(),
+            bytes.len(),
+            BLOB_OCTETS,
+            busbar_contract::abi::mechanism::call::BLOB_SECRET,
+        )
     }
 }
 
 fn s(text: &'static str) -> AbiStr {
-    AbiStr {
-        ptr: text.as_ptr(),
-        len: text.len(),
-    }
+    AbiStr::of(text)
 }
 
-const NO_STR: AbiStr = AbiStr {
-    ptr: std::ptr::null(),
-    len: 0,
-};
+const NO_STR: AbiStr = AbiStr::ABSENT;
 
 /// A call's answer as the transcript spells it: outcome, error text, and whether a lease came back.
 fn spelled(c: &Called) -> String {
@@ -381,11 +378,11 @@ fn begin_login(p: &Plugin<Auth>) -> Vec<String> {
     let url = &f.out.authorize_url;
     // SAFETY: a READY `begin_login` names its URL in plugin memory held under the answer's lease,
     // valid until that lease is released (below, after this copy).
-    let url = if url.ptr.is_null() {
+    let url = if url.is_absent() {
         String::new()
     } else {
-        String::from_utf8_lossy(unsafe { std::slice::from_raw_parts(url.ptr, url.len) })
-            .into_owned()
+        #[allow(unused_unsafe)]
+        String::from_utf8_lossy(unsafe { url.bytes() }).into_owned()
     };
     vec![
         format!(
