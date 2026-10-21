@@ -5,21 +5,21 @@
 //! from a GitHub sign-in. Unlike the OIDC module, GitHub issues an OPAQUE access token and NO
 //! `id_token` JWT, so there is nothing to verify offline against a JWKS: identity comes from GitHub's
 //! REST API (`/user`, `/user/orgs`). The busbar `LoginModule` ABI (auth ABI v2, 1.5.2 token-exchange)
-//! already supports exactly this via the MULTI-HOP [`LoginOutcome::Exchange`] mechanism — the module
+//! already supports exactly this via the MULTI-HOP `LoginOutcome::Exchange` mechanism — the module
 //! DESCRIBES an HTTP hop, the CORE executes it and feeds the response back into `complete_login`,
 //! bounded to a few hops.
 //!
 //! ## The hop sequence this module drives
 //!
-//! 1. `begin_login` → [`LoginOutcome::Authorize`]: the GitHub authorize URL (`client_id`,
+//! 1. `begin_login` → `LoginOutcome::Authorize`: the GitHub authorize URL (`client_id`,
 //!    `redirect_uri`, `scope`, `state`, PKCE `code_challenge`+`S256`). NO `client_secret`.
-//! 2. `complete_login` (has `code`, no token response) → [`LoginOutcome::Exchange`]: `POST` to
+//! 2. `complete_login` (has `code`, no token response) → `LoginOutcome::Exchange`: `POST` to
 //!    `.../login/oauth/access_token` with `client_id`+`code`+`redirect_uri`+`code_verifier` and
 //!    `secret_form_field = Some("client_secret")` so the CORE injects the confidential-client secret.
-//! 3. `complete_login` (token response fed back) → [`LoginOutcome::Exchange`]: `GET` `.../user`.
-//! 4. `complete_login` (`/user` fed back) → [`LoginOutcome::Exchange`]: `GET` `.../user/orgs`
+//! 3. `complete_login` (token response fed back) → `LoginOutcome::Exchange`: `GET` `.../user`.
+//! 4. `complete_login` (`/user` fed back) → `LoginOutcome::Exchange`: `GET` `.../user/orgs`
 //!    (skipped when `fetch_orgs = false`, in which case identity is established here).
-//! 5. `complete_login` (`/user/orgs` fed back) → [`LoginOutcome::Identify`]: `github:<login>` with
+//! 5. `complete_login` (`/user/orgs` fed back) → `LoginOutcome::Identify`: `github:<login>` with
 //!    `github:org/<org-login>` groups.
 //!
 //! The confidential-client SECRET is the CORE's alone — it is injected only into the token-exchange
@@ -29,18 +29,18 @@
 //!
 //! ## Authenticated GET hops (auth ABI v2)
 //!
-//! [`busbar_contract::auth::LoginHop`] carries a `headers` field (auth ABI v2), and GitHub REQUIRES an
-//! `Authorization: Bearer <token>` and a `User-Agent` header on every REST call. [`userinfo_headers`]
-//! computes those headers; [`build_userinfo_get`] and [`build_orgs_get`] attach them directly to the
+//! `busbar_contract::auth::LoginHop` carries a `headers` field (auth ABI v2), and GitHub REQUIRES an
+//! `Authorization: Bearer <token>` and a `User-Agent` header on every REST call. `userinfo_headers`
+//! computes those headers; `build_userinfo_get` and `build_orgs_get` attach them directly to the
 //! `/user` and `/user/orgs` hops. The CORE sanitizes and attaches them (CR/LF/NUL + hop-control
 //! headers rejected; host must be operator-allowlisted) before executing the hop.
 //!
 //! ## 1.6.0: the plugin runs its own hops
 //!
 //! On busbar 1.6.0 the plugin holds its own client secret and runs the hop chain itself over its own
-//! need ([`login`]: the same step machine, driven over a one-shot pending exchange; [`guard`]: the
-//! hop guard 1.5.5's core applied). [`door`] is the auth kind's door over it: a compiled-in build
-//! links [`door`], and the `busbar-auth-github-plugin` image exports it. The 1.5.5 core-driven shape
+//! need (`login`: the same step machine, driven over a one-shot pending exchange; `guard`: the
+//! hop guard 1.5.5's core applied). `door` is the auth kind's door over it: a compiled-in build
+//! links `door`, and the `busbar-auth-github-plugin` image exports it. The 1.5.5 core-driven shape
 //! of the same steps (`GithubModule`) is the unit tests' pure model of them: it is built for tests
 //! only and no build links it.
 
@@ -137,7 +137,8 @@ struct GitHubConfig {
     /// this module) executes every hop, so this value has no delivery channel to the hop executor yet;
     /// it is accepted here so the config is forward-compatible and a GHES operator's intent is captured.
     #[serde(default)]
-    #[allow(dead_code)] // accepted for `deny_unknown_fields`; no hop executor reads it yet
+    #[allow(dead_code)]
+    // never read: the field exists only so `deny_unknown_fields` still accepts the 1.5.5 setting (see above)
     pub ca_cert_pem: Option<String>,
 }
 
