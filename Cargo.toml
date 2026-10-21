@@ -35,12 +35,12 @@ repository = "https://github.com/GetBusbar/busbar-auth-github"
 needless_update = "allow"
 
 [workspace.dependencies]
-busbar-contract = { git = "https://github.com/GetBusbar/busbar", rev = "08d4d7c501ccb9f734a8d088c242addb2e5fb444" }
-busbar-plugin-loader = { git = "https://github.com/GetBusbar/busbar", rev = "08d4d7c501ccb9f734a8d088c242addb2e5fb444" }
+busbar-contract = { git = "https://github.com/GetBusbar/busbar", rev = "59fbf4f99203652652ebde869c9dbe232af0e967" }
+busbar-plugin-loader = { git = "https://github.com/GetBusbar/busbar", rev = "59fbf4f99203652652ebde869c9dbe232af0e967" }
 # THE SUITE'S HOST CONNECTOR (dev-only; auth-github-plugin/tests/support/conformance_host.rs,
 # rendered because the declares file states network needs): busbar's connector and its TLS
 # test kit at the pin, and the transport framers those needs name, at the revs busbar links.
-busbar-core-connector = { git = "https://github.com/GetBusbar/busbar", rev = "08d4d7c501ccb9f734a8d088c242addb2e5fb444", features = ["test-support"] }
+busbar-core-connector = { git = "https://github.com/GetBusbar/busbar", rev = "59fbf4f99203652652ebde869c9dbe232af0e967", features = ["test-support"] }
 busbar-transport-http = { git = "https://github.com/GetBusbar/busbar-transport-http", rev = "12b078389496d4c1fd81b730f5d9d0887537c3b0" }
 busbar-transport-tcp = { git = "https://github.com/GetBusbar/busbar-transport-tcp", rev = "223ec3f02000de94089a1752635b9e206f7492e5" }
 # busbar's root [workspace.dependencies], third-party rows, at 08d4d7c501ccb9f734a8d088c242addb2e5fb444
@@ -136,4 +136,4 @@ ulid = "1"
 # patches them to its own tree. The source is busbar spelled through www.github.com: Cargo
 # refuses a patch that names the source it patches.
 [patch."https://github.com/GetBusbar/busbar"]
-busbar-contract = { git = "https://www.github.com/GetBusbar/busbar", rev = "08d4d7c501ccb9f734a8d088c242addb2e5fb444" }
+busbar-contract = { git = "https://www.github.com/GetBusbar/busbar", rev = "59fbf4f99203652652ebde869c9dbe232af0e967" }

@@ -2,7 +2,7 @@
 // Copyright (C) 2026 Busbar Inc and contributors
 
 //! The **GitHub-OAuth login module as a droppable busbar plugin**: the logic crate re-exported whole,
-//! and its door (`busbar_auth_github::door::door`, the auth kind's table, login-capable) exported as
+//! and its door (`busbar_auth_github::door`, the auth kind's table, login-capable) exported as
 //! this image's ONE symbol, `busbar_plugin_door` (`export_door!`). Build it, drop the packed tarball
 //! into the engine's plugins folder, add `github` to `auth.chain` with a `browser_login` block, and
 //! configure the module `config`. The plugin holds its own client secret (the Statement's secret
@@ -13,10 +13,10 @@
 //! exports nothing, so a build that links it carries no door symbol.
 #![deny(unsafe_code)]
 
-pub use busbar_auth_github::*;
+pub use busbar_auth_github::door;
 
 /// The exported door: the macro's `#[no_mangle]` symbol is the one exemption.
 #[allow(unsafe_code)]
 mod exported {
-    busbar_contract::export_door!(busbar_auth_github::door::door);
+    busbar_contract::export_door!(busbar_auth_github::door);
 }

@@ -5,7 +5,7 @@
 //! conformance on the auth kind's memory ABI (v3), run against the busbar rev this repo pins
 //! (`.busbar-ref`).
 //!
-//! The plugin is held two ways at once: LINKED (the logic crate's `door::door`, as a compiled-in
+//! The plugin is held two ways at once: LINKED (the logic crate's `door`, as a compiled-in
 //! row through the loader's `load_linked`) and DROPPED IN (this crate's built cdylib, its door's
 //! Statement rendered and signed into the manifest's `statement` as the pack tool does, packed into
 //! a temp `plugins/` directory, admitted by the loader's scan, and bound from the verified bytes
@@ -26,8 +26,16 @@ use std::path::PathBuf;
 // crate's cdylib through the one loader, driven by the auth kind's script over the login family
 // (the token exchange and the `/user` and `/user/orgs` hops reach the far ends in
 // `conformance.json`), exact crossings, both folds equal, its RED arms kept.
+/// The logic crate's bare `door`, as the loader takes a door it did not read from a library.
+#[allow(unused_unsafe)]
+fn loaded() -> LoadedDoor {
+    // SAFETY: `door` is this crate's own `plugin_door!` entry: it answers the `'static`, fully
+    // initialised door the SDK laid out.
+    unsafe { LoadedDoor::from_raw(busbar_auth_github::door) }
+}
+
 busbar_plugin_loader::conformance_suite! {
-    door: busbar_auth_github::door::door,
+    loaded: loaded(),
     cdylib: "busbar_auth_github_plugin",
     inputs: include_str!("conformance.json"),
 }
@@ -46,13 +54,13 @@ use busbar_plugin_loader::dispatch::kinds::auth::Auth;
 use busbar_plugin_loader::dispatch::kinds::secret::Secret;
 use busbar_plugin_loader::dispatch::{
     in_head, load_dropped, load_dropped_bytes, load_linked, out_head, rendering_of_library, Bind,
-    Called, DispatchConfig, Dispatcher, Frame, LinkedRow, NoSink, Plugin,
+    Called, DispatchConfig, Dispatcher, Frame, LinkedRow, LoadedDoor, NoSink, Plugin,
 };
 use busbar_plugin_loader::sign::{sign, Manifest, SigningKey, TrustPolicy};
 
 /// The plugin's registry name and alias (what an operator's `auth.chain` names).
-const NAME: &str = busbar_auth_github::door::NAME;
-const ALIAS: &str = busbar_auth_github::door::ALIAS;
+const NAME: &str = "busbar-auth-github";
+const ALIAS: &str = "github";
 
 /// The operator config both arms are opened with.
 const CFG: &str = r#"{"client_id":"Iv1.conformance","fetch_orgs":true}"#;
@@ -106,7 +114,7 @@ fn bind(d: &Dispatcher) -> Bind {
 
 /// THE LINKED DOOR: the logic crate's door as a compiled-in row.
 fn row() -> LinkedRow {
-    LinkedRow::of(busbar_auth_github::door::door).expect("the door states its row")
+    LinkedRow::of_loaded(loaded()).expect("the door states its row")
 }
 
 fn linked(d: &Dispatcher) -> Plugin<Auth> {
@@ -173,34 +181,31 @@ fn dropped(d: &Dispatcher) -> Plugin<Auth> {
 }
 
 fn json(bytes: &[u8]) -> Blob {
-    Blob {
-        ptr: bytes.as_ptr(),
-        len: bytes.len(),
-        fmt: BLOB_JSON,
-        flags: 0,
+    // SAFETY: the caller keeps `bytes` alive across the call that reads the blob.
+    #[allow(unused_unsafe)]
+    unsafe {
+        Blob::from_raw_parts(bytes.as_ptr(), bytes.len(), BLOB_JSON, 0)
     }
 }
 
 fn secret_blob(bytes: &[u8]) -> Blob {
-    Blob {
-        ptr: bytes.as_ptr(),
-        len: bytes.len(),
-        fmt: BLOB_OCTETS,
-        flags: busbar_contract::abi::mechanism::call::BLOB_SECRET,
+    // SAFETY: the caller keeps `bytes` alive across the call that reads the blob.
+    #[allow(unused_unsafe)]
+    unsafe {
+        Blob::from_raw_parts(
+            bytes.as_ptr(),
+            bytes.len(),
+            BLOB_OCTETS,
+            busbar_contract::abi::mechanism::call::BLOB_SECRET,
+        )
     }
 }
 
 fn s(text: &'static str) -> AbiStr {
-    AbiStr {
-        ptr: text.as_ptr(),
-        len: text.len(),
-    }
+    AbiStr::of(text)
 }
 
-const NO_STR: AbiStr = AbiStr {
-    ptr: std::ptr::null(),
-    len: 0,
-};
+const NO_STR: AbiStr = AbiStr::ABSENT;
 
 /// A call's answer as the transcript spells it: outcome, error text, and whether a lease came back.
 fn spelled(c: &Called) -> String {
@@ -381,11 +386,11 @@ fn begin_login(p: &Plugin<Auth>) -> Vec<String> {
     let url = &f.out.authorize_url;
     // SAFETY: a READY `begin_login` names its URL in plugin memory held under the answer's lease,
     // valid until that lease is released (below, after this copy).
-    let url = if url.ptr.is_null() {
+    let url = if url.is_absent() {
         String::new()
     } else {
-        String::from_utf8_lossy(unsafe { std::slice::from_raw_parts(url.ptr, url.len) })
-            .into_owned()
+        #[allow(unused_unsafe)]
+        String::from_utf8_lossy(unsafe { url.bytes() }).into_owned()
     };
     vec![
         format!(
@@ -517,5 +522,16 @@ fn an_auth_door_loaded_as_another_kind_is_refused() {
     assert!(
         load_dropped::<Secret>(&cdylib(), &rendering(), bind(&d)).is_err(),
         "an auth library must not load as secret"
+    );
+}
+
+/// The door's Statement carries the whole `declares` document under `EXT_DECLARES`.
+#[test]
+fn the_statement_carries_the_declares_document() {
+    let row = row();
+    let read = busbar_contract::abi::mechanism::rendering::read(&row.statement).unwrap();
+    assert_eq!(
+        busbar_contract::abi::mechanism::extensions::declares(&read.extensions.bytes),
+        Some(&include_bytes!("../../busbar-auth-github/declares.json")[..]),
     );
 }

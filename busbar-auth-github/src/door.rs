@@ -30,7 +30,7 @@ use busbar_contract::abi::host::conn::connector::{
     Need, DIRECTION_OUTBOUND, EGRESS_DEFAULT, KEEP_NAMED,
 };
 use busbar_contract::abi::mechanism::call::{AbiStr, Blob, Outcome, Span, BLOB_ABSENT};
-use busbar_contract::abi::mechanism::door::{KindTailHead, Rewrite, Statement, REWRITE_ALIAS};
+use busbar_contract::abi::mechanism::door::{Rewrite, Statement, REWRITE_ALIAS};
 use busbar_contract::abi::mechanism::ticket::Ticket;
 use busbar_contract::abi::sdk::auth_door::with_tail;
 use busbar_contract::abi::sdk::conn::Connector;
@@ -50,10 +50,7 @@ pub const ALIAS: &str = "github";
 /// `OpenIn.secrets[0]`.
 pub const CLIENT_SECRET_KEY: &str = "client_secret";
 
-const ABSENT: AbiStr = AbiStr {
-    ptr: std::ptr::null(),
-    len: 0,
-};
+const ABSENT: AbiStr = AbiStr::ABSENT;
 const SECRET_REFS: &[AbiStr] = &[abi_str(CLIENT_SECRET_KEY)];
 const REWRITES: &[Rewrite] = &[Rewrite {
     class: REWRITE_ALIAS,
@@ -66,50 +63,49 @@ const NEED: u32 = 0;
 /// The one need: outbound to the IdP over the `http` transport (the scheme the http framer
 /// claims; an `https` target is secured by the connector), its target named per hop (token,
 /// `/user`, `/user/orgs`), bounded by 1.5.5's per-hop timeout.
-const NEEDS: &[Need] = &[Need {
-    direction: DIRECTION_OUTBOUND,
-    egress_class: EGRESS_DEFAULT,
-    transport: abi_str("http"),
-    auth: ABSENT,
-    target_from: ABSENT,
-    trust_from: ABSENT,
-    details: Blob::ABSENT,
-    keep_response_headers: std::ptr::null(),
-    keep_response_headers_len: 0,
-    timeout_ms: crate::login::HOP_TIMEOUT_MS,
-    keep_mode: KEEP_NAMED,
-    _reserved: 0,
-    deny_response_headers: std::ptr::null(),
-    deny_response_headers_len: 0,
+const NEEDS: &[Need] = &[{
+    let mut n = Need::EMPTY;
+    n.direction = DIRECTION_OUTBOUND;
+    n.egress_class = EGRESS_DEFAULT;
+    n.transport = abi_str("http");
+    n.auth = ABSENT;
+    n.target_from = ABSENT;
+    n.trust_from = ABSENT;
+    n.details = Blob::ABSENT;
+    n.timeout_ms = crate::login::HOP_TIMEOUT_MS;
+    n.keep_mode = KEEP_NAMED;
+    n
 }];
 /// A redirect login, nothing else.
-const TAIL: AuthTail = AuthTail {
-    head: KindTailHead {
-        size: std::mem::size_of::<AuthTail>() as u32,
-        _reserved: 0,
-    },
-    caps: CAP_LOGIN,
-    facts: 0,
-    login_kind: LOGIN_KIND_REDIRECT,
+const TAIL: AuthTail = {
+    let mut t = AuthTail::EMPTY;
+    t.caps = CAP_LOGIN;
+    t.login_kind = LOGIN_KIND_REDIRECT;
     // No inbound point: the plugin does not verify (the tail states no `CAP_INBOUND`).
-    inbound_points: 0,
-    styles: std::ptr::null(),
-    styles_len: 0,
-    operator_principal: abi_str(""),
-    credential_kinds: std::ptr::null(),
-    credential_kinds_len: 0,
+    t.operator_principal = abi_str("");
+    t
 };
 
+busbar_contract::statement_extensions!(
+    /// The Statement's extensions: this plugin's whole `declares` document (BUSBAR-1.6.0.md l.246).
+    EXTENSIONS: [(
+        busbar_contract::abi::mechanism::extensions::EXT_DECLARES,
+        include_bytes!("../declares.json")
+    )]
+);
+
 /// This plugin's Statement.
-pub const STATEMENT: Statement = Statement {
-    secret_refs: SECRET_REFS.as_ptr(),
-    secret_refs_len: SECRET_REFS.len(),
-    rewrites: REWRITES.as_ptr(),
-    rewrites_len: REWRITES.len(),
-    needs: NEEDS.as_ptr(),
-    needs_len: NEEDS.len(),
-    ..with_tail(statement(NAME, env!("CARGO_PKG_VERSION"), 64), &TAIL)
-};
+pub const STATEMENT: Statement = with_tail(
+    {
+        let mut s = statement(NAME, env!("CARGO_PKG_VERSION"), 64)
+            .with_secret_refs(SECRET_REFS)
+            .with_rewrites(REWRITES)
+            .with_needs(NEEDS);
+        s.extensions = EXTENSIONS;
+        s
+    },
+    &TAIL,
+);
 
 /// The most short answers kept for their retry at once.
 const ANSWERED_MAX: usize = 1024;
@@ -181,7 +177,7 @@ impl Life for Github {
 
 /// A lent string, `None` when absent or not UTF-8.
 fn text(s: Lent<'_, AbiStr>) -> Option<&str> {
-    if s.ptr.is_null() {
+    if s.is_absent() {
         return None;
     }
     s.as_str().ok()
@@ -189,7 +185,7 @@ fn text(s: Lent<'_, AbiStr>) -> Option<&str> {
 
 /// A lent blob as UTF-8, `None` when absent or not UTF-8.
 fn blob_text(b: Lent<'_, Blob>) -> Option<&str> {
-    if b.fmt == BLOB_ABSENT || b.ptr.is_null() {
+    if b.is_absent() {
         return None;
     }
     std::str::from_utf8(b.bytes()).ok()
@@ -213,9 +209,9 @@ impl SafeSlot for Begin {
             return Outcome::Refused;
         };
         let (Some(redirect_uri), Some(state), Some(challenge)) = (
-            text(input.field(|i| &i.redirect_uri)),
-            text(input.field(|i| &i.state)),
-            text(input.field(|i| &i.code_challenge)),
+            text(input.redirect_uri()),
+            text(input.state()),
+            text(input.code_challenge()),
         ) else {
             return out.fail(Refusal::failed(
                 "begin_login: redirect_uri, state and code_challenge are required UTF-8",
@@ -398,7 +394,7 @@ impl SafeSlot for Complete {
             return Outcome::Refused;
         }
         let g = h.life();
-        let buf = input.field(|i| &i.out_buf);
+        let buf = input.out_buf();
         let reached = g.answered().remove(&ticket);
         if let Some(p) = reached {
             return identify(g, ticket, p, buf, &mut out);
@@ -408,9 +404,9 @@ impl SafeSlot for Complete {
             Some(p) => *p,
             None => Parked {
                 flow: login.start(
-                    blob_text(input.field(|i| &i.code)),
-                    text(input.field(|i| &i.redirect_uri)),
-                    blob_text(input.field(|i| &i.code_verifier)),
+                    blob_text(input.code()),
+                    text(input.redirect_uri()),
+                    blob_text(input.code_verifier()),
                     None,
                 ),
                 wire: None,
