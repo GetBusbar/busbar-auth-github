@@ -45,10 +45,13 @@
 
 #![forbid(unsafe_code)]
 
-pub mod door;
-pub mod guard;
+mod door;
+mod guard;
 mod held;
-pub mod login;
+mod login;
+
+/// THE DOOR: this plugin's one public item (BUSBAR-1.6.0.md l.3567, Crate shape).
+pub use door::door;
 
 use crate::held::Held;
 use busbar_contract::auth::{
@@ -96,7 +99,7 @@ fn default_true() -> bool {
 /// (`browser_login.client_secret`) and injects it into the token-exchange hop, exactly like OIDC.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct GitHubConfig {
+struct GitHubConfig {
     /// The GitHub OAuth App / GitHub App **client id** (required). Presented on the authorize URL and
     /// the token exchange. The matching client SECRET is never here.
     pub client_id: String,
@@ -125,6 +128,7 @@ pub struct GitHubConfig {
     /// this module) executes every hop, so this value has no delivery channel to the hop executor yet;
     /// it is accepted here so the config is forward-compatible and a GHES operator's intent is captured.
     #[serde(default)]
+    #[allow(dead_code)] // accepted for `deny_unknown_fields`; no hop executor reads it yet
     pub ca_cert_pem: Option<String>,
 }
 
@@ -194,7 +198,7 @@ fn scope_value(cfg: &GitHubConfig, extra: &[String]) -> String {
 /// GitHub supports S256 PKCE on the web authorization-code flow (2024+); the `code_challenge` the CORE
 /// minted is always sent. A GitHub OAuth App that has not opted into PKCE simply ignores it, and the
 /// paired `code_verifier` still rides the token exchange harmlessly. See the crate README's PKCE note.
-pub fn build_github_authorize_url(
+fn build_github_authorize_url(
     cfg: &GitHubConfig,
     redirect_uri: &str,
     state: &str,
@@ -221,7 +225,7 @@ pub fn build_github_authorize_url(
 /// `Accept: application/json`. This hop sets no `headers` (simpler than relying on an `Accept` header
 /// surviving every GitHub App / GHES configuration), so [`parse_access_token`] accepts BOTH shapes to
 /// stay robust either way.
-pub fn build_token_exchange(
+fn build_token_exchange(
     cfg: &GitHubConfig,
     code: &str,
     redirect_uri: &str,
@@ -249,7 +253,7 @@ pub fn build_token_exchange(
 /// GitHub recommends. The access token is NOT the confidential-client secret — it is derived by this
 /// module from the token-exchange response and is fine for the module to author directly onto the
 /// hop's `headers` field (auth ABI v2).
-pub fn userinfo_headers(access_token: &str) -> Vec<(String, String)> {
+fn userinfo_headers(access_token: &str) -> Vec<(String, String)> {
     vec![
         (
             "Authorization".to_string(),
@@ -266,7 +270,7 @@ pub fn userinfo_headers(access_token: &str) -> Vec<(String, String)> {
 /// Build the `/user` profile GET hop (no secret), with the `Authorization: Bearer <access_token>` +
 /// `User-Agent` + `Accept` headers ([`userinfo_headers`]) attached via the ABI v2 `headers` field. The
 /// CORE sanitizes and sends them.
-pub fn build_userinfo_get(cfg: &GitHubConfig, access_token: &str) -> LoginHop {
+fn build_userinfo_get(cfg: &GitHubConfig, access_token: &str) -> LoginHop {
     LoginHop {
         method: "GET".to_string(),
         url: user_endpoint(cfg),
@@ -278,7 +282,7 @@ pub fn build_userinfo_get(cfg: &GitHubConfig, access_token: &str) -> LoginHop {
 
 /// Build the `/user/orgs` GET hop (no secret), with the same authenticated headers as
 /// [`build_userinfo_get`].
-pub fn build_orgs_get(cfg: &GitHubConfig, access_token: &str) -> LoginHop {
+fn build_orgs_get(cfg: &GitHubConfig, access_token: &str) -> LoginHop {
     LoginHop {
         method: "GET".to_string(),
         url: orgs_endpoint(cfg),
@@ -290,7 +294,7 @@ pub fn build_orgs_get(cfg: &GitHubConfig, access_token: &str) -> LoginHop {
 
 /// A GitHub `/user` profile, reduced to what identity needs.
 #[derive(Debug, Clone, PartialEq)]
-pub struct GhUser {
+struct GhUser {
     /// The GitHub username (`login`) — the handle used in the `github:<login>` identity of record.
     pub login: String,
     /// The IMMUTABLE numeric account id. A `login` can be renamed, released and re-registered by
@@ -307,7 +311,7 @@ pub struct GhUser {
 /// header. Returns `None` when absent — which covers GitHub's fail-CLOSED case where the token endpoint
 /// answers `HTTP 200` with an `{"error": "..."}` body (a bad/expired code), so a missing token is
 /// treated as a rejection, never a success with an empty token.
-pub fn parse_access_token(body: &str) -> Option<String> {
+fn parse_access_token(body: &str) -> Option<String> {
     let trimmed = body.trim();
     if trimmed.starts_with('{') {
         let v: Value = serde_json::from_str(trimmed).ok()?;
@@ -369,7 +373,7 @@ fn form_decode(s: &str) -> String {
 
 /// Parse a GitHub `/user` response body into a [`GhUser`]. Fail-CLOSED: a missing/empty `login`, a
 /// missing numeric `id`, or non-JSON yields `None` (→ the caller `Reject`s).
-pub fn parse_user(body: &str) -> Option<GhUser> {
+fn parse_user(body: &str) -> Option<GhUser> {
     let v: Value = serde_json::from_str(body.trim()).ok()?;
     let login = v
         .get("login")
@@ -394,7 +398,7 @@ pub fn parse_user(body: &str) -> Option<GhUser> {
 /// `Reject` — a truncated orgs response must NOT be mistaken for "no orgs" and silently drop the user's
 /// org groups (which would lock them out of org-gated roles). A VALID empty array is `Some(vec![])`
 /// (login succeeds with zero groups). Individual entries lacking a non-empty `login` are skipped.
-pub fn parse_org_groups(body: &str) -> Option<Vec<String>> {
+fn parse_org_groups(body: &str) -> Option<Vec<String>> {
     let v: Value = serde_json::from_str(body.trim()).ok()?;
     let arr = v.as_array()?;
     Some(
@@ -434,7 +438,7 @@ pub fn parse_org_groups(body: &str) -> Option<Vec<String>> {
 /// `github:org/<org>` has the same weakness, being likewise a renameable slug. Closing that one needs
 /// the org's numeric id threaded through `parse_org_groups`, a payload change rather than a one-line
 /// addition.
-pub fn build_principal(user: &GhUser, org_groups: Vec<String>) -> Principal {
+fn build_principal(user: &GhUser, org_groups: Vec<String>) -> Principal {
     let mut p = Principal::from_id(format!("github:{}", user.login));
     p.name = Some(user.name.clone().unwrap_or_else(|| user.login.clone()));
     // FIRST, so it is the one an operator reading a principal sees before the org list.
@@ -444,9 +448,10 @@ pub fn build_principal(user: &GhUser, org_groups: Vec<String>) -> Principal {
     p
 }
 
-/// Convenience for tests / a caller holding both bodies at once: `/user` JSON (required) + optional
+/// Convenience for tests: both bodies at once: `/user` JSON (required) + optional
 /// `/user/orgs` JSON → an [`LoginOutcome`]. Missing/invalid `/user` is a fail-closed `Reject`.
-pub fn identity_from_user_and_orgs(user_body: &str, orgs_body: Option<&str>) -> LoginOutcome {
+#[cfg(test)]
+fn identity_from_user_and_orgs(user_body: &str, orgs_body: Option<&str>) -> LoginOutcome {
     let Some(user) = parse_user(user_body) else {
         return LoginOutcome::Reject;
     };
@@ -490,7 +495,7 @@ struct PendingLogin {
 /// The runtime GitHub login module. Verify-path (`AuthModule`) is a deliberate `Pass` (a GitHub opaque
 /// bearer cannot be verified offline; identity is established through the LOGIN flow, which mints a
 /// busbar key the `tokens` module then verifies). The login path (`LoginModule`) drives the hop chain.
-pub struct GithubModule {
+struct GithubModule {
     cfg: GitHubConfig,
     /// Per-flow hop state keyed by the flow correlator (see [`correlation_key`]).
     pending: Mutex<HashMap<String, PendingLogin>>,

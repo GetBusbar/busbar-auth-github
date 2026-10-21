@@ -86,12 +86,24 @@ const TAIL: AuthTail = {
     t
 };
 
+busbar_contract::statement_extensions!(
+    /// The Statement's extensions: this plugin's whole `declares` document (BUSBAR-1.6.0.md l.246).
+    EXTENSIONS: [(
+        busbar_contract::abi::mechanism::extensions::EXT_DECLARES,
+        include_bytes!("../declares.json")
+    )]
+);
+
 /// This plugin's Statement.
 pub const STATEMENT: Statement = with_tail(
-    statement(NAME, env!("CARGO_PKG_VERSION"), 64)
-        .with_secret_refs(SECRET_REFS)
-        .with_rewrites(REWRITES)
-        .with_needs(NEEDS),
+    {
+        let mut s = statement(NAME, env!("CARGO_PKG_VERSION"), 64)
+            .with_secret_refs(SECRET_REFS)
+            .with_rewrites(REWRITES)
+            .with_needs(NEEDS);
+        s.extensions = EXTENSIONS;
+        s
+    },
     &TAIL,
 );
 
