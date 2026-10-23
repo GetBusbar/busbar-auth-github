@@ -29,7 +29,7 @@ permissions:
 
 jobs:
   ci:
-    uses: GetBusbar/busbar/.github/workflows/plugin-ci.yml@08d4d7c501ccb9f734a8d088c242addb2e5fb444
+    uses: GetBusbar/busbar/.github/workflows/plugin-ci.yml@71b70e487bebe5ae2feb1fabf32d8906edf4ccad
     with:
       service: wiremock
       busbar_checkout: true
