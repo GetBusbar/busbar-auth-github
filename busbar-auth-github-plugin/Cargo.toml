@@ -2,11 +2,11 @@
 [package]
 name = "busbar-auth-github-plugin"
 version = "1.6.0"
-publish = false            # first-party signed cdylib, shipped as a packed/signed tarball, not to crates.io
-edition = "2021"
-rust-version = "1.97"
+publish.workspace = true
+edition.workspace = true
+rust-version.workspace = true
 description = "The GitHub-OAuth login module as a droppable busbar plugin — a cdylib exporting the auth kind's door (login-capable, auth ABI v3). Drop it in the plugins folder and add `github` to auth.chain with a browser_login block; the plugin holds its client secret and runs the token exchange over its own need."
-license = "Apache-2.0"
+license.workspace = true
 
 [lib]
 crate-type = ["rlib", "cdylib"]   # cdylib: the dropped-in image exporting the door; rlib: the tests link it

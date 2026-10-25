@@ -6,8 +6,6 @@
 //! step machine).
 
 use super::*;
-use crate::GithubModule;
-use busbar_contract::auth::LoginModule;
 use std::collections::HashMap;
 
 const SECRET: &str = "s3cr3t-client-value";
@@ -45,7 +43,7 @@ impl Script {
             target.to_string(),
             Fetched::Ready(HopResponse {
                 status,
-                body: body.as_bytes().to_vec(),
+                body: body.as_bytes().to_vec().into(),
             }),
         );
         self
@@ -68,6 +66,14 @@ impl Script {
     fn targets(&self) -> Vec<&str> {
         self.issued.iter().map(|r| r.target.as_str()).collect()
     }
+}
+
+/// A request's header fields as plain pairs, for comparison.
+fn plain(fields: &[(String, zeroize::Zeroizing<String>)]) -> Vec<(String, String)> {
+    fields
+        .iter()
+        .map(|(n, v)| (n.clone(), v.as_str().to_string()))
+        .collect()
 }
 
 impl Exchange for Script {
@@ -139,13 +145,13 @@ fn the_token_exchange_carries_the_plugins_own_secret_in_1_5_5_bytes() {
     assert_eq!(token.target, TOKEN_URL);
     assert_eq!(token.timeout_ms, 10_000);
     assert_eq!(
-        String::from_utf8(token.body.clone()).unwrap(),
+        String::from_utf8(token.body.to_vec()).unwrap(),
         "client_id=Iv1.client&code=the-code\
          &redirect_uri=https%3A%2F%2Fnode.example%2Fauth%2Ftoken\
          &code_verifier=the-verifier&client_secret=s3cr3t-client-value"
     );
     assert_eq!(
-        token.fields,
+        plain(&token.fields),
         vec![
             (
                 "content-type".to_string(),
@@ -167,7 +173,7 @@ fn the_rest_gets_carry_the_bearer_and_user_agent() {
         assert_eq!(get.method, "GET");
         assert!(get.body.is_empty());
         assert_eq!(
-            get.fields,
+            plain(&get.fields),
             vec![
                 (
                     "content-type".to_string(),
@@ -337,13 +343,15 @@ fn a_finished_flow_answers_again_without_new_exchanges() {
 }
 
 /// 1.5.5's allowlist is the hosts the OPERATOR wrote: with the bases left at their defaults, 1.5.5
-/// refused the first hop before sending anything ("Couldn't reach your provider"), and so does this.
+/// refused the first hop before sending anything ("Couldn't reach your provider"). OWNER RULING
+/// (sibling/auth): such settings can never log in, so they are now refused at open, explained,
+/// instead of loading and failing every login; nothing is ever sent.
 #[test]
-fn defaulted_bases_are_not_allow_listed_as_in_1_5_5() {
-    let l = GithubLogin::open(r#"{"client_id":"Iv1.client"}"#, Some(SECRET)).unwrap();
-    let mut s = Script::happy();
-    assert_eq!(run(&l, &mut s), LoginStep::Outage);
-    assert!(s.issued.is_empty(), "the secret never left the plugin");
+fn defaulted_bases_are_refused_at_open_explained() {
+    assert_eq!(
+        GithubLogin::open(r#"{"client_id":"Iv1.client"}"#, Some(SECRET)).unwrap_err(),
+        "settings: `token_base` must be written out: the hop allowlist is built only from URLs in the settings"
+    );
 }
 
 #[test]
@@ -452,58 +460,179 @@ fn the_hop_loop_is_bounded() {
     assert_eq!(s.issued.len(), MAX_HOPS);
 }
 
-/// The same bodies through the 1.5.5 step machine (the cold module, driven as 1.5.5's core drove it)
-/// and through the flow reach the same answer and describe the same hops.
+/// The answers the 1.5.5 module, driven by the 1.5.5 core, reached for these bodies (pinned while
+/// the legacy `GithubModule` lived beside the flow, and checked against it): the flow reaches the
+/// same answer over the same hops.
 #[test]
 fn the_flow_answers_as_the_1_5_5_module_driven_by_the_1_5_5_core() {
-    let cfg: GitHubConfig = serde_json::from_str(SETTINGS).unwrap();
-    let cases: Vec<Script> = vec![
-        Script::happy(),
-        Script::happy().answer(ORGS_URL, 200, r#"[{"login":"elsewhere"}]"#),
-        Script::happy().answer(USER_URL, 401, "{}"),
-        Script::happy().answer(TOKEN_URL, 200, r#"{"error":"bad_verification_code"}"#),
-        Script::happy().answer(ORGS_URL, 200, "[{bad"),
-        Script::happy().answer(USER_URL, 200, r#"{"login":"no-id"}"#),
+    let id = |roles: &[&str]| {
+        let mut p = Principal::from_id("github:octocat");
+        p.name = Some("Octo".to_string());
+        p.roles = roles.iter().map(|r| r.to_string()).collect();
+        LoginStep::Identity(p)
+    };
+    let cases: Vec<(Script, LoginStep, Vec<&str>)> = vec![
+        (
+            Script::happy(),
+            id(&["github:id/1", "github:org/acme", "github:org/widgets"]),
+            vec![TOKEN_URL, USER_URL, ORGS_URL],
+        ),
+        (
+            Script::happy().answer(ORGS_URL, 200, r#"[{"login":"elsewhere"}]"#),
+            id(&["github:id/1", "github:org/elsewhere"]),
+            vec![TOKEN_URL, USER_URL, ORGS_URL],
+        ),
+        (
+            Script::happy().answer(USER_URL, 401, "{}"),
+            LoginStep::BadCredential,
+            vec![TOKEN_URL, USER_URL],
+        ),
+        (
+            Script::happy().answer(TOKEN_URL, 200, r#"{"error":"bad_verification_code"}"#),
+            LoginStep::BadCredential,
+            vec![TOKEN_URL],
+        ),
+        (
+            Script::happy().answer(ORGS_URL, 200, "[{bad"),
+            LoginStep::BadCredential,
+            vec![TOKEN_URL, USER_URL, ORGS_URL],
+        ),
+        (
+            Script::happy().answer(USER_URL, 200, r#"{"login":"no-id"}"#),
+            LoginStep::BadCredential,
+            vec![TOKEN_URL, USER_URL],
+        ),
     ];
-    for mut script in cases {
-        let answers = script.answers.clone();
-        let flow_step = run(&login(), &mut script);
-
-        // 1.5.5: the core's loop over the module.
-        let module = GithubModule::new(cfg.clone());
-        let mut cl = CompleteLogin {
-            code: Some("the-code".into()),
-            redirect_uri: Some("https://node.example/auth/token".into()),
-            code_verifier: Some("the-verifier".into()),
-            ..Default::default()
-        };
-        let mut urls = Vec::new();
-        let mut legacy = LoginStep::Outage;
-        for _ in 0..MAX_HOPS {
-            match module.complete_login(&cl) {
-                LoginOutcome::Identify(p) => {
-                    legacy = LoginStep::Identity(p);
-                    break;
-                }
-                LoginOutcome::Reject => {
-                    legacy = LoginStep::BadCredential;
-                    break;
-                }
-                LoginOutcome::Exchange(hop) => {
-                    urls.push(hop.url.clone());
-                    let Some(Fetched::Ready(r)) = answers.get(&hop.url) else {
-                        break;
-                    };
-                    cl.token_response = Some(LoginHttpResponse {
-                        status: r.status,
-                        body: String::from_utf8_lossy(&r.body).into_owned(),
-                    });
-                }
-                _ => break,
-            }
-        }
-        assert_eq!(flow_step, legacy);
+    for (mut script, legacy, urls) in cases {
+        assert_eq!(run(&login(), &mut script), legacy);
         assert_eq!(script.targets(), urls);
+    }
+}
+
+// ── the legacy module's step tests, on the live flow ────────────────────────────────────────────
+
+/// Request-time scopes are folded in, de-duplicated (was the legacy `begin_login` test).
+#[test]
+fn begin_login_folds_in_request_time_extra_scopes_deduped() {
+    let url = login().begin_login(
+        "https://busbar.example/auth/token",
+        "st",
+        "ch",
+        &["read:user".to_string(), "repo".to_string()],
+    );
+    assert!(
+        url.contains("scope=read%3Aorg%20read%3Auser%20repo"),
+        "{url}"
+    );
+}
+
+/// A callback without the full code + redirect_uri + verifier triple, or with no correlator at
+/// all, is declined before anything is sent.
+#[test]
+fn a_callback_without_the_full_triple_is_declined_with_no_exchange() {
+    let l = login();
+    for (code, redirect_uri, verifier) in [
+        (Some("authcode"), None, None),
+        (None, Some("https://busbar.example/auth/token"), None),
+        (None, None, None),
+    ] {
+        let mut s = Script::happy();
+        let mut f = l.start(code, redirect_uri, verifier, Some(NONCE));
+        assert_eq!(l.drive(&mut f, &mut s), LoginStep::BadCredential);
+        assert!(s.issued.is_empty());
+    }
+}
+
+/// The token endpoint's non-2xx is declined even when its body carries a token.
+#[test]
+fn a_non_2xx_token_answer_is_declined_even_with_a_token_in_it() {
+    let l = login();
+    let mut s = Script::happy().answer(TOKEN_URL, 401, r#"{"access_token":"should-be-ignored"}"#);
+    assert_eq!(run(&l, &mut s), LoginStep::BadCredential);
+    assert_eq!(s.targets(), vec![TOKEN_URL]);
+}
+
+/// An empty access token (either shape) is declined: never a `Bearer ` with nothing after it.
+#[test]
+fn an_empty_access_token_is_refused() {
+    let l = login();
+    for body in [
+        r#"{"access_token":""}"#,
+        "access_token=&scope=read:org&token_type=bearer",
+    ] {
+        let mut s = Script::happy().answer(TOKEN_URL, 200, body);
+        assert_eq!(run(&l, &mut s), LoginStep::BadCredential, "{body}");
+        assert_eq!(s.targets(), vec![TOKEN_URL]);
+    }
+}
+
+/// A `/user` without a `login` is declined.
+#[test]
+fn a_user_without_a_login_is_declined() {
+    let l = login();
+    let mut s = Script::happy().answer(USER_URL, 200, r#"{"id":42,"name":"No Login"}"#);
+    assert_eq!(run(&l, &mut s), LoginStep::BadCredential);
+    assert_eq!(s.targets(), vec![TOKEN_URL, USER_URL]);
+}
+
+/// Out-of-order bodies fail closed: an org list or a `/user` where the token response belongs
+/// (no user held, no token held) never identifies and never sends an empty bearer.
+#[test]
+fn out_of_order_bodies_fail_closed() {
+    let l = login();
+    for body in [r#"[{"login":"acme"}]"#, r#"{"login":"octocat","id":1}"#] {
+        let mut s = Script::happy().answer(TOKEN_URL, 200, body);
+        assert_eq!(run(&l, &mut s), LoginStep::BadCredential, "{body}");
+        assert_eq!(s.targets(), vec![TOKEN_URL]);
+    }
+}
+
+/// The `/user/orgs` hop is authenticated with the SAME token the token step answered.
+#[test]
+fn the_orgs_hop_carries_the_token_from_the_token_step() {
+    let l = login();
+    let mut s = Script::happy();
+    run(&l, &mut s);
+    assert_eq!(s.issued[2].target, ORGS_URL);
+    assert!(plain(&s.issued[2].fields)
+        .iter()
+        .any(|(k, v)| k == "authorization" && *v == format!("Bearer {TOKEN}")));
+}
+
+/// Each flow owns its state (the legacy module's shared pending map, its correlation key, cap and
+/// TTL sweep have no live counterpart): two flows never see each other's bearer, and a finished
+/// flow, declined or identified, holds no token and no token response.
+#[test]
+fn each_flow_owns_its_state_and_a_finished_one_holds_nothing() {
+    let l = login();
+    let token = |t: &str| format!(r#"{{"access_token":"{t}"}}"#);
+    let mut a = Script::happy().answer(TOKEN_URL, 200, &token("gho_a"));
+    let mut b = Script::happy().answer(TOKEN_URL, 200, &token("gho_b"));
+    a.pend_first = true;
+    b.pend_first = true;
+    let (mut fa, mut fb) = (flow(&l), flow(&l));
+    // Interleaved: each parks on its token exchange, then on /user.
+    for _ in 0..2 {
+        assert_eq!(l.drive(&mut fa, &mut a), LoginStep::Pending);
+        assert_eq!(l.drive(&mut fb, &mut b), LoginStep::Pending);
+    }
+    let bearer = |s: &Script, t: &str| {
+        s.issued
+            .iter()
+            .any(|r| r.fields.iter().any(|(_, v)| v.contains(t)))
+    };
+    assert!(bearer(&a, "gho_a") && !bearer(&a, "gho_b"));
+    assert!(bearer(&b, "gho_b") && !bearer(&b, "gho_a"));
+
+    for mut s in [Script::happy(), Script::happy().answer(USER_URL, 500, "{}")] {
+        let mut f = flow(&l);
+        l.drive(&mut f, &mut s);
+        assert!(f.done.is_some());
+        assert!(f.state.access_token.is_none() && f.state.user.is_none());
+        assert!(
+            f.req.token_response.is_none(),
+            "the token response is cleared"
+        );
     }
 }
 
@@ -569,7 +698,7 @@ fn the_v1_5_5_example_provider_loads_and_logs_in_with_the_secret_beside_the_sett
     expected.name = Some("octocat".to_string());
     expected.roles = vec!["github:id/1".to_string(), "github:org/testorg".to_string()];
     assert_eq!(p, expected);
-    let body = String::from_utf8(s.issued[0].body.clone()).unwrap();
+    let body = String::from_utf8(s.issued[0].body.to_vec()).unwrap();
     assert!(body.starts_with("client_id=Iv1.e2eclient&"), "{body}");
     assert!(
         body.ends_with(&format!("&client_secret={SECRET}")),
@@ -593,7 +722,7 @@ fn no_secret_loads_and_drops_the_secret_field_as_1_5_5_did() {
         let l = GithubLogin::open(SETTINGS, secret).expect("loads without a secret");
         let mut s = Script::happy();
         assert_eq!(identity(run(&l, &mut s)).id, "github:octocat");
-        let body = String::from_utf8(s.issued[0].body.clone()).unwrap();
+        let body = String::from_utf8(s.issued[0].body.to_vec()).unwrap();
         assert!(!body.contains("client_secret"), "{body}");
         assert!(body.ends_with("&code_verifier=the-verifier"), "{body}");
     }
@@ -637,12 +766,15 @@ fn begin_login_is_the_1_5_5_authorize_url() {
 
 #[test]
 fn form_encode_is_serde_urlencoded() {
-    let pairs = vec![
-        ("a b".to_string(), "x*y-z._~!".to_string()),
-        ("k".to_string(), "é/=&".to_string()),
-    ];
-    assert_eq!(form_encode(&pairs), "a+b=x*y-z._%7E%21&k=%C3%A9%2F%3D%26");
-    assert_eq!(form_encode(&[]), "");
+    let pairs = [("a b", "x*y-z._~!"), ("k", "é/=&")];
+    assert_eq!(
+        form_encode(&pairs).as_str(),
+        "a+b=x*y-z._%7E%21&k=%C3%A9%2F%3D%26"
+    );
+    assert_eq!(form_encode(&[]).as_str(), "");
+    // Sized exactly up front: no growth leaves a partial copy behind.
+    let encoded = form_encode(&pairs);
+    assert_eq!(encoded.capacity(), encoded.len());
 }
 
 /// OWNER Q123 ACCEPTED (2026-09-30: "a GitHub base URL written as a secret reference now logs
@@ -706,14 +838,32 @@ mod logging {
     const NO_TOKEN_BASE: &str =
         r#"{"client_id": "Iv1.client", "api_base": "https://api.github.com"}"#;
 
+    /// OWNER RULING (sibling/auth): settings that leave `token_base` at its default are refused at
+    /// open, explained, instead of loading and having the guard refuse every hop. The guard's own
+    /// log for a hop it refuses is kept below.
     #[test]
     fn a_hop_the_guard_refuses_is_explained_without_a_secret() {
-        let l = GithubLogin::open(NO_TOKEN_BASE, Some(SECRET)).expect("opens");
+        let err = GithubLogin::open(NO_TOKEN_BASE, Some(SECRET)).unwrap_err();
+        assert!(
+            err.contains("token_base") && err.contains("allowlist"),
+            "{err}"
+        );
+        assert!(!err.contains(SECRET), "{err}");
+
+        let l = login();
         let cap = WarnCapture::default();
-        let step = tracing::subscriber::with_default(cap.clone(), || run(&l, &mut Script::happy()));
-        assert_eq!(step, LoginStep::Outage);
-        assert!(cap.contains("github.com"), "{:?}", cap.messages());
+        let hop = LoginHop {
+            method: "GET".to_string(),
+            url: "https://elsewhere.example/user".to_string(),
+            form: Vec::new(),
+            secret_form_field: None,
+            headers: Vec::new(),
+        };
+        let refused = tracing::subscriber::with_default(cap.clone(), || l.render(&hop));
+        assert_eq!(refused, Err(Refused));
+        assert!(cap.contains("elsewhere.example"), "{:?}", cap.messages());
         assert!(cap.contains("allow"), "{:?}", cap.messages());
+        assert!(cap.contains("module=github"), "{:?}", cap.messages());
         for secret in [SECRET, "the-code", "the-verifier"] {
             assert!(!cap.contains(secret), "{:?}", cap.messages());
         }
@@ -749,4 +899,77 @@ mod logging {
             cap.messages()
         );
     }
+}
+
+/// RED: a hop answer's body is the token response (the access token): Debug shows its status and
+/// length, never its bytes.
+#[test]
+fn a_hop_response_debug_shows_no_body() {
+    let r = HopResponse {
+        status: 200,
+        body: b"access_token=SECRETX".to_vec().into(),
+    };
+    let text = format!("{r:?} {:?}", Fetched::Ready(r.clone()));
+    assert!(!text.contains("SECRETX"), "{text}");
+    // Nor as the bytes' numbers (`S` `E` `C` is 83, 69, 67).
+    assert!(!text.contains("83, 69, 67"), "{text}");
+    assert_eq!(
+        format!("{r:?}"),
+        "HopResponse { status: 200, body_len: 20 }"
+    );
+}
+
+/// RED: a hop reply past 1 MiB is not parsed: the login ends as an outage, nothing more is sent.
+#[test]
+fn a_hop_reply_over_the_cap_is_an_outage() {
+    let l = login();
+    let mut body = format!(r#"{{"access_token":"{TOKEN}"}}"#);
+    body.push_str(&" ".repeat(1024 * 1024 + 1 - body.len()));
+    let mut s = Script::happy().answer(TOKEN_URL, 200, &body);
+    assert_eq!(run(&l, &mut s), LoginStep::Outage);
+    assert_eq!(s.targets(), vec![TOKEN_URL]);
+    // At the cap exactly it is read.
+    body.pop();
+    let mut s = Script::happy().answer(TOKEN_URL, 200, &body);
+    assert_eq!(identity(run(&l, &mut s)).id, "github:octocat");
+}
+
+mod module_field {
+    use super::*;
+    use busbar_contract::testkit::WarnCapture;
+
+    /// RED: every record carries `module = "github"`, as the sibling auth plugins' do.
+    #[test]
+    fn a_decline_is_logged_with_the_module_field() {
+        let l = login();
+        let mut s = Script::happy().answer(USER_URL, 401, "{}");
+        let cap = WarnCapture::capturing_debug();
+        let step = tracing::subscriber::with_default(cap.clone(), || run(&l, &mut s));
+        assert_eq!(step, LoginStep::BadCredential);
+        let messages = cap.messages();
+        assert!(!messages.is_empty());
+        for m in &messages {
+            assert!(m.contains("module=github"), "{messages:?}");
+        }
+    }
+}
+
+/// RED (type level): the hop bodies (the token form carries the client secret, the code and the
+/// verifier; the token response the access token) are wiped on drop.
+#[test]
+fn the_hop_bodies_are_wiped_on_drop() {
+    fn wipes<T: zeroize::ZeroizeOnDrop>(_: &T) {}
+    let l = login();
+    let mut s = Script::happy();
+    run(&l, &mut s);
+    let request = &s.issued[0];
+    wipes(&request.body);
+    for (_, value) in &request.fields {
+        wipes(value);
+    }
+    let response = HopResponse {
+        status: 200,
+        body: b"access_token=x".to_vec().into(),
+    };
+    wipes(&response.body);
 }
