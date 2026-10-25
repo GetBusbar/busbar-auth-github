@@ -264,6 +264,7 @@ fn split(url: &str) -> Option<(&str, String)> {
 impl Exchange for Over<'_, '_> {
     fn exchange(&mut self, request: &HopRequest) -> Fetched {
         let Some((origin, target)) = split(&request.target) else {
+            tracing::warn!("github login: a hop URL has no scheme and authority to split");
             return Fetched::Unreachable;
         };
         if self.wire.is_none() {
@@ -280,7 +281,10 @@ impl Exchange for Over<'_, '_> {
             });
             match sent {
                 Ok(w) => *self.wire = Some(w),
-                Err(_) => return Fetched::Unreachable,
+                Err(e) => {
+                    tracing::warn!("github login: the hop request was refused: {e}");
+                    return Fetched::Unreachable;
+                }
             }
         }
         let Some(wire) = self.wire.as_mut() else {
@@ -296,7 +300,10 @@ impl Exchange for Over<'_, '_> {
                         status: reply.status,
                         body: reply.body,
                     }),
-                    Err(_) => Fetched::Unreachable,
+                    Err(e) => {
+                        tracing::warn!("github login: the hop exchange failed: {e}");
+                        Fetched::Unreachable
+                    }
                 }
             }
         }
@@ -308,6 +315,9 @@ struct Unarmed;
 
 impl Exchange for Unarmed {
     fn exchange(&mut self, _: &HopRequest) -> Fetched {
+        tracing::warn!(
+            "github login: no connector lent: the instance's outbound http need was not granted"
+        );
         Fetched::Unreachable
     }
 }
@@ -395,6 +405,7 @@ impl SafeSlot for Complete {
         let ticket = instance.ticket();
         if ticket.is_none() {
             // The exchange waits on I/O: the host submits the op on a ticket.
+            tracing::warn!("github login: complete_login arrived without a ticket");
             return Outcome::Refused;
         }
         let g = h.life();
