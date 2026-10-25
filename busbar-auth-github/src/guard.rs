@@ -57,16 +57,24 @@ pub fn collect_allowed_hosts(settings: &Value) -> HashSet<String> {
 /// loopback/private one); never a cloud-metadata host.
 pub fn vet_hop_url(url: &str, allowed: &HashSet<String>) -> Result<(), Refused> {
     let Some(host) = extract_normalized_host(url) else {
+        // The URL is not named: it may carry userinfo.
+        tracing::warn!("github login: hop refused, its host could not be read from the URL");
         return Err(Refused);
     };
     if !allowed.contains(&host.to_ascii_lowercase()) {
+        tracing::warn!(
+            host = ?host,
+            "github login: hop refused, host not in the allowlist built from the URLs written in the plugin settings"
+        );
         return Err(Refused);
     }
     let host_private = host_is_private_or_loopback(&host);
     if !(scheme_is(url, "https") || (host_private && scheme_is(url, "http"))) {
+        tracing::warn!(host = ?host, "github login: hop refused, plaintext http to a public host");
         return Err(Refused);
     }
     if metadata_host(url) {
+        tracing::warn!(host = ?host, "github login: hop refused, cloud-metadata host");
         return Err(Refused);
     }
     Ok(())
@@ -75,18 +83,23 @@ pub fn vet_hop_url(url: &str, allowed: &HashSet<String>) -> Result<(), Refused> 
 /// 1.5.5 `sanitize_hop_header`, answering the header as the http stack would write it: the name
 /// lowercased (`HeaderName::from_bytes`), the value unchanged (`HeaderValue::from_str`).
 pub fn sanitize_hop_header(name: &str, value: &str) -> Result<(String, String), Refused> {
+    // Only the header NAME is ever logged (as `?`, so CR/LF cannot forge a line): never the value.
+    let refuse = |why: &str| {
+        tracing::warn!(header = ?name, "github login: hop refused, {why}");
+        Err(Refused)
+    };
     let bad = |s: &str| s.contains('\r') || s.contains('\n') || s.contains('\0');
     if bad(name) || bad(value) {
-        return Err(Refused);
+        return refuse("a header carries CR, LF or NUL");
     }
     if FORBIDDEN_HOP_HEADERS.contains(&name.to_ascii_lowercase().as_str()) {
-        return Err(Refused);
+        return refuse("a header the hop may not set");
     }
     if name.is_empty() || !name.bytes().all(is_tchar) {
-        return Err(Refused);
+        return refuse("a header name is not a valid token");
     }
     if !value.bytes().all(|b| (b >= 32 && b != 127) || b == b'\t') {
-        return Err(Refused);
+        return refuse("a header value has a control byte");
     }
     Ok((name.to_ascii_lowercase(), value.to_string()))
 }

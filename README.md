@@ -27,11 +27,11 @@ It is a **separate plugin from `busbar-auth-oidc`**, and independent of the busb
 
 GitHub OAuth issues an **opaque** access token and **no `id_token` JWT**, so the OIDC/JWKS
 verify path does not apply — there is nothing to verify offline. Identity instead comes from
-GitHub's REST API (`/user`, `/user/orgs`). The busbar `LoginModule` ABI already supports exactly
-this through its **multi-hop `Exchange`** mechanism: the plugin *describes* an HTTP hop, the **core**
-executes it and feeds the response back into `complete_login`, bounded to a few hops. The
-confidential-client **secret is the core's alone** — it is injected only into the token-exchange
-hop; the plugin writes the form KEY (`client_secret`), never the VALUE.
+GitHub's REST API (`/user`, `/user/orgs`). On busbar 1.6 the plugin runs those hops itself over its
+one outbound `http` need, and holds its own confidential-client **secret** (the kernel resolves
+`browser_login.client_secret` into `OpenIn.secrets`). (The statically linked 1.5.x `GithubModule`
+shape instead *describes* each hop as a multi-hop `Exchange` and the core executes it, injecting
+the secret into the token-exchange hop.)
 
 ### The login flow (hop sequence)
 
@@ -49,8 +49,12 @@ no `access_token`) — that is treated as a rejection, never a success with an e
 
 ## Config
 
-Only `client_id` is required. The `client_secret` is **never** in this config — the core holds it
-(`browser_login.client_secret`) and injects it into the token-exchange hop.
+Only `client_id` is required to parse, but **write `token_base`, `api_base` and `authorize_base`
+out in the settings even for github.com**: the hop allowlist is built only from the URL strings
+written in the settings (1.5.5 parity), so a base left at its default is not allowlisted and every
+hop to it is refused. The defaults below apply to the parsed config only. The `client_secret` is
+**never** in this config — it is `browser_login.client_secret`, which the kernel delivers to the
+plugin.
 
 ```json
 {
@@ -106,9 +110,8 @@ cargo test
 ```
 
 The `busbar-auth-github` crate is the reusable logic (statically linkable); `busbar-auth-github-plugin`
-is the thin `cdylib` that exports the auth C ABI via `busbar_contract::export_login_plugin!` (the
-LOGIN export macro — not `export_auth_plugin!`, which would mask browser-login behind the verify-only
-adapter).
+is the thin `cdylib` that exports the auth C ABI via `busbar_contract::export_door!` (exporting
+`busbar_auth_github::door::door`).
 
 ### ABI notes / caveats
 
@@ -119,16 +122,16 @@ adapter).
   and a `User-Agent` header. Auth ABI v2's `LoginHop` / `HttpRequest` carries a `headers:
   Vec<(String,String)>` field for exactly this; `busbar_auth_github::userinfo_headers()` computes the
   headers, and `build_userinfo_get`/`build_orgs_get` attach them directly to the `/user` and
-  `/user/orgs` hops. The core sanitizes them (rejects CR/LF/NUL and hop-control headers) and only sends
-  the hop to an operator-allowlisted host.
-- **`ca_cert_pem` delivery.** Because the core (not the plugin) executes hops, this GHES CA value has
-  no delivery channel to the hop executor on the current ABI. It is accepted here for
-  forward-compatibility and to capture operator intent.
+  `/user/orgs` hops. Headers are sanitized (CR/LF/NUL and hop-control headers rejected) and a hop
+  only goes to a host on the allowlist built from the settings' URLs.
+- **`ca_cert_pem` delivery.** The plugin's one outbound `http` need carries no CA, so this GHES CA
+  value still has no delivery channel. It is accepted here for forward-compatibility and to capture
+  operator intent.
 - **Multi-hop flow state.** The access token is seen once (the token response) but is needed to
-  authenticate both GETs, and the `/user` identity is needed at the `/user/orgs` step. The module
-  threads this per-flow state keyed by the core-held PKCE `code_verifier` (falling back to `code` /
-  `redirect_uri`). If the core echoes none of those on the feedback calls, concurrent logins would
-  share a single slot — the one correctness caveat of the org-hop chain on the current ABI.
+  authenticate both GETs, and the `/user` identity is needed at the `/user/orgs` step. On 1.6
+  each flow (`LoginFlow`) owns this state, so concurrent logins never share a slot. (The legacy
+  static-link `GithubModule` keyed it by the core-held PKCE `code_verifier`, falling back to `code`, and rejected a
+  feedback call carrying neither.)
 
 ## Tests
 
