@@ -5,7 +5,7 @@ version = "1.6.0"
 publish = false            # internal workspace crate; never goes to crates.io
 edition = "2021"
 rust-version = "1.97"
-description = "The GitHub-OAuth login module for busbar: drive GitHub's authorization-code → opaque-access-token → REST /user → /user/orgs flow over the busbar multi-hop LoginModule ABI (1.5.2, auth ABI v2) and map it to a Principal (github:<login> + github:org/<org> groups). Login-capable: implements busbar_contract::auth::LoginModule. The confidential-client secret is injected by the CORE, never held here."
+description = "The GitHub-OAuth login module for busbar: drive GitHub's authorization-code → opaque-access-token → REST /user → /user/orgs flow over the busbar multi-hop LoginModule ABI (1.5.2, auth ABI v2) and map it to a Principal (github:<login> + github:org/<org> groups). Login-capable: implements busbar_contract::auth::LoginModule. On 1.6 the plugin holds its own client secret (resolved by the kernel from browser_login.client_secret) and runs the hops itself; only the legacy static-link GithubModule leaves hop execution and secret injection to the core."
 license = "Apache-2.0"
 
 [dependencies]
