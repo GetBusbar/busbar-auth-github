@@ -40,11 +40,15 @@ use busbar_contract::auth::{CompleteLogin, LoginHop, LoginHttpResponse, LoginOut
 use serde_json::Value;
 use std::collections::HashSet;
 use std::fmt;
+use zeroize::{Zeroize, Zeroizing};
 
 /// 1.5.5's per-hop request timeout (`HOP_TIMEOUT_SECS = 10`).
 pub const HOP_TIMEOUT_MS: u64 = 10_000;
 /// 1.5.5's bound on `complete_login` turns per callback (`MAX_HOPS = 6`).
 pub const MAX_HOPS: usize = 6;
+/// The most a hop's reply body may carry: 1 MiB, the bound busbar-auth-oidc puts on a token
+/// endpoint's answer. A GitHub token response, `/user` or a 100-entry `/user/orgs` is a few KiB.
+pub const MAX_HOP_REPLY_BYTES: usize = 1024 * 1024;
 
 /// One hop, rendered as 1.5.5's core put it on the wire: method, target, header fields in order
 /// (lowercase names), the form-encoded body, the timeout.
@@ -54,10 +58,12 @@ pub struct HopRequest {
     pub method: String,
     /// The absolute URL.
     pub target: String,
-    /// The header fields, in order.
-    pub fields: Vec<(String, String)>,
-    /// The `application/x-www-form-urlencoded` body (empty for a GET).
-    pub body: Vec<u8>,
+    /// The header fields, in order. The values are wiped on drop: `authorization` carries the
+    /// bearer.
+    pub fields: Vec<(String, Zeroizing<String>)>,
+    /// The `application/x-www-form-urlencoded` body (empty for a GET), wiped on drop: the token
+    /// exchange's carries the client secret, the code and the verifier.
+    pub body: Zeroizing<Vec<u8>>,
     /// The hop's timeout.
     pub timeout_ms: u64,
 }
@@ -78,12 +84,22 @@ impl fmt::Debug for HopRequest {
 }
 
 /// What the far end answered.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct HopResponse {
     /// The HTTP status.
     pub status: u16,
-    /// The body bytes.
-    pub body: Vec<u8>,
+    /// The body bytes, wiped on drop: the token response carries the access token.
+    pub body: Zeroizing<Vec<u8>>,
+}
+
+impl fmt::Debug for HopResponse {
+    // The body is the token response (the access token) or a profile: never formatted.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("HopResponse")
+            .field("status", &self.status)
+            .field("body_len", &self.body.len())
+            .finish()
+    }
 }
 
 /// What a one-shot exchange answers.
@@ -178,15 +194,30 @@ impl GithubLogin {
     /// refused it (`validate_browser_login_secret`, `auth/token.rs:264`, `:813`).
     ///
     /// # Errors
-    /// Empty or invalid settings (1.5.5's texts).
+    /// Empty or invalid settings (1.5.5's texts; a decoder error keeps serde's text only when it
+    /// names a key, never a value); a set `ca_cert_pem` (it has no delivery
+    /// channel); a `token_base` or `api_base` not written out (the hop allowlist is built only from
+    /// the URLs written in the settings, so every hop to a defaulted base would be refused).
     pub fn open(settings: &str, client_secret: Option<&str>) -> Result<Self, String> {
         if settings.trim().is_empty() {
             return Err("github plugin requires config (client_id); none provided".to_string());
         }
-        let cfg: GitHubConfig = serde_json::from_str(settings)
-            .map_err(|e| format!("invalid github plugin config: {e}"))?;
-        let raw: Value = serde_json::from_str(settings)
-            .map_err(|e| format!("invalid github plugin config: {e}"))?;
+        let cfg: GitHubConfig = serde_json::from_str(settings).map_err(settings_err)?;
+        let raw: Value = serde_json::from_str(settings).map_err(settings_err)?;
+        if cfg.ca_cert_pem.is_some() {
+            return Err(
+                "github ca_cert_pem is not yet supported; omit it or use a system-trusted cert"
+                    .to_string(),
+            );
+        }
+        // `authorize_base` is a browser redirect, never a hop: it may stay at its default.
+        for key in ["token_base", "api_base"] {
+            if raw.get(key).is_none() {
+                return Err(format!(
+                    "settings: `{key}` must be written out: the hop allowlist is built only from URLs in the settings"
+                ));
+            }
+        }
         Ok(Self {
             cfg,
             client_secret: client_secret
@@ -250,6 +281,7 @@ impl GithubLogin {
                 None => {
                     if flow.turns >= MAX_HOPS {
                         tracing::warn!(
+                            module = "github",
                             "github login: hop limit ({MAX_HOPS}) spent without an identity"
                         );
                         return finish(flow, LoginStep::Outage);
@@ -258,13 +290,17 @@ impl GithubLogin {
                     match self.step(flow) {
                         LoginOutcome::Identify(p) => return finish(flow, LoginStep::Identity(p)),
                         LoginOutcome::Reject => return finish(flow, LoginStep::BadCredential),
-                        LoginOutcome::Exchange(hop) => match self.render(&hop) {
-                            Ok(r) => r,
-                            // The guard has already said why.
-                            Err(Refused) => return finish(flow, LoginStep::Outage),
-                        },
+                        LoginOutcome::Exchange(mut hop) => {
+                            let rendered = self.render(&hop);
+                            wipe_hop(&mut hop);
+                            match rendered {
+                                Ok(r) => r,
+                                // The guard has already said why.
+                                Err(Refused) => return finish(flow, LoginStep::Outage),
+                            }
+                        }
                         _ => {
-                            tracing::warn!("github login: the step machine asked for an outcome this login cannot serve");
+                            tracing::warn!(module = "github", "github login: the step machine asked for an outcome this login cannot serve");
                             return finish(flow, LoginStep::Outage);
                         }
                     }
@@ -277,6 +313,14 @@ impl GithubLogin {
                 }
                 Fetched::Unreachable => return finish(flow, LoginStep::Outage),
                 Fetched::Ready(resp) => {
+                    if resp.body.len() > MAX_HOP_REPLY_BYTES {
+                        tracing::warn!(
+                            module = "github",
+                            bytes = resp.body.len(),
+                            "github login: a hop reply passed the {MAX_HOP_REPLY_BYTES}-byte cap"
+                        );
+                        return finish(flow, LoginStep::Outage);
+                    }
                     let body = String::from_utf8_lossy(&resp.body).into_owned();
                     // 1.5.5's core NONCE BINDING, now the plugin's: a hop body carrying an
                     // `id_token` must carry the nonce minted at begin, before any identity is
@@ -285,15 +329,17 @@ impl GithubLogin {
                         &body,
                         flow.nonce.as_ref().map(|n| n.reveal().as_str()),
                     ) {
-                        tracing::warn!("github login: a hop body's id_token is not bound to the nonce minted at begin");
+                        tracing::warn!(module = "github", "github login: a hop body's id_token is not bound to the nonce minted at begin");
                         return finish(flow, LoginStep::SecurityCheckFailed);
                     }
+                    wipe_answer(&mut flow.req);
                     flow.req.token_response = Some(LoginHttpResponse {
                         status: resp.status,
                         body,
                     });
                     if flow.turns >= MAX_HOPS {
                         tracing::warn!(
+                            module = "github",
                             "github login: hop limit ({MAX_HOPS}) spent without an identity"
                         );
                         return finish(flow, LoginStep::Outage);
@@ -312,7 +358,7 @@ impl GithubLogin {
                 req.redirect_uri.as_deref(),
                 req.code_verifier.as_deref(),
             ) else {
-                tracing::info!("github login: declined, the callback lacks its code, redirect_uri or code_verifier");
+                tracing::info!(module = "github", "github login: declined, the callback lacks its code, redirect_uri or code_verifier");
                 return LoginOutcome::Reject;
             };
             return LoginOutcome::Exchange(build_token_exchange(
@@ -329,6 +375,7 @@ impl GithubLogin {
             .is_some_and(|s| !s.is_empty());
         if !correlated {
             tracing::info!(
+                module = "github",
                 "github login: declined, the callback has neither a code_verifier nor a code"
             );
             return LoginOutcome::Reject;
@@ -336,6 +383,7 @@ impl GithubLogin {
         if !(200..300).contains(&resp.status) {
             let hop = hop_name(&flow.state);
             tracing::info!(
+                module = "github",
                 status = resp.status,
                 hop,
                 "github login: declined, non-2xx answer"
@@ -354,11 +402,17 @@ impl GithubLogin {
         if is_json_array(&resp.body) {
             let state = std::mem::take(&mut flow.state);
             let Some(user) = state.user else {
-                tracing::info!("github login: declined, an org list arrived before the user");
+                tracing::info!(
+                    module = "github",
+                    "github login: declined, an org list arrived before the user"
+                );
                 return LoginOutcome::Reject;
             };
             let Some(groups) = parse_org_groups(&resp.body) else {
-                tracing::info!("github login: declined, /user/orgs answered a malformed list");
+                tracing::info!(
+                    module = "github",
+                    "github login: declined, /user/orgs answered a malformed list"
+                );
                 return LoginOutcome::Reject;
             };
             return LoginOutcome::Identify(build_principal(&user, groups));
@@ -368,19 +422,25 @@ impl GithubLogin {
                 // The token hop: GitHub answered no access_token.
                 match github_error(&resp.body) {
                     None => tracing::info!(
+                        module = "github",
                         "github login: declined, the token endpoint answered no access_token"
                     ),
                     Some(e) if e == "bad_verification_code" => tracing::info!(
+                        module = "github",
                         error = ?e,
                         "github login: declined, the token endpoint refused the code"
                     ),
                     Some(e) => tracing::warn!(
+                        module = "github",
                         error = ?e,
                         "github login: the token endpoint refused the exchange (check client_id, client_secret and redirect_uri)"
                     ),
                 }
             } else {
-                tracing::info!("github login: declined, /user answered without a login or id");
+                tracing::info!(
+                    module = "github",
+                    "github login: declined, /user answered without a login or id"
+                );
             }
             flow.state = FlowState::default();
             return LoginOutcome::Reject;
@@ -390,7 +450,10 @@ impl GithubLogin {
             return LoginOutcome::Identify(build_principal(&user, Vec::new()));
         }
         let Some(token) = &flow.state.access_token else {
-            tracing::info!("github login: declined, no access token held at /user");
+            tracing::info!(
+                module = "github",
+                "github login: declined, no access token held at /user"
+            );
             return LoginOutcome::Reject;
         };
         let hop = build_orgs_get(&self.cfg, token.reveal());
@@ -402,19 +465,27 @@ impl GithubLogin {
     /// field (or drop the placeholder when there is none), form-encode, and lay out the fields as the
     /// http stack wrote them (`content-type` first, the hop's sanitised headers, then the default
     /// `accept: */*` when the hop set none).
+    ///
+    /// The form is laid out as borrows of the hop's values and the held secret, so the secret is
+    /// never copied before the one wiped body it is encoded into.
     fn render(&self, hop: &LoginHop) -> Result<HopRequest, Refused> {
         vet_hop_url(&hop.url, &self.allowed_hosts)?;
-        let mut form: Vec<(String, String)> = hop.form.clone();
+        let mut form: Vec<(&str, &str)> = hop
+            .form
+            .iter()
+            .map(|(k, v)| (k.as_str(), v.as_str()))
+            .collect();
         if let Some(field) = hop.secret_form_field.as_deref() {
             match &self.client_secret {
                 Some(secret) => {
-                    if let Some(slot) = form.iter_mut().find(|(k, _)| k == field) {
-                        slot.1 = secret.reveal().clone();
+                    let secret = secret.reveal().as_str();
+                    if let Some(slot) = form.iter_mut().find(|(k, _)| *k == field) {
+                        slot.1 = secret;
                     } else {
-                        form.push((field.to_string(), secret.reveal().clone()));
+                        form.push((field, secret));
                     }
                 }
-                None => form.retain(|(k, _)| k != field),
+                None => form.retain(|(k, _)| *k != field),
             }
         }
         let method = match hop.method.as_str() {
@@ -423,19 +494,21 @@ impl GithubLogin {
         };
         let mut fields = vec![(
             "content-type".to_string(),
-            "application/x-www-form-urlencoded".to_string(),
+            Zeroizing::new("application/x-www-form-urlencoded".to_string()),
         )];
         for (name, value) in &hop.headers {
             fields.push(sanitize_hop_header(name, value)?);
         }
         if !fields.iter().any(|(n, _)| n == "accept") {
-            fields.push(("accept".to_string(), "*/*".to_string()));
+            fields.push(("accept".to_string(), Zeroizing::new("*/*".to_string())));
         }
+        let mut body = form_encode(&form);
         Ok(HopRequest {
             method,
             target: hop.url.clone(),
             fields,
-            body: form_encode(&form).into_bytes(),
+            // Moves the encoded buffer, no copy.
+            body: Zeroizing::new(std::mem::take(&mut *body).into_bytes()),
             timeout_ms: HOP_TIMEOUT_MS,
         })
     }
@@ -466,8 +539,45 @@ fn github_error(body: &str) -> Option<String> {
 fn finish(flow: &mut LoginFlow, step: LoginStep) -> LoginStep {
     flow.inflight = None;
     flow.state = FlowState::default();
+    wipe_answer(&mut flow.req);
     flow.done = Some(step.clone());
     step
+}
+
+/// Wipe and clear the last hop answer the step machine read (the token response carries the
+/// access token): `LoginHttpResponse.body` is the contract's plain `String`, so it is wiped here.
+fn wipe_answer(req: &mut CompleteLogin) {
+    if let Some(mut answer) = req.token_response.take() {
+        answer.body.zeroize();
+    }
+}
+
+/// Wipe the plugin-owned values of a described hop once it is rendered: `LoginHop.form` carries
+/// the code and the verifier and `LoginHop.headers` the bearer, in the contract's plain `String`s.
+fn wipe_hop(hop: &mut LoginHop) {
+    for (_, v) in hop.form.iter_mut().chain(hop.headers.iter_mut()) {
+        v.zeroize();
+    }
+}
+
+/// The text of a settings decoder error. `serde_json::Error`'s own `Display` quotes an offending
+/// VALUE (`invalid type: integer `12345678``), which may be a secret pasted into the wrong key, so
+/// it is kept only when it names a KEY (a missing or unknown field, spelled from the schema and the
+/// key); otherwise the class of failure and where (busbar-auth-oauth's `json_err` shape).
+fn settings_err(e: serde_json::Error) -> String {
+    const WHAT: &str = "invalid github plugin config";
+    let text = e.to_string();
+    if e.is_data() && (text.starts_with("missing field `") || text.starts_with("unknown field `")) {
+        return format!("{WHAT}: {text}");
+    }
+    let class = match e.classify() {
+        serde_json::error::Category::Io => "the input could not be read",
+        serde_json::error::Category::Syntax => "it is not well-formed JSON",
+        serde_json::error::Category::Data => "a field is missing or has the wrong type",
+        serde_json::error::Category::Eof => "it ends before the JSON does",
+    };
+    let (line, column) = (e.line(), e.column());
+    format!("{WHAT}: {class} (line {line}, column {column}; the decoder's text is withheld)")
 }
 
 /// 1.5.5's nonce binding (`extract_id_token` + `id_token_nonce` + a constant-time compare): a body
@@ -540,30 +650,53 @@ fn b64url_decode(s: &str) -> Option<Vec<u8>> {
     Some(out)
 }
 
+/// Whether `b` is written as itself in a form value (ASCII alphanumerics and `*-._`).
+const fn form_kept(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || matches!(b, b'*' | b'-' | b'.' | b'_')
+}
+
+/// How many bytes `v` takes form-encoded.
+fn form_len(v: &str) -> usize {
+    v.bytes()
+        .map(|b| if form_kept(b) || b == b' ' { 1 } else { 3 })
+        .sum()
+}
+
 /// `application/x-www-form-urlencoded`, as 1.5.5's http stack encoded a form (`serde_urlencoded`):
-/// ASCII alphanumerics and `*-._` literal, space as `+`, every other byte `%XX` uppercase.
+/// ASCII alphanumerics and `*-._` literal, space as `+`, every other byte `%XX` uppercase. Built
+/// in ONE buffer sized to the exact length first (busbar-auth-oauth's `form`), so no growth frees a
+/// partial copy of the secret the form carries, and held wiped on drop.
 #[must_use]
-pub fn form_encode(pairs: &[(String, String)]) -> String {
-    fn enc(s: &str, out: &mut String) {
-        for &b in s.as_bytes() {
-            match b {
-                b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'*' | b'-' | b'.' | b'_' => {
-                    out.push(b as char)
-                }
-                b' ' => out.push('+'),
-                _ => out.push_str(&format!("%{b:02X}")),
-            }
-        }
-    }
-    let mut out = String::new();
+pub fn form_encode(pairs: &[(&str, &str)]) -> Zeroizing<String> {
+    const HEX: &[u8; 16] = b"0123456789ABCDEF";
+    let len = pairs
+        .iter()
+        .map(|(k, v)| form_len(k) + 1 + form_len(v))
+        .sum::<usize>()
+        + pairs.len().saturating_sub(1);
+    let mut out = Zeroizing::new(String::with_capacity(len));
     for (i, (k, v)) in pairs.iter().enumerate() {
         if i > 0 {
             out.push('&');
         }
-        enc(k, &mut out);
-        out.push('=');
-        enc(v, &mut out);
+        for (j, part) in [k, v].into_iter().enumerate() {
+            if j == 1 {
+                out.push('=');
+            }
+            for b in part.bytes() {
+                if form_kept(b) {
+                    out.push(char::from(b));
+                } else if b == b' ' {
+                    out.push('+');
+                } else {
+                    out.push('%');
+                    out.push(char::from(HEX[usize::from(b >> 4)]));
+                    out.push(char::from(HEX[usize::from(b & 0x0f)]));
+                }
+            }
+        }
     }
+    debug_assert_eq!(out.len(), len);
     out
 }
 

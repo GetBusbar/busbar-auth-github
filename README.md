@@ -29,32 +29,31 @@ GitHub OAuth issues an **opaque** access token and **no `id_token` JWT**, so the
 verify path does not apply — there is nothing to verify offline. Identity instead comes from
 GitHub's REST API (`/user`, `/user/orgs`). On busbar 1.6 the plugin runs those hops itself over its
 one outbound `http` need, and holds its own confidential-client **secret** (the kernel resolves
-`browser_login.client_secret` into `OpenIn.secrets`). (The statically linked 1.5.x `GithubModule`
-shape instead *describes* each hop as a multi-hop `Exchange` and the core executes it, injecting
-the secret into the token-exchange hop.)
+`browser_login.client_secret` into `OpenIn.secrets`).
 
 ### The login flow (hop sequence)
 
-| step | `complete_login` input | plugin returns |
-|------|------------------------|----------------|
-| begin | `begin_login` (core-minted `state`, PKCE `code_challenge`) | `Authorize(<github authorize URL>)` |
-| 1 | `code` + `redirect_uri` + `code_verifier`, no token response | `Exchange`: `POST .../login/oauth/access_token` (`secret_form_field = client_secret`) |
-| 2 | token response fed back | `Exchange`: `GET .../user` |
-| 3 | `/user` JSON fed back | `Exchange`: `GET .../user/orgs` (or `Identify` now if `fetch_orgs = false`) |
-| 4 | `/user/orgs` JSON fed back | `Identify(github:<login>` + `github:org/<org>` groups) |
+| step | input | the plugin |
+|------|-------|------------|
+| begin | `begin_login` (kernel-minted `state`, PKCE `code_challenge`) | answers the GitHub authorize URL |
+| 1 | `complete_login`: `code` + `redirect_uri` + `code_verifier` | `POST .../login/oauth/access_token` with its own `client_secret` |
+| 2 | the token response | `GET .../user` (bearer) |
+| 3 | the `/user` JSON | `GET .../user/orgs` (or identifies now if `fetch_orgs = false`) |
+| 4 | the `/user/orgs` JSON | identifies `github:<login>` + `github:id/<id>` + `github:org/<org>` groups |
 
-Fail-closed (`Reject`) on any non-2xx, missing `access_token`, missing `login`, or malformed JSON.
+Declined (a bad credential) on any non-2xx, missing `access_token`, missing `login`, or malformed
+JSON; a hop that cannot be made or whose reply passes 1 MiB is an outage.
 GitHub answers its token endpoint with **HTTP 200 even on a bad code** (an `{"error":...}` body with
 no `access_token`) — that is treated as a rejection, never a success with an empty token.
 
 ## Config
 
-Only `client_id` is required to parse, but **write `token_base`, `api_base` and `authorize_base`
-out in the settings even for github.com**: the hop allowlist is built only from the URL strings
-written in the settings (1.5.5 parity), so a base left at its default is not allowlisted and every
-hop to it is refused. The defaults below apply to the parsed config only. The `client_secret` is
-**never** in this config — it is `browser_login.client_secret`, which the kernel delivers to the
-plugin.
+`client_id`, `token_base` and `api_base` are required, **even for github.com**: the hop allowlist
+is built only from the URL strings written in the settings (1.5.5 parity), so `validate`/`open`
+refuse settings that leave either at its default (`settings: `token_base` must be written out: the
+hop allowlist is built only from URLs in the settings`). `authorize_base` is a browser redirect, not
+a hop, and may stay at its default. The `client_secret` is **never** in this config — it is
+`browser_login.client_secret`, which the kernel delivers to the plugin.
 
 ```json
 {
@@ -71,14 +70,14 @@ plugin.
 |-------|---------|-------|
 | `client_id` | *(required)* | GitHub OAuth App / GitHub App client id |
 | `scopes` | `["read:org","read:user"]` | `read:org` powers the org→group hop |
-| `api_base` | `https://api.github.com` | GHES: `https://<host>/api/v3` |
+| `api_base` | *(required)* | `https://api.github.com`; GHES: `https://<host>/api/v3` |
 | `authorize_base` | `https://github.com` | GHES: `https://<host>` |
-| `token_base` | `https://github.com` | GHES: `https://<host>` |
+| `token_base` | *(required)* | `https://github.com`; GHES: `https://<host>` |
 | `fetch_orgs` | `true` | `false` = login-only, no org groups, one fewer hop |
-| `ca_cert_pem` | *(none)* | GHES internal-CA trust (see ABI note below) |
+| `ca_cert_pem` | *(must not be set)* | Reserved: a config that sets it is **refused** (see below) |
 
-The config is `deny_unknown_fields` (a typo fails loudly at boot) and every non-required field is
-additive-friendly (`serde(default)`).
+The config is `deny_unknown_fields` (a typo fails loudly at boot). A refusal quotes the decoder's
+text only when it names a key (a missing or unknown field), never a value.
 
 ### GitHub Enterprise Server (GHES)
 
@@ -90,8 +89,7 @@ and the REST API at `https://<host>/api/v3`:
   "client_id": "...",
   "api_base": "https://ghe.corp.example/api/v3",
   "authorize_base": "https://ghe.corp.example",
-  "token_base": "https://ghe.corp.example",
-  "ca_cert_pem": "-----BEGIN CERTIFICATE-----\n..."
+  "token_base": "https://ghe.corp.example"
 }
 ```
 
@@ -124,14 +122,15 @@ is the thin `cdylib` that exports the auth C ABI via `busbar_contract::export_do
   headers, and `build_userinfo_get`/`build_orgs_get` attach them directly to the `/user` and
   `/user/orgs` hops. Headers are sanitized (CR/LF/NUL and hop-control headers rejected) and a hop
   only goes to a host on the allowlist built from the settings' URLs.
-- **`ca_cert_pem` delivery.** The plugin's one outbound `http` need carries no CA, so this GHES CA
-  value still has no delivery channel. It is accepted here for forward-compatibility and to capture
-  operator intent.
+- **`ca_cert_pem` is not wired.** The plugin's one outbound `http` need carries no CA, so a GHES CA
+  has no delivery channel: a config that sets it is refused (`github ca_cert_pem is not yet
+  supported; omit it or use a system-trusted cert`), never accepted and silently ignored.
 - **Multi-hop flow state.** The access token is seen once (the token response) but is needed to
-  authenticate both GETs, and the `/user` identity is needed at the `/user/orgs` step. On 1.6
-  each flow (`LoginFlow`) owns this state, so concurrent logins never share a slot. (The legacy
-  static-link `GithubModule` keyed it by the core-held PKCE `code_verifier`, falling back to `code`, and rejected a
-  feedback call carrying neither.)
+  authenticate both GETs, and the `/user` identity is needed at the `/user/orgs` step. Each flow
+  (`LoginFlow`) owns this state, so concurrent logins never share a slot; a finished flow holds
+  neither.
+- **Reply cap.** Every hop's reply is capped at 1 MiB (`MAX_HOP_REPLY_BYTES`, the exchange's
+  `reply_limit`); a reply past it ends the login as an outage.
 
 ## Tests
 
