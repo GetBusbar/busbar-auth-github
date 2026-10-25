@@ -221,11 +221,13 @@ impl GithubLogin {
                 ));
             }
         }
+        // The secret goes only to the token endpoint: an `https` one requires a secured connection.
+        let client_secret = client_secret.filter(|s| !s.is_empty()).map(|s| {
+            Cred::captured(Zeroizing::new(s.as_bytes().to_vec())).secure_for(&cfg.token_base)
+        });
         Ok(Self {
             cfg,
-            client_secret: client_secret
-                .filter(|s| !s.is_empty())
-                .map(|s| Cred::captured(Zeroizing::new(s.as_bytes().to_vec()))),
+            client_secret,
             allowed_hosts: collect_allowed_hosts(&raw),
         })
     }
@@ -394,7 +396,10 @@ impl GithubLogin {
         if let Some(token) = parse_access_token(&resp.body) {
             let hop = build_userinfo_get(&self.cfg);
             flow.state = FlowState {
-                access_token: Some(Cred::captured(Zeroizing::new(token.into_bytes()))),
+                access_token: Some(
+                    Cred::captured(Zeroizing::new(token.into_bytes()))
+                        .secure_for(&self.cfg.api_base),
+                ),
                 user: None,
             };
             return LoginOutcome::Exchange(hop);
