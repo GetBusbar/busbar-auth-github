@@ -679,3 +679,74 @@ fn decision_a_reference_written_base_resolved_by_the_kernel_logs_in() {
         );
     assert_eq!(identity(run(&l, &mut s)).id, "github:octocat");
 }
+
+#[test]
+fn a_poisoned_orgs_array_cannot_swap_the_token_mid_flow() {
+    let l = login();
+    let mut s = Script::happy().answer(
+        ORGS_URL,
+        200,
+        r#"[{"login":"acme","description":"x&access_token=gho_ATTACKER&y"}]"#,
+    );
+    let p = identity(run(&l, &mut s));
+    assert_eq!(p.id, "github:octocat");
+    assert!(p.roles.contains(&"github:org/acme".to_string()));
+    assert_eq!(s.targets(), vec![TOKEN_URL, USER_URL, ORGS_URL]);
+    assert!(s
+        .issued
+        .iter()
+        .all(|r| !r.fields.iter().any(|(_, v)| v.contains("gho_ATTACKER"))));
+}
+
+mod logging {
+    use super::*;
+    use busbar_contract::testkit::WarnCapture;
+
+    /// Settings that omit `token_base`: its default host is not operator-written, so not allowed.
+    const NO_TOKEN_BASE: &str =
+        r#"{"client_id": "Iv1.client", "api_base": "https://api.github.com"}"#;
+
+    #[test]
+    fn a_hop_the_guard_refuses_is_explained_without_a_secret() {
+        let l = GithubLogin::open(NO_TOKEN_BASE, Some(SECRET)).expect("opens");
+        let cap = WarnCapture::default();
+        let step = tracing::subscriber::with_default(cap.clone(), || run(&l, &mut Script::happy()));
+        assert_eq!(step, LoginStep::Outage);
+        assert!(cap.contains("github.com"), "{:?}", cap.messages());
+        assert!(cap.contains("allow"), "{:?}", cap.messages());
+        for secret in [SECRET, "the-code", "the-verifier"] {
+            assert!(!cap.contains(secret), "{:?}", cap.messages());
+        }
+    }
+
+    #[test]
+    fn a_declined_code_logs_the_idp_error_and_no_secret() {
+        let l = login();
+        let mut s = Script::new().answer(TOKEN_URL, 200, r#"{"error":"bad_verification_code"}"#);
+        let cap = WarnCapture::capturing_debug();
+        let step = tracing::subscriber::with_default(cap.clone(), || run(&l, &mut s));
+        assert_eq!(step, LoginStep::BadCredential);
+        assert!(
+            cap.contains("bad_verification_code"),
+            "{:?}",
+            cap.messages()
+        );
+        for secret in [SECRET, "the-code", "the-verifier"] {
+            assert!(!cap.contains(secret), "{:?}", cap.messages());
+        }
+    }
+
+    #[test]
+    fn a_misconfigured_client_is_a_warn() {
+        let l = login();
+        let mut s = Script::new().answer(TOKEN_URL, 200, "error=incorrect_client_credentials");
+        let cap = WarnCapture::default();
+        let step = tracing::subscriber::with_default(cap.clone(), || run(&l, &mut s));
+        assert_eq!(step, LoginStep::BadCredential);
+        assert!(
+            cap.contains("incorrect_client_credentials"),
+            "{:?}",
+            cap.messages()
+        );
+    }
+}

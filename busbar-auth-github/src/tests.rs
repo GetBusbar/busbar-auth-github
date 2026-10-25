@@ -749,3 +749,100 @@ fn the_stable_numeric_id_distinguishes_two_accounts_sharing_one_handle() {
         b.roles
     );
 }
+
+// ── a fed-back /user/orgs array is never a token response ───────────────────────────────────────────
+
+#[test]
+fn an_orgs_array_with_an_embedded_access_token_pair_is_not_a_token_response() {
+    let poisoned = r#"[{"login":"acme","description":"x&access_token=gho_ATTACKER&y"}]"#;
+    assert_eq!(parse_access_token(poisoned), None);
+    // Truncated/malformed array: still never a token.
+    let truncated = r#"[{"login":"acme","description":"x&access_token=gho_ATTACKER&"#;
+    assert_eq!(parse_access_token(truncated), None);
+}
+
+#[test]
+fn a_poisoned_orgs_array_identifies_the_original_user_not_a_second_exchange() {
+    let module = GithubModule::new(cfg());
+    let cv = Some("the-verifier".to_string());
+    module.complete_login(&CompleteLogin {
+        code: Some("c".into()),
+        redirect_uri: Some("https://busbar.example/auth/token".into()),
+        code_verifier: cv.clone(),
+        ..Default::default()
+    });
+    module.complete_login(&CompleteLogin {
+        code_verifier: cv.clone(),
+        token_response: Some(resp(200, r#"{"access_token":"gho_victim"}"#)),
+        ..Default::default()
+    });
+    module.complete_login(&CompleteLogin {
+        code_verifier: cv.clone(),
+        token_response: Some(resp(200, r#"{"login":"victim","id":7}"#)),
+        ..Default::default()
+    });
+    let orgs = r#"[{"login":"acme","description":"x&access_token=gho_ATTACKER&y"}]"#;
+    let p = expect_identify(module.complete_login(&CompleteLogin {
+        code_verifier: cv,
+        token_response: Some(resp(200, orgs)),
+        ..Default::default()
+    }));
+    assert_eq!(p.id, "github:victim");
+    assert!(p.roles.contains(&"github:org/acme".to_string()));
+}
+
+/// The TTL sweep had no test: an entry older than `PENDING_TTL_SECS` must be dropped by the next
+/// token step, while a fresh one survives.
+#[test]
+fn the_ttl_sweep_drops_stale_pending_entries_on_the_next_token_step() {
+    let module = GithubModule::new(cfg());
+    let stale = Instant::now()
+        .checked_sub(std::time::Duration::from_secs(PENDING_TTL_SECS + 1))
+        .expect("monotonic clock has run long enough");
+    {
+        let mut pending = module.pending.lock().unwrap();
+        for k in ["stale-flow", "fresh-flow"] {
+            pending.insert(
+                k.to_string(),
+                PendingLogin {
+                    access_token: Held::new("gho_old".to_string()),
+                    user: None,
+                    inserted_at: if k == "stale-flow" {
+                        stale
+                    } else {
+                        Instant::now()
+                    },
+                },
+            );
+        }
+    }
+    let out = module.complete_login(&CompleteLogin {
+        code_verifier: Some("cv-new".to_string()),
+        token_response: Some(resp(200, r#"{"access_token":"gho_x"}"#)),
+        ..Default::default()
+    });
+    assert!(matches!(out, LoginOutcome::Exchange(_)));
+    let pending = module.pending.lock().unwrap();
+    assert!(
+        !pending.contains_key("stale-flow"),
+        "stale entry must be swept"
+    );
+    assert!(
+        pending.contains_key("fresh-flow"),
+        "fresh entry must survive"
+    );
+    assert!(pending.contains_key("cv-new"));
+}
+
+/// Form-encoded token values are percent- and plus-decoded.
+#[test]
+fn parse_access_token_form_decodes_percent_and_plus() {
+    assert_eq!(
+        parse_access_token("access_token=gho%5Fab+c&scope=x").as_deref(),
+        Some("gho_ab c")
+    );
+    assert_eq!(
+        parse_access_token("scope=x&access_token=a%2Bb%3D").as_deref(),
+        Some("a+b=")
+    );
+}
