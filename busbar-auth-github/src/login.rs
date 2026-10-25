@@ -249,6 +249,9 @@ impl GithubLogin {
                 Some(parked) => parked,
                 None => {
                     if flow.turns >= MAX_HOPS {
+                        tracing::warn!(
+                            "github login: hop limit ({MAX_HOPS}) spent without an identity"
+                        );
                         return finish(flow, LoginStep::Outage);
                     }
                     flow.turns += 1;
@@ -257,9 +260,13 @@ impl GithubLogin {
                         LoginOutcome::Reject => return finish(flow, LoginStep::BadCredential),
                         LoginOutcome::Exchange(hop) => match self.render(&hop) {
                             Ok(r) => r,
+                            // The guard has already said why.
                             Err(Refused) => return finish(flow, LoginStep::Outage),
                         },
-                        _ => return finish(flow, LoginStep::Outage),
+                        _ => {
+                            tracing::warn!("github login: the step machine asked for an outcome this login cannot serve");
+                            return finish(flow, LoginStep::Outage);
+                        }
                     }
                 }
             };
@@ -278,6 +285,7 @@ impl GithubLogin {
                         &body,
                         flow.nonce.as_ref().map(|n| n.reveal().as_str()),
                     ) {
+                        tracing::warn!("github login: a hop body's id_token is not bound to the nonce minted at begin");
                         return finish(flow, LoginStep::SecurityCheckFailed);
                     }
                     flow.req.token_response = Some(LoginHttpResponse {
@@ -285,6 +293,9 @@ impl GithubLogin {
                         body,
                     });
                     if flow.turns >= MAX_HOPS {
+                        tracing::warn!(
+                            "github login: hop limit ({MAX_HOPS}) spent without an identity"
+                        );
                         return finish(flow, LoginStep::Outage);
                     }
                 }
@@ -301,6 +312,7 @@ impl GithubLogin {
                 req.redirect_uri.as_deref(),
                 req.code_verifier.as_deref(),
             ) else {
+                tracing::info!("github login: declined, the callback lacks its code, redirect_uri or code_verifier");
                 return LoginOutcome::Reject;
             };
             return LoginOutcome::Exchange(build_token_exchange(
@@ -316,9 +328,18 @@ impl GithubLogin {
             .or_else(|| req.code.clone())
             .is_some_and(|s| !s.is_empty());
         if !correlated {
+            tracing::info!(
+                "github login: declined, the callback has neither a code_verifier nor a code"
+            );
             return LoginOutcome::Reject;
         }
         if !(200..300).contains(&resp.status) {
+            let hop = hop_name(&flow.state);
+            tracing::info!(
+                status = resp.status,
+                hop,
+                "github login: declined, non-2xx answer"
+            );
             flow.state = FlowState::default();
             return LoginOutcome::Reject;
         }
@@ -333,14 +354,34 @@ impl GithubLogin {
         if is_json_array(&resp.body) {
             let state = std::mem::take(&mut flow.state);
             let Some(user) = state.user else {
+                tracing::info!("github login: declined, an org list arrived before the user");
                 return LoginOutcome::Reject;
             };
             let Some(groups) = parse_org_groups(&resp.body) else {
+                tracing::info!("github login: declined, /user/orgs answered a malformed list");
                 return LoginOutcome::Reject;
             };
             return LoginOutcome::Identify(build_principal(&user, groups));
         }
         let Some(user) = parse_user(&resp.body) else {
+            if flow.state.access_token.is_none() {
+                // The token hop: GitHub answered no access_token.
+                match github_error(&resp.body) {
+                    None => tracing::info!(
+                        "github login: declined, the token endpoint answered no access_token"
+                    ),
+                    Some(e) if e == "bad_verification_code" => tracing::info!(
+                        error = ?e,
+                        "github login: declined, the token endpoint refused the code"
+                    ),
+                    Some(e) => tracing::warn!(
+                        error = ?e,
+                        "github login: the token endpoint refused the exchange (check client_id, client_secret and redirect_uri)"
+                    ),
+                }
+            } else {
+                tracing::info!("github login: declined, /user answered without a login or id");
+            }
             flow.state = FlowState::default();
             return LoginOutcome::Reject;
         };
@@ -349,6 +390,7 @@ impl GithubLogin {
             return LoginOutcome::Identify(build_principal(&user, Vec::new()));
         }
         let Some(token) = &flow.state.access_token else {
+            tracing::info!("github login: declined, no access token held at /user");
             return LoginOutcome::Reject;
         };
         let hop = build_orgs_get(&self.cfg, token.reveal());
@@ -397,6 +439,28 @@ impl GithubLogin {
             timeout_ms: HOP_TIMEOUT_MS,
         })
     }
+}
+
+/// Which hop a held state means the last answer came from (never the URL string).
+fn hop_name(state: &FlowState) -> &'static str {
+    match (&state.access_token, &state.user) {
+        (None, _) => "/login/oauth/access_token",
+        (Some(_), None) => "/user",
+        (Some(_), Some(_)) => "/user/orgs",
+    }
+}
+
+/// GitHub's `error` code from a token response body (JSON `error` or form `error=`), if any.
+fn github_error(body: &str) -> Option<String> {
+    let trimmed = body.trim();
+    if trimmed.starts_with('{') {
+        let v: Value = serde_json::from_str(trimmed).ok()?;
+        return v.get("error").and_then(Value::as_str).map(str::to_string);
+    }
+    trimmed
+        .split('&')
+        .find_map(|p| p.strip_prefix("error="))
+        .map(str::to_string)
 }
 
 fn finish(flow: &mut LoginFlow, step: LoginStep) -> LoginStep {
