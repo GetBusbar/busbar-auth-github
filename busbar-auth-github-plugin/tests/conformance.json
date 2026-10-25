@@ -1,6 +1,8 @@
 {
+  "credentials": ["CANARY-gh-client-secret-7c19", "gho_conformance_token"],
   "settings": {
     "client_id": "conformance-client",
+    "client_secret": "CANARY-gh-client-secret-7c19",
     "api_base": "https://api.github.conformance.example",
     "authorize_base": "https://github.conformance.example",
     "token_base": "https://github.conformance.example"

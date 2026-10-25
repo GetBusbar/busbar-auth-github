@@ -34,7 +34,6 @@
 
 pub mod door;
 pub mod guard;
-mod held;
 pub mod login;
 
 use busbar_contract::auth::{LoginHop, LoginOutcome, Principal};
@@ -142,7 +141,7 @@ fn orgs_endpoint(cfg: &GitHubConfig) -> String {
 
 /// Percent-encode `s` for a URL QUERY-component value (RFC 3986 unreserved kept literal, everything
 /// else `%`-escaped). Used only for the authorize URL; the token-exchange form is encoded by
-/// [`login::form_encode`].
+/// the SDK's `FormBody`.
 fn pct(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for &b in s.as_bytes() {
@@ -225,16 +224,11 @@ pub fn build_token_exchange(
     }
 }
 
-/// The request headers of an authenticated GitHub REST hop: `Authorization: Bearer <token>`, the
-/// mandatory `User-Agent` (GitHub rejects a UA-less request), and the `Accept` GitHub recommends.
-/// The values are the contract's plain `String`s ([`LoginHop::headers`]); [`login`] sanitises them
-/// into the wiped request and wipes these once rendered.
-pub fn userinfo_headers(access_token: &str) -> Vec<(String, String)> {
+/// The public request headers of an authenticated GitHub REST hop: the mandatory `User-Agent`
+/// (GitHub rejects a UA-less request) and the `Accept` GitHub recommends. Its `Authorization:
+/// Bearer <token>` is the chip's, sealed in ahead of them when the hop is rendered.
+pub fn userinfo_headers() -> Vec<(String, String)> {
     vec![
-        (
-            "Authorization".to_string(),
-            format!("Bearer {access_token}"),
-        ),
         ("User-Agent".to_string(), "busbar".to_string()),
         (
             "Accept".to_string(),
@@ -243,27 +237,26 @@ pub fn userinfo_headers(access_token: &str) -> Vec<(String, String)> {
     ]
 }
 
-/// Build the `/user` profile GET hop (no secret), with the `Authorization: Bearer <access_token>` +
-/// `User-Agent` + `Accept` headers ([`userinfo_headers`]) attached via the `headers` field.
-pub fn build_userinfo_get(cfg: &GitHubConfig, access_token: &str) -> LoginHop {
+/// Build the `/user` profile GET hop, with the `User-Agent` + `Accept` headers
+/// ([`userinfo_headers`]); the bearer is sealed in when it is rendered.
+pub fn build_userinfo_get(cfg: &GitHubConfig) -> LoginHop {
     LoginHop {
         method: "GET".to_string(),
         url: user_endpoint(cfg),
         form: Vec::new(),
         secret_form_field: None,
-        headers: userinfo_headers(access_token),
+        headers: userinfo_headers(),
     }
 }
 
-/// Build the `/user/orgs` GET hop (no secret), with the same authenticated headers as
-/// [`build_userinfo_get`].
-pub fn build_orgs_get(cfg: &GitHubConfig, access_token: &str) -> LoginHop {
+/// Build the `/user/orgs` GET hop, with the same headers as [`build_userinfo_get`].
+pub fn build_orgs_get(cfg: &GitHubConfig) -> LoginHop {
     LoginHop {
         method: "GET".to_string(),
         url: orgs_endpoint(cfg),
         form: Vec::new(),
         secret_form_field: None,
-        headers: userinfo_headers(access_token),
+        headers: userinfo_headers(),
     }
 }
 

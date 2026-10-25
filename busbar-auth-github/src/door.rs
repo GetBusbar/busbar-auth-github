@@ -276,17 +276,30 @@ impl Exchange for Over<'_, '_> {
             return Fetched::Unreachable;
         };
         if self.wire.is_none() {
-            let sent = Wire::request(Request {
-                method: request.method.clone().into_bytes(),
-                target: target.into_bytes(),
-                fields: request
-                    .fields
-                    .iter()
-                    .map(|(n, v)| (n.clone().into_bytes(), v.as_bytes().to_vec()))
-                    .collect(),
-                body: request.body.to_vec(),
-                timeout_ms: request.timeout_ms,
-            })
+            let Ok(body) = request.body.encoded() else {
+                return Fetched::Unreachable;
+            };
+            // The bearer is the chip's, written after `content-type` as 1.5.5's http stack did.
+            let sealed = request
+                .bearer
+                .iter()
+                .map(|b| (1, b"authorization".to_vec(), b.bearer()))
+                .collect();
+            let sent = Wire::request_with(
+                Request {
+                    method: request.method.clone().into_bytes(),
+                    target: target.into_bytes(),
+                    fields: request
+                        .fields
+                        .iter()
+                        .map(|(n, v)| (n.clone().into_bytes(), v.as_bytes().to_vec()))
+                        .collect(),
+                    body: Vec::new(),
+                    timeout_ms: request.timeout_ms,
+                },
+                sealed,
+                Some(body),
+            )
             .map(|w| w.reply_limit(MAX_HOP_REPLY_BYTES));
             match sent {
                 Ok(w) => *self.wire = Some(w),

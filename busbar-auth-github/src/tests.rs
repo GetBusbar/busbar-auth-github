@@ -92,21 +92,22 @@ fn the_token_exchange_hop_names_the_secret_field_and_leaves_it_empty() {
 
 /// The `/user` hop carries the bearer + User-Agent headers, no form, no secret field.
 #[test]
-fn the_userinfo_hop_carries_the_bearer_headers() {
-    let hop = build_userinfo_get(&cfg(), "gho_opaque");
+fn the_userinfo_hop_carries_the_public_headers_and_no_bearer() {
+    let hop = build_userinfo_get(&cfg());
     assert_eq!(hop.method, "GET");
     assert_eq!(hop.url, "https://api.github.com/user");
     assert_eq!(hop.secret_form_field, None);
     assert!(hop.form.is_empty());
-    assert!(hop
+    // The bearer is the chip's, sealed in when the hop is rendered: never a hop header.
+    assert!(!hop
         .headers
         .iter()
-        .any(|(k, v)| k == "Authorization" && v == "Bearer gho_opaque"));
+        .any(|(k, _)| k.eq_ignore_ascii_case("authorization")));
     assert!(hop
         .headers
         .iter()
         .any(|(k, v)| k == "User-Agent" && v == "busbar"));
-    assert_eq!(hop.headers, userinfo_headers("gho_opaque"));
+    assert_eq!(hop.headers, userinfo_headers());
 }
 
 /// Both token-response shapes parse; GitHub's 200-with-`error` body and an empty token do not.
@@ -186,22 +187,16 @@ fn ghes_base_urls_config() {
     // token endpoint → GHES host
     let hop = build_token_exchange(&c, "code", "https://busbar/auth/token", "v");
     assert_eq!(hop.url, "https://ghe.corp.example/login/oauth/access_token");
-    // REST endpoints → GHES /api/v3, both bearer-authenticated with the access token.
-    let user_hop = build_userinfo_get(&c, "gho_ent");
+    // REST endpoints → GHES /api/v3 (the bearer is sealed in at render, `login_tests`).
+    let user_hop = build_userinfo_get(&c);
     assert_eq!(user_hop.url, "https://ghe.corp.example/api/v3/user");
-    assert!(user_hop
-        .headers
-        .iter()
-        .any(|(k, v)| k == "Authorization" && v == "Bearer gho_ent"));
-    let orgs_hop = build_orgs_get(&c, "gho_ent");
+    assert_eq!(user_hop.headers, userinfo_headers());
+    let orgs_hop = build_orgs_get(&c);
     assert_eq!(
         orgs_hop.url,
         "https://ghe.corp.example/api/v3/user/orgs?per_page=100"
     );
-    assert!(orgs_hop
-        .headers
-        .iter()
-        .any(|(k, v)| k == "Authorization" && v == "Bearer gho_ent"));
+    assert_eq!(orgs_hop.headers, userinfo_headers());
 }
 
 // ── parsing helpers ──────────────────────────────────────────────────────────────────────────────
@@ -270,7 +265,7 @@ fn a_user_body_without_a_numeric_id_is_refused() {
 
 #[test]
 fn orgs_hop_url_requests_per_page_100() {
-    let hop = build_orgs_get(&cfg(), "gho_x");
+    let hop = build_orgs_get(&cfg());
     assert!(
         hop.url.contains("per_page=100"),
         "orgs hop must raise the page cap: {}",

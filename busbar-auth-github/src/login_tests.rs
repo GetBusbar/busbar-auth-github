@@ -6,6 +6,7 @@
 //! step machine).
 
 use super::*;
+use busbar_contract::abi::sdk::test_support::chip;
 use std::collections::HashMap;
 
 const SECRET: &str = "s3cr3t-client-value";
@@ -74,6 +75,22 @@ fn plain(fields: &[(String, zeroize::Zeroizing<String>)]) -> Vec<(String, String
         .iter()
         .map(|(n, v)| (n.clone(), v.as_str().to_string()))
         .collect()
+}
+
+/// The fields as they go on the wire: the public ones, with the chip's `authorization: Bearer` at
+/// index 1 (after `content-type`) when the hop carries the bearer.
+fn wire(r: &HopRequest) -> Vec<(String, String)> {
+    let mut out = plain(&r.fields);
+    if let Some(b) = &r.bearer {
+        let token = String::from_utf8(chip::cred_bytes(b)).unwrap();
+        out.insert(1, ("authorization".to_string(), format!("Bearer {token}")));
+    }
+    out
+}
+
+/// The body as it goes on the wire.
+fn body_text(r: &HopRequest) -> String {
+    String::from_utf8(chip::form_bytes(&r.body)).unwrap()
 }
 
 impl Exchange for Script {
@@ -145,13 +162,13 @@ fn the_token_exchange_carries_the_plugins_own_secret_in_1_5_5_bytes() {
     assert_eq!(token.target, TOKEN_URL);
     assert_eq!(token.timeout_ms, 10_000);
     assert_eq!(
-        String::from_utf8(token.body.to_vec()).unwrap(),
+        body_text(token),
         "client_id=Iv1.client&code=the-code\
          &redirect_uri=https%3A%2F%2Fnode.example%2Fauth%2Ftoken\
          &code_verifier=the-verifier&client_secret=s3cr3t-client-value"
     );
     assert_eq!(
-        plain(&token.fields),
+        wire(token),
         vec![
             (
                 "content-type".to_string(),
@@ -171,9 +188,9 @@ fn the_rest_gets_carry_the_bearer_and_user_agent() {
     run(&l, &mut s);
     for get in &s.issued[1..] {
         assert_eq!(get.method, "GET");
-        assert!(get.body.is_empty());
+        assert!(body_text(get).is_empty());
         assert_eq!(
-            plain(&get.fields),
+            wire(get),
             vec![
                 (
                     "content-type".to_string(),
@@ -594,7 +611,7 @@ fn the_orgs_hop_carries_the_token_from_the_token_step() {
     let mut s = Script::happy();
     run(&l, &mut s);
     assert_eq!(s.issued[2].target, ORGS_URL);
-    assert!(plain(&s.issued[2].fields)
+    assert!(wire(&s.issued[2])
         .iter()
         .any(|(k, v)| k == "authorization" && *v == format!("Bearer {TOKEN}")));
 }
@@ -619,7 +636,7 @@ fn each_flow_owns_its_state_and_a_finished_one_holds_nothing() {
     let bearer = |s: &Script, t: &str| {
         s.issued
             .iter()
-            .any(|r| r.fields.iter().any(|(_, v)| v.contains(t)))
+            .any(|r| wire(r).iter().any(|(_, v)| v.contains(t)))
     };
     assert!(bearer(&a, "gho_a") && !bearer(&a, "gho_b"));
     assert!(bearer(&b, "gho_b") && !bearer(&b, "gho_a"));
@@ -698,7 +715,7 @@ fn the_v1_5_5_example_provider_loads_and_logs_in_with_the_secret_beside_the_sett
     expected.name = Some("octocat".to_string());
     expected.roles = vec!["github:id/1".to_string(), "github:org/testorg".to_string()];
     assert_eq!(p, expected);
-    let body = String::from_utf8(s.issued[0].body.to_vec()).unwrap();
+    let body = body_text(&s.issued[0]);
     assert!(body.starts_with("client_id=Iv1.e2eclient&"), "{body}");
     assert!(
         body.ends_with(&format!("&client_secret={SECRET}")),
@@ -722,7 +739,7 @@ fn no_secret_loads_and_drops_the_secret_field_as_1_5_5_did() {
         let l = GithubLogin::open(SETTINGS, secret).expect("loads without a secret");
         let mut s = Script::happy();
         assert_eq!(identity(run(&l, &mut s)).id, "github:octocat");
-        let body = String::from_utf8(s.issued[0].body.to_vec()).unwrap();
+        let body = body_text(&s.issued[0]);
         assert!(!body.contains("client_secret"), "{body}");
         assert!(body.ends_with("&code_verifier=the-verifier"), "{body}");
     }
@@ -765,16 +782,15 @@ fn begin_login_is_the_1_5_5_authorize_url() {
 }
 
 #[test]
-fn form_encode_is_serde_urlencoded() {
-    let pairs = [("a b", "x*y-z._~!"), ("k", "é/=&")];
+fn the_form_is_serde_urlencoded() {
+    let body = FormBody::new()
+        .public("a b", "x*y-z._~!")
+        .public("k", "é/=&");
     assert_eq!(
-        form_encode(&pairs).as_str(),
-        "a+b=x*y-z._%7E%21&k=%C3%A9%2F%3D%26"
+        chip::form_bytes(&body),
+        b"a+b=x*y-z._%7E%21&k=%C3%A9%2F%3D%26"
     );
-    assert_eq!(form_encode(&[]).as_str(), "");
-    // Sized exactly up front: no growth leaves a partial copy behind.
-    let encoded = form_encode(&pairs);
-    assert_eq!(encoded.capacity(), encoded.len());
+    assert!(chip::form_bytes(&FormBody::new()).is_empty());
 }
 
 /// OWNER Q123 ACCEPTED (2026-09-30: "a GitHub base URL written as a secret reference now logs
@@ -827,7 +843,7 @@ fn a_poisoned_orgs_array_cannot_swap_the_token_mid_flow() {
     assert!(s
         .issued
         .iter()
-        .all(|r| !r.fields.iter().any(|(_, v)| v.contains("gho_ATTACKER"))));
+        .all(|r| !wire(r).iter().any(|(_, v)| v.contains("gho_ATTACKER"))));
 }
 
 mod logging {
@@ -859,7 +875,7 @@ mod logging {
             secret_form_field: None,
             headers: Vec::new(),
         };
-        let refused = tracing::subscriber::with_default(cap.clone(), || l.render(&hop));
+        let refused = tracing::subscriber::with_default(cap.clone(), || l.render(&hop, None));
         assert_eq!(refused, Err(Refused));
         assert!(cap.contains("elsewhere.example"), "{:?}", cap.messages());
         assert!(cap.contains("allow"), "{:?}", cap.messages());
