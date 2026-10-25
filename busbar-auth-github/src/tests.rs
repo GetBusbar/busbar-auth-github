@@ -789,4 +789,59 @@ fn a_poisoned_orgs_array_identifies_the_original_user_not_a_second_exchange() {
     }));
     assert_eq!(p.id, "github:victim");
     assert!(p.roles.contains(&"github:org/acme".to_string()));
+
+/// The TTL sweep had no test: an entry older than `PENDING_TTL_SECS` must be dropped by the next
+/// token step, while a fresh one survives.
+#[test]
+fn the_ttl_sweep_drops_stale_pending_entries_on_the_next_token_step() {
+    let module = GithubModule::new(cfg());
+    let stale = Instant::now()
+        .checked_sub(std::time::Duration::from_secs(PENDING_TTL_SECS + 1))
+        .expect("monotonic clock has run long enough");
+    {
+        let mut pending = module.pending.lock().unwrap();
+        for k in ["stale-flow", "fresh-flow"] {
+            pending.insert(
+                k.to_string(),
+                PendingLogin {
+                    access_token: Held::new("gho_old".to_string()),
+                    user: None,
+                    inserted_at: if k == "stale-flow" {
+                        stale
+                    } else {
+                        Instant::now()
+                    },
+                },
+            );
+        }
+    }
+    let out = module.complete_login(&CompleteLogin {
+        code_verifier: Some("cv-new".to_string()),
+        token_response: Some(resp(200, r#"{"access_token":"gho_x"}"#)),
+        ..Default::default()
+    });
+    assert!(matches!(out, LoginOutcome::Exchange(_)));
+    let pending = module.pending.lock().unwrap();
+    assert!(
+        !pending.contains_key("stale-flow"),
+        "stale entry must be swept"
+    );
+    assert!(
+        pending.contains_key("fresh-flow"),
+        "fresh entry must survive"
+    );
+    assert!(pending.contains_key("cv-new"));
+}
+
+/// Form-encoded token values are percent- and plus-decoded.
+#[test]
+fn parse_access_token_form_decodes_percent_and_plus() {
+    assert_eq!(
+        parse_access_token("access_token=gho%5Fab+c&scope=x").as_deref(),
+        Some("gho_ab c")
+    );
+    assert_eq!(
+        parse_access_token("scope=x&access_token=a%2Bb%3D").as_deref(),
+        Some("a+b=")
+    );
 }
