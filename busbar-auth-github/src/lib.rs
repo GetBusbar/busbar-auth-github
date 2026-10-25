@@ -9,6 +9,9 @@
 //! DESCRIBES an HTTP hop, the CORE executes it and feeds the response back into `complete_login`,
 //! bounded to a few hops.
 //!
+//! **Note:** the paragraphs below describe the legacy core-driven [`GithubModule`] shape (1.5.x). On
+//! busbar 1.6 the [`door`] holds the client secret and runs the hops itself; see "1.6.0" below.
+//!
 //! ## The hop sequence this module drives
 //!
 //! 1. `begin_login` → [`LoginOutcome::Authorize`]: the GitHub authorize URL (`client_id`,
@@ -121,9 +124,10 @@ pub struct GitHubConfig {
     #[serde(default = "default_true")]
     pub fetch_orgs: bool,
     /// An ADDITIONAL trusted root CA certificate (PEM) for a GHES instance behind an internal CA whose
-    /// endpoints don't chain to a public root. Optional. NOTE: on the committed 1.5.2 ABI the CORE (not
-    /// this module) executes every hop, so this value has no delivery channel to the hop executor yet;
-    /// it is accepted here so the config is forward-compatible and a GHES operator's intent is captured.
+    /// endpoints don't chain to a public root. Optional. NOTE: it still has no delivery channel (on
+    /// the legacy 1.5.2 shape the CORE executed every hop; on 1.6 the plugin's one outbound `http`
+    /// need carries no CA); it is accepted here so the config is forward-compatible and a GHES
+    /// operator's intent is captured.
     #[serde(default)]
     pub ca_cert_pem: Option<String>,
 }
@@ -462,11 +466,6 @@ pub fn identity_from_user_and_orgs(user_body: &str, orgs_body: Option<&str>) -> 
     LoginOutcome::Identify(build_principal(&user, groups))
 }
 
-/// Per-flow state threaded across the authenticated hops. The multi-hop `complete_login` ABI feeds the
-/// module only the LATEST hop response, but the opaque access token (seen once, in the token-exchange
-/// response) is needed to author the SECOND authenticated GET, and the `/user` identity (seen at the
-/// `/user` response) is needed to build the final `Principal` at the `/user/orgs` response. This holds
-/// both across the hop chain.
 /// How long a half-finished flow's state is kept. The core abandons a hop chain without re-entering
 /// this module whenever a hop itself fails to execute (an upstream 5xx, a timeout, hop-limit
 /// exhaustion), so the entry inserted before that hop is never removed by any code path here. Left
@@ -478,6 +477,11 @@ const PENDING_TTL_SECS: u64 = 600;
 /// A hard ceiling, independent of the TTL, so a burst cannot outrun the sweep.
 const PENDING_MAX: usize = 4096;
 
+/// Per-flow state threaded across the authenticated hops. The multi-hop `complete_login` ABI feeds the
+/// module only the LATEST hop response, but the opaque access token (seen once, in the token-exchange
+/// response) is needed to author the SECOND authenticated GET, and the `/user` identity (seen at the
+/// `/user` response) is needed to build the final `Principal` at the `/user/orgs` response. This holds
+/// both across the hop chain.
 #[derive(Debug, Clone)]
 struct PendingLogin {
     /// The opaque GitHub bearer, wrapped so a stray `{:?}` on this struct, or on the map that holds
