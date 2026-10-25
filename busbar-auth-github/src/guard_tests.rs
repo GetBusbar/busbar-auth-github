@@ -160,6 +160,7 @@ fn metadata_host_covers_every_provider_constant_and_name() {
     }
     assert!(!metadata_host("http://metadata.example.com/"));
     assert!(!metadata_host("http://100.100.100.201/"));
+}
 
 mod logging {
     use super::*;
