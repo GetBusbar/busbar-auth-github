@@ -134,3 +134,34 @@ fn private_or_loopback_matches_1_5_5() {
         assert!(!host_is_private_or_loopback(h), "{h}");
     }
 }
+
+mod logging {
+    use super::*;
+    use busbar_contract::testkit::WarnCapture;
+
+    #[test]
+    fn a_refused_header_logs_its_name_never_its_value() {
+        let cap = WarnCapture::default();
+        tracing::subscriber::with_default(cap.clone(), || {
+            assert_eq!(
+                sanitize_hop_header("x-api-key", "Bearer gho_bearer_value\nInjected: 1"),
+                Err(Refused)
+            );
+        });
+        assert!(cap.contains("x-api-key"), "{:?}", cap.messages());
+        assert!(!cap.contains("gho_bearer_value"), "{:?}", cap.messages());
+    }
+
+    #[test]
+    fn a_host_outside_the_allowlist_logs_the_rule_and_the_host_only() {
+        let cap = WarnCapture::default();
+        tracing::subscriber::with_default(cap.clone(), || {
+            let url = "https://user:hunter2@evil.example/path?code=abc";
+            assert_eq!(vet_hop_url(url, &allowed(&["github.com"])), Err(Refused));
+        });
+        assert!(cap.contains("evil.example"), "{:?}", cap.messages());
+        assert!(cap.contains("allow"), "{:?}", cap.messages());
+        assert!(!cap.contains("hunter2"), "{:?}", cap.messages());
+        assert!(!cap.contains("code=abc"), "{:?}", cap.messages());
+    }
+}
