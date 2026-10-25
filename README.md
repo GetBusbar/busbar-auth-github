@@ -130,8 +130,8 @@ is the thin `cdylib` that exports the auth C ABI via `busbar_contract::export_do
 - **Multi-hop flow state.** The access token is seen once (the token response) but is needed to
   authenticate both GETs, and the `/user` identity is needed at the `/user/orgs` step. On 1.6
   each flow (`LoginFlow`) owns this state, so concurrent logins never share a slot. (The legacy
-  static-link `GithubModule` keyed it by the core-held PKCE `code_verifier`, falling back to `code` /
-  `redirect_uri`.)
+  static-link `GithubModule` keyed it by the core-held PKCE `code_verifier`, falling back to `code`, and rejected a
+  feedback call carrying neither.)
 
 ## Tests
 
