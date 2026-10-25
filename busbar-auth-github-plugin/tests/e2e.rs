@@ -3,17 +3,17 @@
 
 //! Plugin-SIDE live end-to-end for the GitHub login plugin — the mirror of `auth-oidc-plugin`'s
 //! `tests/e2e.rs`, testing THIS plugin's OWN token-exchange direction (the GET browser-redirect flow
-//! where the CORE executes the module-described token → `/user` → `/user/orgs` hops).
+//! where, on 1.6, the plugin itself runs the token → `/user` → `/user/orgs` hops over its `http` need).
 //!
 //! GitHub issues an OPAQUE access token (no id_token/JWKS to verify offline), so — unlike OIDC — there
-//! is no held-token `POST /auth/token` path to exercise, and the hops are executed by the CORE, not by
+//! is no held-token `POST /auth/token` path to exercise, and the hops run inside a login flow, not via
 //! a direct plugin-ABI call. The only faithful test is therefore a REAL busbar boot driving the real
 //! GET flow. The GitHub REST endpoints are stubbed by a READY-MADE WireMock container (never a
 //! hand-rolled server), provided by CI as a service container and addressed via
 //! `BUSBAR_TEST_WIREMOCK_URL` (mirrors how the store plugins read `BUSBAR_TEST_POSTGRES_URL`). This
 //! test registers its stub mappings over WireMock's own `/__admin` API, packs the real plugin cdylib
 //! with the real `busbar-plugin-pack`, boots the real `busbar` binary with an `identity-providers.github`
-//! pointed at WireMock, and drives GET begin → callback so the CORE really runs the hops.
+//! pointed at WireMock, and drives GET begin → callback so the plugin really runs the hops.
 //!
 //! GATING: when `BUSBAR_TEST_WIREMOCK_URL` is unset (a local run without the container) the test
 //! SKIPS loudly — never a silent-vacuous pass — exactly like the store plugins' service-gated tests.
