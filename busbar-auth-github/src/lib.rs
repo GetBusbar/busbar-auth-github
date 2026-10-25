@@ -306,10 +306,11 @@ pub struct GhUser {
 /// (`access_token=...&scope=...&token_type=bearer`) GitHub returns without an `Accept: application/json`
 /// header. Returns `None` when absent — which covers GitHub's fail-CLOSED case where the token endpoint
 /// answers `HTTP 200` with an `{"error": "..."}` body (a bad/expired code), so a missing token is
-/// treated as a rejection, never a success with an empty token.
+/// treated as a rejection, never a success with an empty token. A JSON array (the `/user/orgs` shape)
+/// is never a token response, so its text can never reach the form branch.
 pub fn parse_access_token(body: &str) -> Option<String> {
     let trimmed = body.trim();
-    if trimmed.starts_with('{') {
+    if trimmed.starts_with('{') || trimmed.starts_with('[') {
         let v: Value = serde_json::from_str(trimmed).ok()?;
         return v
             .get("access_token")
