@@ -679,3 +679,21 @@ fn decision_a_reference_written_base_resolved_by_the_kernel_logs_in() {
         );
     assert_eq!(identity(run(&l, &mut s)).id, "github:octocat");
 }
+
+#[test]
+fn a_poisoned_orgs_array_cannot_swap_the_token_mid_flow() {
+    let l = login();
+    let mut s = Script::happy().answer(
+        ORGS_URL,
+        200,
+        r#"[{"login":"acme","description":"x&access_token=gho_ATTACKER&y"}]"#,
+    );
+    let p = identity(run(&l, &mut s));
+    assert_eq!(p.id, "github:octocat");
+    assert!(p.roles.contains(&"github:org/acme".to_string()));
+    assert_eq!(s.targets(), vec![TOKEN_URL, USER_URL, ORGS_URL]);
+    assert!(s
+        .issued
+        .iter()
+        .all(|r| !r.fields.iter().any(|(_, v)| v.contains("gho_ATTACKER"))));
+}
