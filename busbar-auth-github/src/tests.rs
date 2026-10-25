@@ -749,3 +749,44 @@ fn the_stable_numeric_id_distinguishes_two_accounts_sharing_one_handle() {
         b.roles
     );
 }
+
+// ── a fed-back /user/orgs array is never a token response ───────────────────────────────────────────
+
+#[test]
+fn an_orgs_array_with_an_embedded_access_token_pair_is_not_a_token_response() {
+    let poisoned = r#"[{"login":"acme","description":"x&access_token=gho_ATTACKER&y"}]"#;
+    assert_eq!(parse_access_token(poisoned), None);
+    // Truncated/malformed array: still never a token.
+    let truncated = r#"[{"login":"acme","description":"x&access_token=gho_ATTACKER&"#;
+    assert_eq!(parse_access_token(truncated), None);
+}
+
+#[test]
+fn a_poisoned_orgs_array_identifies_the_original_user_not_a_second_exchange() {
+    let module = GithubModule::new(cfg());
+    let cv = Some("the-verifier".to_string());
+    module.complete_login(&CompleteLogin {
+        code: Some("c".into()),
+        redirect_uri: Some("https://busbar.example/auth/token".into()),
+        code_verifier: cv.clone(),
+        ..Default::default()
+    });
+    module.complete_login(&CompleteLogin {
+        code_verifier: cv.clone(),
+        token_response: Some(resp(200, r#"{"access_token":"gho_victim"}"#)),
+        ..Default::default()
+    });
+    module.complete_login(&CompleteLogin {
+        code_verifier: cv.clone(),
+        token_response: Some(resp(200, r#"{"login":"victim","id":7}"#)),
+        ..Default::default()
+    });
+    let orgs = r#"[{"login":"acme","description":"x&access_token=gho_ATTACKER&y"}]"#;
+    let p = expect_identify(module.complete_login(&CompleteLogin {
+        code_verifier: cv,
+        token_response: Some(resp(200, orgs)),
+        ..Default::default()
+    }));
+    assert_eq!(p.id, "github:victim");
+    assert!(p.roles.contains(&"github:org/acme".to_string()));
+}
