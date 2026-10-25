@@ -696,6 +696,7 @@ fn a_poisoned_orgs_array_cannot_swap_the_token_mid_flow() {
         .issued
         .iter()
         .all(|r| !r.fields.iter().any(|(_, v)| v.contains("gho_ATTACKER"))));
+}
 
 mod logging {
     use super::*;

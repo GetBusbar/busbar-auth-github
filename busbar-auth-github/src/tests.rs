@@ -789,6 +789,7 @@ fn a_poisoned_orgs_array_identifies_the_original_user_not_a_second_exchange() {
     }));
     assert_eq!(p.id, "github:victim");
     assert!(p.roles.contains(&"github:org/acme".to_string()));
+}
 
 /// The TTL sweep had no test: an entry older than `PENDING_TTL_SECS` must be dropped by the next
 /// token step, while a fresh one survives.
