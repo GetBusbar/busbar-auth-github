@@ -134,3 +134,30 @@ fn private_or_loopback_matches_1_5_5() {
         assert!(!host_is_private_or_loopback(h), "{h}");
     }
 }
+
+#[test]
+fn private_or_loopback_covers_ipv4_mapped_and_link_local_v6() {
+    for h in ["::ffff:10.0.0.1", "::ffff:127.0.0.1", "fe80::1"] {
+        assert!(host_is_private_or_loopback(h), "{h}");
+    }
+    assert!(!host_is_private_or_loopback("::ffff:8.8.8.8"));
+}
+
+#[test]
+fn metadata_host_covers_every_provider_constant_and_name() {
+    for url in [
+        "http://100.100.100.200/",
+        "http://192.0.0.192/",
+        "http://168.63.129.16/",
+        "http://metadata.internal/",
+        "http://metadata.tencentyun.com/",
+        "http://metadata.platformequinix.com/",
+        "http://instance-data/",
+        "http://instance-data.ec2.internal/",
+        "http://INSTANCE-DATA.EC2.INTERNAL/",
+    ] {
+        assert!(metadata_host(url), "{url}");
+    }
+    assert!(!metadata_host("http://metadata.example.com/"));
+    assert!(!metadata_host("http://100.100.100.201/"));
+}
