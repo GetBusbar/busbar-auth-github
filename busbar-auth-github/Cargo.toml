@@ -2,11 +2,11 @@
 [package]
 name = "busbar-auth-github"
 version = "1.6.0"
-publish = false            # internal workspace crate; never goes to crates.io
-edition = "2021"
-rust-version = "1.97"
-description = "The GitHub-OAuth login module for busbar: drive GitHub's authorization-code → opaque-access-token → REST /user → /user/orgs flow over the busbar multi-hop LoginModule ABI (1.5.2, auth ABI v2) and map it to a Principal (github:<login> + github:org/<org> groups). Login-capable: implements busbar_contract::auth::LoginModule. On 1.6 the plugin holds its own client secret (resolved by the kernel from browser_login.client_secret) and runs the hops itself; only the legacy static-link GithubModule leaves hop execution and secret injection to the core."
-license = "Apache-2.0"
+publish.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "The GitHub-OAuth login module for busbar: drive GitHub's authorization-code → opaque-access-token → REST /user → /user/orgs flow and map it to a Principal (github:<login> + github:id/<id> + github:org/<org> groups). The plugin holds its own client secret (resolved by the kernel from browser_login.client_secret) and runs the hops itself over its one outbound need."
+license.workspace = true
 
 [dependencies]
 # The ONE busbar crate a plugin names (#40: contract only). Pinned by git rev to the busbar commit in

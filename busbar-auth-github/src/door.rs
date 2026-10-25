@@ -41,7 +41,11 @@ use busbar_contract::abi::sdk::life::{Held, Life, Refreshed, Refusal};
 use busbar_contract::abi::sdk::{HostBuf, Instance, Lent, Out, SafeSlot};
 use busbar_contract::auth::Principal;
 
-use crate::login::{Exchange, Fetched, GithubLogin, HopRequest, HopResponse, LoginFlow, LoginStep};
+use crate::login::{
+    Exchange, Fetched, GithubLogin, HopRequest, HopResponse, LoginFlow, LoginStep,
+    MAX_HOP_REPLY_BYTES,
+};
+use zeroize::Zeroizing;
 
 /// The plugin's name (the manifest name).
 pub const NAME: &str = "busbar-auth-github";
@@ -281,7 +285,10 @@ fn split(url: &str) -> Option<(&str, String)> {
 impl Exchange for Over<'_, '_> {
     fn exchange(&mut self, request: &HopRequest) -> Fetched {
         let Some((origin, target)) = split(&request.target) else {
-            tracing::warn!("github login: a hop URL has no scheme and authority to split");
+            tracing::warn!(
+                module = "github",
+                "github login: a hop URL has no scheme and authority to split"
+            );
             return Fetched::Unreachable;
         };
         if self.wire.is_none() {
@@ -291,15 +298,16 @@ impl Exchange for Over<'_, '_> {
                 fields: request
                     .fields
                     .iter()
-                    .map(|(n, v)| (n.clone().into_bytes(), v.clone().into_bytes()))
+                    .map(|(n, v)| (n.clone().into_bytes(), v.as_bytes().to_vec()))
                     .collect(),
-                body: request.body.clone(),
+                body: request.body.to_vec(),
                 timeout_ms: request.timeout_ms,
-            });
+            })
+            .map(|w| w.reply_limit(MAX_HOP_REPLY_BYTES));
             match sent {
                 Ok(w) => *self.wire = Some(w),
                 Err(e) => {
-                    tracing::warn!(error = ?e, "github login: the hop request was refused");
+                    tracing::warn!(module = "github", error = ?e, "github login: the hop request was refused");
                     return Fetched::Unreachable;
                 }
             }
@@ -315,10 +323,11 @@ impl Exchange for Over<'_, '_> {
                 match answer {
                     Ok(reply) => Fetched::Ready(HopResponse {
                         status: reply.status,
-                        body: reply.body,
+                        body: Zeroizing::new(reply.body),
                     }),
+                    // A reply past the cap is refused by the exchange (`REPLY_OVER_BOUND`).
                     Err(e) => {
-                        tracing::warn!(error = ?e, "github login: the hop exchange failed");
+                        tracing::warn!(module = "github", error = ?e, "github login: the hop exchange failed");
                         Fetched::Unreachable
                     }
                 }
@@ -333,6 +342,7 @@ struct Unarmed;
 impl Exchange for Unarmed {
     fn exchange(&mut self, _: &HopRequest) -> Fetched {
         tracing::warn!(
+            module = "github",
             "github login: no connector lent: the instance's outbound http need was not granted"
         );
         Fetched::Unreachable
@@ -419,7 +429,7 @@ impl SafeSlot for Complete {
         let ticket = instance.ticket();
         if ticket.is_none() {
             // The exchange waits on I/O: the host submits the op on a ticket.
-            tracing::debug!("github login: complete_login arrived without a ticket; the host resubmits it on one");
+            tracing::debug!(module = "github", "github login: complete_login arrived without a ticket; the host resubmits it on one");
             return Outcome::Refused;
         }
         let g = h.life();
