@@ -20,11 +20,12 @@ use std::collections::HashMap;
 use std::marker::PhantomData;
 use std::sync::{Arc, Mutex, PoisonError, RwLock};
 use std::task::Poll;
+use std::time::Instant;
 
 use busbar_contract::abi::auth::{
     AuthTail, BeginLoginIn, BeginLoginOut, CompleteLoginIn, IdentifyOut, IdentityBuf,
     BEGIN_AUTHORIZE, CANCEL_ABANDONED, CAP_LOGIN, IDENTITY_HAS_TTL, LOGIN_BAD_CREDENTIAL,
-    LOGIN_IDENTITY, LOGIN_KIND_REDIRECT, LOGIN_OUTAGE, SPAN_ABSENT,
+    LOGIN_IDENTITY, LOGIN_KIND_REDIRECT, LOGIN_OUTAGE, LOGIN_SECURITY_CHECK_FAILED, SPAN_ABSENT,
 };
 use busbar_contract::abi::host::conn::connector::{
     Need, DIRECTION_OUTBOUND, EGRESS_DEFAULT, KEEP_NAMED,
@@ -98,11 +99,27 @@ pub const STATEMENT: Statement = with_tail(
 /// The most short answers kept for their retry at once.
 const ANSWERED_MAX: usize = 1024;
 
+/// The identities short answers reached, by the ticket whose retry they wait for, each stamped with
+/// when it was kept.
+type Answered = HashMap<Ticket, (Instant, Principal)>;
+
+/// Keep `p` for `ticket`'s retry, at most `max` at once: at the cap the OLDEST entry goes, never
+/// the rest (an in-flight short answer awaiting its retry must survive).
+fn keep(map: &mut Answered, max: usize, at: Instant, ticket: Ticket, p: Principal) {
+    if map.len() >= max && !map.contains_key(&ticket) {
+        let oldest = map.iter().min_by_key(|(_, (at, _))| *at).map(|(t, _)| *t);
+        if let Some(oldest) = oldest {
+            map.remove(&oldest);
+        }
+    }
+    map.insert(ticket, (at, p));
+}
+
 /// One instance: the login (swapped whole on `refresh`) and the identities a short answer reached,
 /// kept for the retry on the same ticket.
 pub struct Github {
     login: RwLock<Arc<GithubLogin>>,
-    answered: Mutex<HashMap<Ticket, Principal>>,
+    answered: Mutex<Answered>,
 }
 
 impl std::fmt::Debug for Github {
@@ -119,7 +136,7 @@ impl Github {
             .clone()
     }
 
-    fn answered(&self) -> std::sync::MutexGuard<'_, HashMap<Ticket, Principal>> {
+    fn answered(&self) -> std::sync::MutexGuard<'_, Answered> {
         self.answered.lock().unwrap_or_else(PoisonError::into_inner)
     }
 }
@@ -248,6 +265,7 @@ fn split(url: &str) -> Option<(&str, String)> {
 impl Exchange for Over<'_, '_> {
     fn exchange(&mut self, request: &HopRequest) -> Fetched {
         let Some((origin, target)) = split(&request.target) else {
+            tracing::warn!("github login: a hop URL has no scheme and authority to split");
             return Fetched::Unreachable;
         };
         if self.wire.is_none() {
@@ -264,7 +282,10 @@ impl Exchange for Over<'_, '_> {
             });
             match sent {
                 Ok(w) => *self.wire = Some(w),
-                Err(_) => return Fetched::Unreachable,
+                Err(e) => {
+                    tracing::warn!(error = ?e, "github login: the hop request was refused");
+                    return Fetched::Unreachable;
+                }
             }
         }
         let Some(wire) = self.wire.as_mut() else {
@@ -280,7 +301,10 @@ impl Exchange for Over<'_, '_> {
                         status: reply.status,
                         body: reply.body,
                     }),
-                    Err(_) => Fetched::Unreachable,
+                    Err(e) => {
+                        tracing::warn!(error = ?e, "github login: the hop exchange failed");
+                        Fetched::Unreachable
+                    }
                 }
             }
         }
@@ -292,6 +316,9 @@ struct Unarmed;
 
 impl Exchange for Unarmed {
     fn exchange(&mut self, _: &HopRequest) -> Fetched {
+        tracing::warn!(
+            "github login: no connector lent: the instance's outbound http need was not granted"
+        );
         Fetched::Unreachable
     }
 }
@@ -322,10 +349,7 @@ fn identify(
             u32::try_from(p.roles.len()).unwrap_or(u32::MAX),
         );
         let mut answered = g.answered();
-        if answered.len() >= ANSWERED_MAX {
-            answered.clear();
-        }
-        answered.insert(ticket, p);
+        keep(&mut answered, ANSWERED_MAX, Instant::now(), ticket, p);
         return Outcome::Failed;
     }
     let mut span = |s: &str| -> Span {
@@ -379,12 +403,13 @@ impl SafeSlot for Complete {
         let ticket = instance.ticket();
         if ticket.is_none() {
             // The exchange waits on I/O: the host submits the op on a ticket.
+            tracing::debug!("github login: complete_login arrived without a ticket; the host resubmits it on one");
             return Outcome::Refused;
         }
         let g = h.life();
         let buf = input.out_buf();
         let reached = g.answered().remove(&ticket);
-        if let Some(p) = reached {
+        if let Some((_, p)) = reached {
             return identify(g, ticket, p, buf, &mut out);
         }
         let login = g.login();
@@ -419,15 +444,22 @@ impl SafeSlot for Complete {
                 Outcome::Pending
             }
             LoginStep::Identity(p) => identify(g, ticket, p, buf, &mut out),
-            LoginStep::BadCredential | LoginStep::SecurityCheckFailed => {
-                out.set(|o| &o.verdict, LOGIN_BAD_CREDENTIAL);
-                Outcome::Ready
-            }
-            LoginStep::Outage => {
-                out.set(|o| &o.verdict, LOGIN_OUTAGE);
+            other @ (LoginStep::BadCredential
+            | LoginStep::SecurityCheckFailed
+            | LoginStep::Outage) => {
+                out.set(|o| &o.verdict, verdict(&other));
                 Outcome::Ready
             }
         }
+    }
+}
+
+/// The verdict a step that reached no identity answers.
+fn verdict(step: &LoginStep) -> u32 {
+    match step {
+        LoginStep::Outage => LOGIN_OUTAGE,
+        LoginStep::SecurityCheckFailed => LOGIN_SECURITY_CHECK_FAILED,
+        _ => LOGIN_BAD_CREDENTIAL,
     }
 }
 
@@ -469,3 +501,7 @@ mod table {
 
 /// This plugin's door: the one a compiled-in build links and the dropped-in image exports.
 pub use table::{door, MACRO_DOOR};
+
+#[cfg(test)]
+#[path = "door_tests.rs"]
+mod tests;
