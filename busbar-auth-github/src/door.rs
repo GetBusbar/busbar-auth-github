@@ -24,7 +24,7 @@ use std::task::Poll;
 use busbar_contract::abi::auth::{
     AuthTail, BeginLoginIn, BeginLoginOut, CompleteLoginIn, IdentifyOut, IdentityBuf,
     BEGIN_AUTHORIZE, CANCEL_ABANDONED, CAP_LOGIN, IDENTITY_HAS_TTL, LOGIN_BAD_CREDENTIAL,
-    LOGIN_IDENTITY, LOGIN_KIND_REDIRECT, LOGIN_OUTAGE, SPAN_ABSENT,
+    LOGIN_IDENTITY, LOGIN_KIND_REDIRECT, LOGIN_OUTAGE, LOGIN_SECURITY_CHECK_FAILED, SPAN_ABSENT,
 };
 use busbar_contract::abi::host::conn::connector::{
     Need, DIRECTION_OUTBOUND, EGRESS_DEFAULT, KEEP_NAMED,
@@ -435,15 +435,22 @@ impl SafeSlot for Complete {
                 Outcome::Pending
             }
             LoginStep::Identity(p) => identify(g, ticket, p, buf, &mut out),
-            LoginStep::BadCredential | LoginStep::SecurityCheckFailed => {
-                out.set(|o| &o.verdict, LOGIN_BAD_CREDENTIAL);
-                Outcome::Ready
-            }
-            LoginStep::Outage => {
-                out.set(|o| &o.verdict, LOGIN_OUTAGE);
+            other @ (LoginStep::BadCredential
+            | LoginStep::SecurityCheckFailed
+            | LoginStep::Outage) => {
+                out.set(|o| &o.verdict, verdict(&other));
                 Outcome::Ready
             }
         }
+    }
+}
+
+/// The verdict a step that reached no identity answers.
+fn verdict(step: &LoginStep) -> u32 {
+    match step {
+        LoginStep::Outage => LOGIN_OUTAGE,
+        LoginStep::SecurityCheckFailed => LOGIN_SECURITY_CHECK_FAILED,
+        _ => LOGIN_BAD_CREDENTIAL,
     }
 }
 
@@ -485,3 +492,7 @@ mod table {
 
 /// This plugin's door: the one a compiled-in build links and the dropped-in image exports.
 pub use table::door;
+
+#[cfg(test)]
+#[path = "door_tests.rs"]
+mod tests;
