@@ -54,8 +54,8 @@ use busbar_plugin_loader::sign::{sign, Manifest, SigningKey, TrustPolicy};
 const NAME: &str = busbar_auth_github::door::NAME;
 const ALIAS: &str = busbar_auth_github::door::ALIAS;
 
-/// The operator config both arms are opened with.
-const CFG: &str = r#"{"client_id":"Iv1.conformance","fetch_orgs":true}"#;
+/// The operator config both arms are opened with (the hop bases written out, as `open` requires).
+const CFG: &str = r#"{"client_id":"Iv1.conformance","fetch_orgs":true,"token_base":"https://github.com","api_base":"https://api.github.com"}"#;
 
 /// The client secret the kernel resolved; no transcript line may carry it.
 const SECRET: &str = "conformance-client-secret";
@@ -440,7 +440,10 @@ fn transcript(p: &Plugin<Auth>, cfg: &str) -> Vec<String> {
     t.push(complete_login(p));
     t.push(format!(
         "refresh: {}",
-        refresh(p, r#"{"client_id":"Iv1.refreshed"}"#)
+        refresh(
+            p,
+            r#"{"client_id":"Iv1.refreshed","token_base":"https://github.com","api_base":"https://api.github.com"}"#,
+        )
     ));
     t.push(format!("refresh refused: {}", refresh(p, "{ not json")));
     t.push(format!("tick: {}", tick(p)));
@@ -498,7 +501,7 @@ fn a_different_operator_config_is_a_different_transcript() {
     let linked = transcript(&linked(&d), CFG);
     let other = transcript(
         &dropped(&d),
-        r#"{"client_id":"Iv1.someone-else","fetch_orgs":false}"#,
+        r#"{"client_id":"Iv1.someone-else","fetch_orgs":false,"token_base":"https://github.com","api_base":"https://api.github.com"}"#,
     );
     assert_ne!(
         other, linked,

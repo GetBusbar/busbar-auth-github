@@ -1,11 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (C) 2026 Busbar Inc and contributors
 
-//! GitHub-login logic tests. Hermetic — no network: the CORE executes hops in production, so these
-//! drive the pure helpers and the `LoginModule` step machine directly with fixture response bodies.
+//! GitHub-login logic tests: the pure helpers (URLs, hop descriptions, body parsers), hermetic. The
+//! step machine and its hops are driven over a scripted exchange in `login_tests.rs`.
 
 use super::*;
-use busbar_contract::auth::{BeginLogin, CompleteLogin, LoginHttpResponse, LoginOutcome};
 
 fn cfg() -> GitHubConfig {
     GitHubConfig {
@@ -16,20 +15,6 @@ fn cfg() -> GitHubConfig {
         token_base: default_token_base(),
         fetch_orgs: true,
         ca_cert_pem: None,
-    }
-}
-
-fn resp(status: u16, body: &str) -> LoginHttpResponse {
-    LoginHttpResponse {
-        status,
-        body: body.to_string(),
-    }
-}
-
-fn expect_exchange(outcome: LoginOutcome) -> LoginHop {
-    match outcome {
-        LoginOutcome::Exchange(hop) => hop,
-        other => panic!("expected Exchange, got {other:?}"),
     }
 }
 
@@ -73,42 +58,20 @@ fn build_github_authorize_url_has_state_scope_no_secret() {
     );
 }
 
+// ── hop descriptions (the pure halves of the legacy module's step tests) ─────────────────────────
+
+/// The token-exchange hop: POST to the token endpoint, the `client_secret` an EMPTY placeholder
+/// keyed by `secret_form_field` (the renderer fills it from the held secret).
 #[test]
-fn begin_login_folds_in_request_time_extra_scopes_deduped() {
-    let module = GithubModule::new(cfg());
-    let begin = BeginLogin {
-        redirect_uri: "https://busbar.example/auth/token".to_string(),
-        state: "st".to_string(),
-        code_challenge: "ch".to_string(),
-        nonce: None,
-        scopes: vec!["read:user".to_string(), "repo".to_string()],
-    };
-    let url = match module.begin_login(&begin) {
-        LoginOutcome::Authorize(u) => u,
-        other => panic!("expected Authorize, got {other:?}"),
-    };
-    // read:user is not duplicated; repo is appended.
-    assert!(
-        url.contains("scope=read%3Aorg%20read%3Auser%20repo"),
-        "{url}"
+fn the_token_exchange_hop_names_the_secret_field_and_leaves_it_empty() {
+    let hop = build_token_exchange(
+        &cfg(),
+        "authcode",
+        "https://busbar.example/auth/token",
+        "verifier",
     );
-}
-
-// ── token-exchange hop ────────────────────────────────────────────────────────────────────────────
-
-#[test]
-fn complete_login_first_returns_token_exchange_hop() {
-    let module = GithubModule::new(cfg());
-    let req = CompleteLogin {
-        code: Some("authcode".to_string()),
-        redirect_uri: Some("https://busbar.example/auth/token".to_string()),
-        code_verifier: Some("verifier".to_string()),
-        ..Default::default()
-    };
-    let hop = expect_exchange(module.complete_login(&req));
     assert_eq!(hop.method, "POST");
     assert_eq!(hop.url, "https://github.com/login/oauth/access_token");
-    // The CORE injects the secret into this exact field; the module never writes the value.
     assert_eq!(hop.secret_form_field.as_deref(), Some("client_secret"));
     let form: std::collections::HashMap<_, _> = hop.form.iter().cloned().collect();
     assert_eq!(
@@ -124,43 +87,17 @@ fn complete_login_first_returns_token_exchange_hop() {
         form.get("code_verifier").map(String::as_str),
         Some("verifier")
     );
-    // client_secret is present as an EMPTY placeholder — the value is the CORE's to fill.
     assert_eq!(form.get("client_secret").map(String::as_str), Some(""));
 }
 
+/// The `/user` hop carries the bearer + User-Agent headers, no form, no secret field.
 #[test]
-fn complete_login_first_without_full_triple_rejects() {
-    let module = GithubModule::new(cfg());
-    let req = CompleteLogin {
-        code: Some("authcode".to_string()),
-        // missing redirect_uri + code_verifier
-        ..Default::default()
-    };
-    assert_eq!(module.complete_login(&req), LoginOutcome::Reject);
-}
-
-// ── /user GET hop (after token) ────────────────────────────────────────────────────────────────────
-
-#[test]
-fn complete_login_after_token_returns_userinfo_get_hop() {
-    let module = GithubModule::new(cfg());
-    let req = CompleteLogin {
-        code_verifier: Some("verifier".to_string()),
-        token_response: Some(resp(
-            200,
-            r#"{"access_token":"gho_opaque","token_type":"bearer","scope":"read:org,read:user"}"#,
-        )),
-        ..Default::default()
-    };
-    let hop = expect_exchange(module.complete_login(&req));
+fn the_userinfo_hop_carries_the_bearer_headers() {
+    let hop = build_userinfo_get(&cfg(), "gho_opaque");
     assert_eq!(hop.method, "GET");
     assert_eq!(hop.url, "https://api.github.com/user");
-    // A userinfo hop carries no secret.
     assert_eq!(hop.secret_form_field, None);
     assert!(hop.form.is_empty());
-
-    // The `/user` hop itself must carry the Authorization: Bearer + User-Agent headers (ABI v2
-    // `headers` field), not just what `userinfo_headers` computes in isolation.
     assert!(hop
         .headers
         .iter()
@@ -172,24 +109,24 @@ fn complete_login_after_token_returns_userinfo_get_hop() {
     assert_eq!(hop.headers, userinfo_headers("gho_opaque"));
 }
 
+/// Both token-response shapes parse; GitHub's 200-with-`error` body and an empty token do not.
 #[test]
-fn token_response_form_encoded_also_yields_userinfo_hop() {
-    // GitHub returns x-www-form-urlencoded without an Accept: application/json header — handle it.
-    let module = GithubModule::new(cfg());
-    let req = CompleteLogin {
-        code_verifier: Some("v".to_string()),
-        token_response: Some(resp(
-            200,
-            "access_token=gho_form&scope=read%3Aorg&token_type=bearer",
-        )),
-        ..Default::default()
-    };
-    let hop = expect_exchange(module.complete_login(&req));
-    assert_eq!(hop.url, "https://api.github.com/user");
+fn parse_access_token_reads_both_shapes_and_refuses_an_empty_or_missing_token() {
     assert_eq!(
         parse_access_token("access_token=gho_form&x=1").as_deref(),
         Some("gho_form")
     );
+    assert_eq!(
+        parse_access_token(r#"{"access_token":"gho_json"}"#).as_deref(),
+        Some("gho_json")
+    );
+    assert_eq!(
+        parse_access_token(r#"{"error":"bad_verification_code"}"#),
+        None
+    );
+    assert_eq!(parse_access_token(r#"{"access_token":""}"#), None);
+    assert_eq!(parse_access_token("access_token=&scope=read:org"), None);
+    assert_eq!(parse_user(r#"{"id":42,"name":"No Login"}"#), None);
 }
 
 // ── identity (after /user, after /user/orgs) ───────────────────────────────────────────────────────
@@ -215,126 +152,7 @@ fn complete_login_after_userinfo_identifies() {
     );
 }
 
-#[test]
-fn full_hop_chain_through_the_module_identifies_with_org_groups() {
-    // Drive the whole chain through complete_login the way the CORE would, feeding each hop's response
-    // back. The correlator (code_verifier) threads the opaque token + /user identity across hops.
-    let module = GithubModule::new(cfg());
-    let cv = Some("the-verifier".to_string());
-
-    // 1) code → token exchange POST
-    let r1 = module.complete_login(&CompleteLogin {
-        code: Some("c".into()),
-        redirect_uri: Some("https://busbar.example/auth/token".into()),
-        code_verifier: cv.clone(),
-        ..Default::default()
-    });
-    assert!(matches!(r1, LoginOutcome::Exchange(h) if h.method == "POST"));
-
-    // 2) token response → /user GET
-    let r2 = module.complete_login(&CompleteLogin {
-        code_verifier: cv.clone(),
-        token_response: Some(resp(200, r#"{"access_token":"gho_x"}"#)),
-        ..Default::default()
-    });
-    assert!(matches!(r2, LoginOutcome::Exchange(ref h) if h.url.ends_with("/user")));
-
-    // 3) /user response → /user/orgs GET, bearer-authenticated with the SAME token stashed at step 2.
-    let r3 = module.complete_login(&CompleteLogin {
-        code_verifier: cv.clone(),
-        token_response: Some(resp(200, r#"{"login":"octocat","id":1}"#)),
-        ..Default::default()
-    });
-    match &r3 {
-        LoginOutcome::Exchange(h) => {
-            assert!(h.url.contains("/user/orgs"));
-            assert!(h
-                .headers
-                .iter()
-                .any(|(k, v)| k == "Authorization" && v == "Bearer gho_x"));
-        }
-        other => panic!("expected Exchange, got {other:?}"),
-    }
-
-    // 4) /user/orgs response → Identify with org groups
-    let r4 = module.complete_login(&CompleteLogin {
-        code_verifier: cv.clone(),
-        token_response: Some(resp(200, r#"[{"login":"acme"}]"#)),
-        ..Default::default()
-    });
-    let p = expect_identify(r4);
-    assert_eq!(p.id, "github:octocat");
-    assert_eq!(
-        p.roles,
-        vec!["github:id/1".to_string(), "github:org/acme".to_string()]
-    );
-}
-
-#[test]
-fn fetch_orgs_false_identifies_after_user_without_org_hop() {
-    let mut c = cfg();
-    c.fetch_orgs = false;
-    let module = GithubModule::new(c);
-    let out = module.complete_login(&CompleteLogin {
-        code_verifier: Some("v".into()),
-        token_response: Some(resp(200, r#"{"login":"solo","id":9}"#)),
-        ..Default::default()
-    });
-    let p = expect_identify(out);
-    assert_eq!(p.id, "github:solo");
-    // No orgs were fetched, but the stable id role is still emitted -- it comes from /user, not
-    // /user/orgs, so it does not depend on `fetch_orgs`.
-    assert_eq!(p.roles, vec!["github:id/9".to_string()]);
-}
-
 // ── fail-closed ─────────────────────────────────────────────────────────────────────────────────
-
-#[test]
-fn reject_on_non_2xx() {
-    let module = GithubModule::new(cfg());
-    let out = module.complete_login(&CompleteLogin {
-        code_verifier: Some("v".into()),
-        token_response: Some(resp(401, r#"{"access_token":"should-be-ignored"}"#)),
-        ..Default::default()
-    });
-    assert_eq!(out, LoginOutcome::Reject);
-}
-
-#[test]
-fn reject_on_missing_access_token() {
-    // GitHub answers HTTP 200 with an {"error":...} body on a bad code — no access_token, and the
-    // body is an object without `login`, so it fails closed at the userinfo-parse branch.
-    let module = GithubModule::new(cfg());
-    let out = module.complete_login(&CompleteLogin {
-        code_verifier: Some("v".into()),
-        token_response: Some(resp(200, r#"{"error":"bad_verification_code"}"#)),
-        ..Default::default()
-    });
-    assert_eq!(out, LoginOutcome::Reject);
-    assert_eq!(
-        parse_access_token(r#"{"error":"bad_verification_code"}"#),
-        None
-    );
-}
-
-#[test]
-fn reject_on_missing_login() {
-    // A /user response lacking `login` (or malformed) is a hard failure.
-    let module = GithubModule::new(cfg());
-    // Prime the token step so the next response is treated as /user.
-    module.complete_login(&CompleteLogin {
-        code_verifier: Some("v".into()),
-        token_response: Some(resp(200, r#"{"access_token":"gho_x"}"#)),
-        ..Default::default()
-    });
-    let out = module.complete_login(&CompleteLogin {
-        code_verifier: Some("v".into()),
-        token_response: Some(resp(200, r#"{"id":42,"name":"No Login"}"#)),
-        ..Default::default()
-    });
-    assert_eq!(out, LoginOutcome::Reject);
-    assert_eq!(parse_user(r#"{"id":42}"#), None);
-}
 
 #[test]
 fn reject_on_malformed_user_json() {
@@ -356,7 +174,8 @@ fn ghes_base_urls_config() {
         authorize_base: "https://ghe.corp.example".to_string(),
         token_base: "https://ghe.corp.example".to_string(),
         fetch_orgs: true,
-        ca_cert_pem: Some("-----BEGIN CERTIFICATE-----\n...".to_string()),
+        // A set `ca_cert_pem` is refused at open (door_tests.rs); the URLs do not depend on it.
+        ca_cert_pem: None,
     };
     // authorize URL → GHES host
     let url = build_github_authorize_url(&c, "https://busbar/auth/token", "s", "ch", &[]);
@@ -428,103 +247,6 @@ fn identity_malformed_orgs_rejects_but_empty_array_identifies() {
     );
 }
 
-#[test]
-fn full_chain_malformed_orgs_rejects() {
-    let module = GithubModule::new(cfg());
-    let cv = Some("cv".to_string());
-    module.complete_login(&CompleteLogin {
-        code_verifier: cv.clone(),
-        token_response: Some(resp(200, r#"{"access_token":"gho_x"}"#)),
-        ..Default::default()
-    });
-    module.complete_login(&CompleteLogin {
-        code_verifier: cv.clone(),
-        token_response: Some(resp(200, r#"{"login":"octocat","id":1}"#)),
-        ..Default::default()
-    });
-    // Truncated /user/orgs array → fail closed.
-    let out = module.complete_login(&CompleteLogin {
-        code_verifier: cv.clone(),
-        token_response: Some(resp(200, "[{bad")),
-        ..Default::default()
-    });
-    assert_eq!(out, LoginOutcome::Reject);
-}
-
-// ── an uncorrelatable feedback call fails closed (no shared "" slot) ────────────────────────────────
-
-#[test]
-fn feedback_without_any_correlator_rejects() {
-    assert_eq!(correlation_key(&CompleteLogin::default()), None);
-    let module = GithubModule::new(cfg());
-    // A token response fed back with NO code_verifier/code/redirect_uri cannot be threaded → Reject,
-    // and must not stash anything under a shared "" slot.
-    let out = module.complete_login(&CompleteLogin {
-        token_response: Some(resp(200, r#"{"access_token":"gho_x"}"#)),
-        ..Default::default()
-    });
-    assert_eq!(out, LoginOutcome::Reject);
-    assert_eq!(module.pending.lock().unwrap().len(), 0);
-}
-
-// ── the pending map never leaks — empty after both failed and completed flows ───────────────────────
-
-/// The pending map must be BOUNDED. Every removal path in this module runs only when the core calls
-/// back into it, and the core abandons a hop chain without re-entering the module whenever a hop
-/// itself fails to execute. So an anonymous caller who starts flows and lets the second hop fail
-/// grew the map without limit, each entry retaining a live GitHub access token for the process
-/// lifetime. There was no cap, no TTL and no eviction, and no test that inserted N entries and
-/// asserted anything about N.
-#[test]
-fn the_pending_map_refuses_to_grow_without_bound() {
-    let module = GithubModule::new(cfg());
-    // Drive PENDING_MAX successful token steps, each with its own correlator and none of them ever
-    // completed: exactly the abandoned-flow shape.
-    for i in 0..PENDING_MAX {
-        let out = module.complete_login(&CompleteLogin {
-            code_verifier: Some(format!("cv-{i}")),
-            token_response: Some(resp(200, r#"{"access_token":"gho_x"}"#)),
-            ..Default::default()
-        });
-        assert!(
-            matches!(out, LoginOutcome::Exchange(_)),
-            "flow {i} should have stashed and emitted the /user hop"
-        );
-    }
-    // One more must be refused rather than admitted, since nothing is sweepable yet.
-    let out = module.complete_login(&CompleteLogin {
-        code_verifier: Some("cv-overflow".to_string()),
-        token_response: Some(resp(200, r#"{"access_token":"gho_x"}"#)),
-        ..Default::default()
-    });
-    assert!(
-        matches!(out, LoginOutcome::Reject),
-        "past the ceiling a new flow must be refused, not admitted: the map holds live bearers"
-    );
-}
-
-/// An EMPTY access token must not be stashed and must not produce a `Bearer ` header with nothing
-/// after it. The filters that reject it had no test: the existing missing-token test feeds a body
-/// with no `access_token` key at all, which is a different branch.
-#[test]
-fn an_empty_access_token_is_refused() {
-    let module = GithubModule::new(cfg());
-    for body in [
-        r#"{"access_token":""}"#,
-        "access_token=&scope=read:org&token_type=bearer",
-    ] {
-        let out = module.complete_login(&CompleteLogin {
-            code_verifier: Some("cv-empty".to_string()),
-            token_response: Some(resp(200, body)),
-            ..Default::default()
-        });
-        assert!(
-            matches!(out, LoginOutcome::Reject),
-            "an empty access_token must be refused, not stashed: body {body}"
-        );
-    }
-}
-
 /// The `/user` body must carry a numeric `id`. That shape check is the only thing standing between
 /// this module and a foreign JSON object that happens to have a `login` field, and only the
 /// opposite direction (an `id` with no `login`) was tested.
@@ -544,59 +266,6 @@ fn a_user_body_without_a_numeric_id_is_refused() {
     );
 }
 
-#[test]
-fn pending_map_empty_after_failed_and_completed_flows() {
-    let module = GithubModule::new(cfg());
-
-    // Failed flow: stash at token step, then a malformed /user body fails closed.
-    let cv1 = Some("cv-fail".to_string());
-    module.complete_login(&CompleteLogin {
-        code_verifier: cv1.clone(),
-        token_response: Some(resp(200, r#"{"access_token":"gho_fail"}"#)),
-        ..Default::default()
-    });
-    assert_eq!(
-        module.pending.lock().unwrap().len(),
-        1,
-        "stashed after token"
-    );
-    let out = module.complete_login(&CompleteLogin {
-        code_verifier: cv1.clone(),
-        token_response: Some(resp(200, "{ not a user")),
-        ..Default::default()
-    });
-    assert_eq!(out, LoginOutcome::Reject);
-    assert_eq!(
-        module.pending.lock().unwrap().len(),
-        0,
-        "removed on fail-closed Reject"
-    );
-
-    // Completed flow: full chain to Identify leaves the map empty.
-    let cv2 = Some("cv-ok".to_string());
-    module.complete_login(&CompleteLogin {
-        code_verifier: cv2.clone(),
-        token_response: Some(resp(200, r#"{"access_token":"gho_ok"}"#)),
-        ..Default::default()
-    });
-    module.complete_login(&CompleteLogin {
-        code_verifier: cv2.clone(),
-        token_response: Some(resp(200, r#"{"login":"octocat","id":1}"#)),
-        ..Default::default()
-    });
-    let out = module.complete_login(&CompleteLogin {
-        code_verifier: cv2.clone(),
-        token_response: Some(resp(200, r#"[{"login":"acme"}]"#)),
-        ..Default::default()
-    });
-    assert!(matches!(out, LoginOutcome::Identify(_)));
-    assert_eq!(
-        module.pending.lock().unwrap().len(),
-        0,
-        "removed on final Identify"
-    );
-}
-
 // ── the /user/orgs hop is paginated (per_page=100) ──────────────────────────────────────────────────
 
 #[test]
@@ -607,110 +276,6 @@ fn orgs_hop_url_requests_per_page_100() {
         "orgs hop must raise the page cap: {}",
         hop.url
     );
-}
-
-// ── redirect_uri is a deployment-wide constant, NOT a per-flow correlator ───────────────────────────
-
-#[test]
-fn feedback_with_only_redirect_uri_rejects_no_shared_slot() {
-    // redirect_uri is a deployment-wide CONSTANT, so it is not per-flow-unique. Two concurrent flows
-    // carrying only redirect_uri (no code_verifier/code) must NOT collapse onto one shared pending
-    // slot and overwrite each other's stashed token/identity — they fail closed instead.
-    let ru = Some("https://busbar.example/auth/token".to_string());
-    // The correlator must not fall back to redirect_uri.
-    assert_eq!(
-        correlation_key(&CompleteLogin {
-            redirect_uri: ru.clone(),
-            ..Default::default()
-        }),
-        None
-    );
-    let module = GithubModule::new(cfg());
-    let a = module.complete_login(&CompleteLogin {
-        redirect_uri: ru.clone(),
-        token_response: Some(resp(200, r#"{"access_token":"gho_a"}"#)),
-        ..Default::default()
-    });
-    let b = module.complete_login(&CompleteLogin {
-        redirect_uri: ru.clone(),
-        token_response: Some(resp(200, r#"{"access_token":"gho_b"}"#)),
-        ..Default::default()
-    });
-    assert_eq!(a, LoginOutcome::Reject);
-    assert_eq!(b, LoginOutcome::Reject);
-    assert_eq!(module.pending.lock().unwrap().len(), 0);
-}
-
-// ── an orgs array with no prior /user stash (missing stashed user) fails closed ─────────────────────
-
-#[test]
-fn orgs_array_as_first_feedback_without_stashed_user_rejects() {
-    let module = GithubModule::new(cfg());
-    // An orgs array arriving for a fresh key with no prior /user stash → missing stashed user →
-    // Reject, and the pending map is left empty.
-    let out = module.complete_login(&CompleteLogin {
-        code_verifier: Some("cv".into()),
-        token_response: Some(resp(200, r#"[{"login":"acme"}]"#)),
-        ..Default::default()
-    });
-    assert_eq!(out, LoginOutcome::Reject);
-    assert_eq!(module.pending.lock().unwrap().len(), 0);
-}
-
-// ── a non-2xx AFTER a stash removes the stashed entry (observable remove) ───────────────────────────
-
-#[test]
-fn non_2xx_after_stash_removes_pending_entry() {
-    let module = GithubModule::new(cfg());
-    let cv = Some("cv".to_string());
-    // Stash at the token step.
-    module.complete_login(&CompleteLogin {
-        code_verifier: cv.clone(),
-        token_response: Some(resp(200, r#"{"access_token":"gho_x"}"#)),
-        ..Default::default()
-    });
-    assert_eq!(
-        module.pending.lock().unwrap().len(),
-        1,
-        "stashed after token"
-    );
-    // Non-2xx on the NEXT hop (/user) → Reject AND the stashed entry is removed (not a no-op).
-    let out = module.complete_login(&CompleteLogin {
-        code_verifier: cv.clone(),
-        token_response: Some(resp(500, r#"{"message":"server error"}"#)),
-        ..Default::default()
-    });
-    assert_eq!(out, LoginOutcome::Reject);
-    assert_eq!(
-        module.pending.lock().unwrap().len(),
-        0,
-        "removed on non-2xx after stash"
-    );
-}
-
-// ── a /user body with no prior token stash fails closed (no fabricated empty token) ─────────────────
-
-#[test]
-fn userinfo_as_first_feedback_without_stashed_token_rejects() {
-    let module = GithubModule::new(cfg());
-    // A /user object arriving for a fresh key with no prior token stash must fail closed, NOT
-    // fabricate an empty-token PendingLogin and emit a /user/orgs hop with an empty Bearer.
-    let out = module.complete_login(&CompleteLogin {
-        code_verifier: Some("cv".into()),
-        token_response: Some(resp(200, r#"{"login":"octocat","id":1}"#)),
-        ..Default::default()
-    });
-    assert_eq!(out, LoginOutcome::Reject);
-    assert_eq!(module.pending.lock().unwrap().len(), 0);
-}
-
-#[test]
-fn authenticate_passes_opaque_bearer() {
-    let module = GithubModule::new(cfg());
-    assert_eq!(module.authenticate(Some("gho_whatever")), AuthVerdict::Pass);
-    assert_eq!(module.authenticate(None), AuthVerdict::Pass);
-    assert_eq!(module.name(), "github");
-    assert!(!module.cacheable());
 }
 
 /// A released GitHub handle must not silently inherit the previous owner's bindings.
@@ -759,79 +324,6 @@ fn an_orgs_array_with_an_embedded_access_token_pair_is_not_a_token_response() {
     // Truncated/malformed array: still never a token.
     let truncated = r#"[{"login":"acme","description":"x&access_token=gho_ATTACKER&"#;
     assert_eq!(parse_access_token(truncated), None);
-}
-
-#[test]
-fn a_poisoned_orgs_array_identifies_the_original_user_not_a_second_exchange() {
-    let module = GithubModule::new(cfg());
-    let cv = Some("the-verifier".to_string());
-    module.complete_login(&CompleteLogin {
-        code: Some("c".into()),
-        redirect_uri: Some("https://busbar.example/auth/token".into()),
-        code_verifier: cv.clone(),
-        ..Default::default()
-    });
-    module.complete_login(&CompleteLogin {
-        code_verifier: cv.clone(),
-        token_response: Some(resp(200, r#"{"access_token":"gho_victim"}"#)),
-        ..Default::default()
-    });
-    module.complete_login(&CompleteLogin {
-        code_verifier: cv.clone(),
-        token_response: Some(resp(200, r#"{"login":"victim","id":7}"#)),
-        ..Default::default()
-    });
-    let orgs = r#"[{"login":"acme","description":"x&access_token=gho_ATTACKER&y"}]"#;
-    let p = expect_identify(module.complete_login(&CompleteLogin {
-        code_verifier: cv,
-        token_response: Some(resp(200, orgs)),
-        ..Default::default()
-    }));
-    assert_eq!(p.id, "github:victim");
-    assert!(p.roles.contains(&"github:org/acme".to_string()));
-}
-
-/// The TTL sweep had no test: an entry older than `PENDING_TTL_SECS` must be dropped by the next
-/// token step, while a fresh one survives.
-#[test]
-fn the_ttl_sweep_drops_stale_pending_entries_on_the_next_token_step() {
-    let module = GithubModule::new(cfg());
-    let stale = Instant::now()
-        .checked_sub(std::time::Duration::from_secs(PENDING_TTL_SECS + 1))
-        .expect("monotonic clock has run long enough");
-    {
-        let mut pending = module.pending.lock().unwrap();
-        for k in ["stale-flow", "fresh-flow"] {
-            pending.insert(
-                k.to_string(),
-                PendingLogin {
-                    access_token: Held::new("gho_old".to_string()),
-                    user: None,
-                    inserted_at: if k == "stale-flow" {
-                        stale
-                    } else {
-                        Instant::now()
-                    },
-                },
-            );
-        }
-    }
-    let out = module.complete_login(&CompleteLogin {
-        code_verifier: Some("cv-new".to_string()),
-        token_response: Some(resp(200, r#"{"access_token":"gho_x"}"#)),
-        ..Default::default()
-    });
-    assert!(matches!(out, LoginOutcome::Exchange(_)));
-    let pending = module.pending.lock().unwrap();
-    assert!(
-        !pending.contains_key("stale-flow"),
-        "stale entry must be swept"
-    );
-    assert!(
-        pending.contains_key("fresh-flow"),
-        "fresh entry must survive"
-    );
-    assert!(pending.contains_key("cv-new"));
 }
 
 /// Form-encoded token values are percent- and plus-decoded.

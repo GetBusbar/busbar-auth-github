@@ -98,7 +98,10 @@ fn host_normalisation_matches_1_5_5() {
 fn headers_are_sanitised_as_1_5_5_did() {
     assert_eq!(
         sanitize_hop_header("User-Agent", "busbar"),
-        Ok(("user-agent".to_string(), "busbar".to_string()))
+        Ok((
+            "user-agent".to_string(),
+            zeroize::Zeroizing::new("busbar".to_string())
+        ))
     );
     for (n, v) in [
         ("Authorization", "Bearer a\r\nX: y"),

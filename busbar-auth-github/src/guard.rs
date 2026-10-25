@@ -15,6 +15,7 @@
 use serde_json::Value;
 use std::collections::HashSet;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+use zeroize::Zeroizing;
 
 /// A hop the guard refuses: no request is built, and nothing (the secret least of all) is sent.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -29,6 +30,7 @@ const FORBIDDEN_HOP_HEADERS: [&str; 3] = ["host", "content-length", "transfer-en
 ///
 /// A key the operator left at its default is not in the settings, so its host is not allowed: in
 /// 1.5.5 a GitHub method whose `token_base`/`api_base` were not written out had every hop refused.
+/// [`crate::login::GithubLogin::open`] therefore refuses such settings up front, explained.
 pub fn collect_allowed_hosts(settings: &Value) -> HashSet<String> {
     fn walk(v: &Value, hosts: &mut HashSet<String>) {
         match v {
@@ -58,11 +60,15 @@ pub fn collect_allowed_hosts(settings: &Value) -> HashSet<String> {
 pub fn vet_hop_url(url: &str, allowed: &HashSet<String>) -> Result<(), Refused> {
     let Some(host) = extract_normalized_host(url) else {
         // The URL is not named: it may carry userinfo.
-        tracing::warn!("github login: hop refused, its host could not be read from the URL");
+        tracing::warn!(
+            module = "github",
+            "github login: hop refused, its host could not be read from the URL"
+        );
         return Err(Refused);
     };
     if !allowed.contains(&host.to_ascii_lowercase()) {
         tracing::warn!(
+            module = "github",
             host = ?host,
             "github login: hop refused, host not in the allowlist built from the URLs written in the plugin settings"
         );
@@ -70,22 +76,26 @@ pub fn vet_hop_url(url: &str, allowed: &HashSet<String>) -> Result<(), Refused> 
     }
     let host_private = host_is_private_or_loopback(&host);
     if !(scheme_is(url, "https") || (host_private && scheme_is(url, "http"))) {
-        tracing::warn!(host = ?host, "github login: hop refused, plaintext http to a public host");
+        tracing::warn!(module = "github", host = ?host, "github login: hop refused, plaintext http to a public host");
         return Err(Refused);
     }
     if metadata_host(url) {
-        tracing::warn!(host = ?host, "github login: hop refused, cloud-metadata host");
+        tracing::warn!(module = "github", host = ?host, "github login: hop refused, cloud-metadata host");
         return Err(Refused);
     }
     Ok(())
 }
 
 /// 1.5.5 `sanitize_hop_header`, answering the header as the http stack would write it: the name
-/// lowercased (`HeaderName::from_bytes`), the value unchanged (`HeaderValue::from_str`).
-pub fn sanitize_hop_header(name: &str, value: &str) -> Result<(String, String), Refused> {
+/// lowercased (`HeaderName::from_bytes`), the value unchanged (`HeaderValue::from_str`) and wiped
+/// on drop (an `authorization` value is the bearer).
+pub fn sanitize_hop_header(
+    name: &str,
+    value: &str,
+) -> Result<(String, Zeroizing<String>), Refused> {
     // Only the header NAME is ever logged (as `?`, so CR/LF cannot forge a line): never the value.
     let refuse = |why: &str| {
-        tracing::warn!(header = ?name, "github login: hop refused, {why}");
+        tracing::warn!(module = "github", header = ?name, "github login: hop refused, {why}");
         Err(Refused)
     };
     let bad = |s: &str| s.contains('\r') || s.contains('\n') || s.contains('\0');
@@ -101,7 +111,7 @@ pub fn sanitize_hop_header(name: &str, value: &str) -> Result<(String, String), 
     if !value.bytes().all(|b| (b >= 32 && b != 127) || b == b'\t') {
         return refuse("a header value has a control byte");
     }
-    Ok((name.to_ascii_lowercase(), value.to_string()))
+    Ok((name.to_ascii_lowercase(), Zeroizing::new(value.to_string())))
 }
 
 /// An RFC 7230 `tchar` (what `http::HeaderName` accepts).
