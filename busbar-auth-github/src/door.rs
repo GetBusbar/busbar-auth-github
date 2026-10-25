@@ -299,7 +299,7 @@ impl Exchange for Over<'_, '_> {
             match sent {
                 Ok(w) => *self.wire = Some(w),
                 Err(e) => {
-                    tracing::warn!("github login: the hop request was refused: {e}");
+                    tracing::warn!(error = ?e, "github login: the hop request was refused");
                     return Fetched::Unreachable;
                 }
             }
@@ -318,7 +318,7 @@ impl Exchange for Over<'_, '_> {
                         body: reply.body,
                     }),
                     Err(e) => {
-                        tracing::warn!("github login: the hop exchange failed: {e}");
+                        tracing::warn!(error = ?e, "github login: the hop exchange failed");
                         Fetched::Unreachable
                     }
                 }
@@ -419,7 +419,7 @@ impl SafeSlot for Complete {
         let ticket = instance.ticket();
         if ticket.is_none() {
             // The exchange waits on I/O: the host submits the op on a ticket.
-            tracing::warn!("github login: complete_login arrived without a ticket");
+            tracing::debug!("github login: complete_login arrived without a ticket; the host resubmits it on one");
             return Outcome::Refused;
         }
         let g = h.life();
