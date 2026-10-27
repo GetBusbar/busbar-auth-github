@@ -219,6 +219,21 @@ fn red_a_non_member_carries_no_group_for_the_org() {
     );
 }
 
+/// RED (ruling 2026-10-27): an identity provider that answers 5xx or 429 on any hop is an outage
+/// (the host answers 503, retryable), never a declined credential, and the flow goes no further.
+#[test]
+fn an_idp_5xx_or_429_is_an_outage_not_a_decline() {
+    let l = login();
+    for status in [500, 502, 503, 429] {
+        let mut s = Script::happy().answer(TOKEN_URL, status, r#"{"error":"busy"}"#);
+        assert_eq!(run(&l, &mut s), LoginStep::Outage, "token {status}");
+        assert_eq!(s.targets(), vec![TOKEN_URL]);
+        let mut s = Script::happy().answer(USER_URL, status, "{}");
+        assert_eq!(run(&l, &mut s), LoginStep::Outage, "user {status}");
+        assert_eq!(s.targets(), vec![TOKEN_URL, USER_URL]);
+    }
+}
+
 /// RED ARM (revoked token): GitHub answers `/user` 401 for a revoked or expired bearer. 1.5.5 fed
 /// the 401 back and the module declined ("Sign-in was declined"): a bad credential, never an
 /// outage, and the org hop is never made with a dead token.
@@ -256,14 +271,6 @@ fn a_form_encoded_token_response_is_accepted() {
         &format!("access_token={TOKEN}&scope=read%3Aorg&token_type=bearer"),
     );
     assert_eq!(identity(run(&l, &mut s)).id, "github:octocat");
-}
-
-#[test]
-fn an_idp_5xx_is_fed_back_and_declined_as_1_5_5_did() {
-    // 1.5.5's core fed EVERY HTTP status back; the module rejected non-2xx.
-    let l = login();
-    let mut s = Script::happy().answer(TOKEN_URL, 503, "unavailable");
-    assert_eq!(run(&l, &mut s), LoginStep::BadCredential);
 }
 
 #[test]
