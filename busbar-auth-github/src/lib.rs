@@ -37,7 +37,7 @@ pub mod guard;
 mod held;
 pub mod login;
 
-use busbar_contract::auth::{LoginHop, LoginOutcome, Principal};
+use busbar_contract::auth::{LoginHop, Principal};
 use serde::Deserialize;
 use serde_json::Value;
 
@@ -422,23 +422,6 @@ pub fn build_principal(user: &GhUser, org_groups: Vec<String>) -> Principal {
     p.roles.push(format!("github:id/{}", user.id));
     p.roles.extend(org_groups);
     p
-}
-
-/// Convenience for tests / a caller holding both bodies at once: `/user` JSON (required) + optional
-/// `/user/orgs` JSON → an [`LoginOutcome`]. Missing/invalid `/user` is a fail-closed `Reject`.
-pub fn identity_from_user_and_orgs(user_body: &str, orgs_body: Option<&str>) -> LoginOutcome {
-    let Some(user) = parse_user(user_body) else {
-        return LoginOutcome::Reject;
-    };
-    let groups = match orgs_body {
-        // Fail-closed: a present-but-malformed /user/orgs body Rejects rather than dropping groups.
-        Some(body) => match parse_org_groups(body) {
-            Some(g) => g,
-            None => return LoginOutcome::Reject,
-        },
-        None => Vec::new(),
-    };
-    LoginOutcome::Identify(build_principal(&user, groups))
 }
 
 /// Whether a body's first non-whitespace char is `[` (a JSON array — the `/user/orgs` shape).
