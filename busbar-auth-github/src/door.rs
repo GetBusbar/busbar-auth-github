@@ -55,13 +55,12 @@ pub const ALIAS: &str = "github";
 /// `OpenIn.secrets[0]`.
 pub const CLIENT_SECRET_KEY: &str = "client_secret";
 
-const ABSENT: AbiStr = AbiStr::ABSENT;
 const SECRET_REFS: &[AbiStr] = &[abi_str(CLIENT_SECRET_KEY)];
 const REWRITES: &[Rewrite] = &[Rewrite {
     class: REWRITE_ALIAS,
     _reserved: 0,
     from: abi_str(ALIAS),
-    to: ABSENT,
+    to: AbiStr::ABSENT,
 }];
 /// The index of the one need in [`NEEDS`].
 const NEED: u32 = 0;
@@ -73,10 +72,6 @@ const NEEDS: &[Need] = &[{
     n.direction = DIRECTION_OUTBOUND;
     n.egress_class = EGRESS_DEFAULT;
     n.transport = abi_str("http");
-    n.auth = ABSENT;
-    n.target_from = ABSENT;
-    n.trust_from = ABSENT;
-    n.details = Blob::ABSENT;
     n.timeout_ms = crate::login::HOP_TIMEOUT_MS;
     n.keep_mode = KEEP_NAMED;
     n
