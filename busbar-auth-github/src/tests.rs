@@ -5,6 +5,20 @@
 //! step machine and its hops are driven over a scripted exchange in `login_tests.rs`.
 
 use super::*;
+use busbar_contract::auth::LoginOutcome;
+
+/// Both bodies at once: a missing or malformed `/user` or `/user/orgs` body is a fail-closed `Reject`.
+fn identity_from_user_and_orgs(user_body: &str, orgs_body: Option<&str>) -> LoginOutcome {
+    let Some(user) = parse_user(user_body) else {
+        return LoginOutcome::Reject;
+    };
+    let groups = match orgs_body.map(parse_org_groups) {
+        Some(Some(g)) => g,
+        Some(None) => return LoginOutcome::Reject,
+        None => Vec::new(),
+    };
+    LoginOutcome::Identify(build_principal(&user, groups))
+}
 
 fn cfg() -> GitHubConfig {
     GitHubConfig {

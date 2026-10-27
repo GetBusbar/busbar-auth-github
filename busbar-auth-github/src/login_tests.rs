@@ -793,15 +793,18 @@ fn the_form_is_serde_urlencoded() {
     assert!(chip::form_bytes(&FormBody::new()).is_empty());
 }
 
-/// OWNER Q123 ACCEPTED (2026-09-30: "a GitHub base URL written as a secret reference now logs
-/// in"): v1.5.5 built the hop allowlist from the RAW settings (auth/token.rs:283), so
-/// `api_base: {env: GHE_API}` contributed no host and every hop was refused (502). On 1.6.0 the
-/// kernel resolves the reference in place and the plugin sees only the resolved string, so the
-/// same provider logs in. The owner accepted that; this cell pins it.
+/// A GitHub Enterprise base delivered as a plain URL logs in. HISTORY: v1.5.5 built the hop
+/// allowlist from the RAW settings (auth/token.rs:283), so `api_base: {env: GHE_API}` contributed no
+/// host and every hop was refused (502); OWNER Q123 (2026-09-30) then had the kernel resolve such a
+/// reference in place. Q123 is OVERTURNED (OWNER RULING, CHIP-REVIEW-v4 change 2): this plugin's
+/// Statement declares only `client_secret`, so the kernel REFUSES a reference at `api_base`,
+/// `token_base` or `authorize_base` at boot and at `--validate`, and the operator writes each base
+/// as its URL. The plugin side is unchanged: what it is delivered is the plain URLs below.
 #[test]
 fn decision_a_reference_written_base_resolved_by_the_kernel_logs_in() {
-    // As the kernel delivers `settings: { api_base: {env: GHE_API}, token_base: {env: GHE_WEB},
-    // authorize_base: {env: GHE_WEB}, client_id: "Iv1.client" }` after resolving in place.
+    // As the kernel delivers `settings: { api_base: "https://ghe.corp.example/api/v3", token_base:
+    // "https://ghe.corp.example", authorize_base: "https://ghe.corp.example", client_id:
+    // "Iv1.client" }`, each base written as its URL.
     let delivered = r#"{
         "client_id": "Iv1.client",
         "api_base": "https://ghe.corp.example/api/v3",
