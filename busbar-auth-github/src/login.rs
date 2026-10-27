@@ -23,7 +23,9 @@
 //! | a hop body's `id_token` nonce mismatch ("Sign-in couldn't be verified", 400) | [`LoginStep::SecurityCheckFailed`] |
 //!
 //! Any HTTP status the IdP answers is fed back to the step machine, as 1.5.5 did: a revoked token's
-//! `401` from `/user` is a declined sign-in, not an outage.
+//! `401` from `/user` is a declined sign-in, not an outage. A `5xx` or `429` is the IdP unable to
+//! answer: [`LoginStep::Outage`], which the host answers 503, retryable (ruling 2026-10-27; 1.5.5
+//! declined it).
 //!
 //! THE AUTH ABI ADAPTER is [`crate::door`]: it calls [`GithubLogin::open`],
 //! [`GithubLogin::begin_login`], [`GithubLogin::start`] and [`GithubLogin::drive`], keeping one
@@ -290,6 +292,8 @@ impl GithubLogin {
                     match self.step(flow) {
                         LoginOutcome::Identify(p) => return finish(flow, LoginStep::Identity(p)),
                         LoginOutcome::Reject => return finish(flow, LoginStep::BadCredential),
+                        // The step has already said why.
+                        LoginOutcome::Outage => return finish(flow, LoginStep::Outage),
                         LoginOutcome::Exchange(mut hop) => {
                             let rendered = self.render(&hop);
                             wipe_hop(&mut hop);
@@ -379,6 +383,20 @@ impl GithubLogin {
                 "github login: declined, the callback has neither a code_verifier nor a code"
             );
             return LoginOutcome::Reject;
+        }
+        // An identity provider that could not answer (5xx) or asks to be retried later (429) is
+        // an outage, never a declined credential: the host answers 503, retryable (ruling
+        // 2026-10-27), and the cause is logged here.
+        if resp.status >= 500 || resp.status == 429 {
+            let hop = hop_name(&flow.state);
+            tracing::warn!(
+                module = "github",
+                status = resp.status,
+                hop,
+                "github login: the identity provider is unavailable"
+            );
+            flow.state = FlowState::default();
+            return LoginOutcome::Outage;
         }
         if !(200..300).contains(&resp.status) {
             let hop = hop_name(&flow.state);
