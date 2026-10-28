@@ -6,9 +6,8 @@
 //! duration of a login flow.
 //!
 //! These are the plugin's own material, not a value the kernel resolved and lent it, so they are not
-//! the contract's sealed `Secret<T>` (busbar #1021: that type's one raw accessor takes a kernel seal,
-//! which a plugin neither holds nor can obtain). `Held` keeps exactly the hygiene the plugin relied on
-//! when it wrapped them in the contract's former redaction wrapper:
+//! the contract's sealed `Secret<T>` (that type's one raw accessor takes a kernel seal, which a plugin
+//! neither holds nor can obtain). `Held` keeps the same hygiene:
 //!
 //! * **`Debug` / `Display` never reveal it.** Both print the literal `"[REDACTED]"`.
 //! * **It does not serialize.** `Held` implements neither `Serialize` nor `Deserialize`.

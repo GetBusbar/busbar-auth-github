@@ -21,11 +21,11 @@
 //! The module asserts IDENTITY only; busbar's `auth.role_bindings.github:` resolves those groups to
 //! policy AFTER.
 //!
-//! ## 1.6.0: the plugin runs its own hops
+//! ## The plugin runs its own hops
 //!
 //! The plugin holds its own client secret and runs the hop chain itself over its own need
 //! ([`login`]: the step machine, driven over a one-shot pending exchange, which injects the secret
-//! into the named form field; [`guard`]: the hop guard 1.5.5's core applied). [`door`] is the auth
+//! into the named form field; [`guard`]: the hop guard). [`door`] is the auth
 //! kind's door over it: a compiled-in build links [`door::door`], and the `busbar-auth-github-plugin`
 //! image exports it. The `build_*` helpers below DESCRIBE each hop as the contract's [`LoginHop`];
 //! [`login`] renders and sends it.
@@ -129,7 +129,7 @@ fn user_endpoint(cfg: &GitHubConfig) -> String {
 }
 /// The `/user/orgs` endpoint URL (`{api_base}/user/orgs?per_page=100`). GitHub paginates this list at
 /// 30 entries/page by default; `per_page=100` raises the cap so a user in up to 100 orgs keeps ALL
-/// their `github:org/<org>` groups. RESIDUAL LIMIT: the committed 1.5.2 hop ABI feeds back only a
+/// their `github:org/<org>` groups. RESIDUAL LIMIT: the hop ABI feeds back only a
 /// single response body and carries no Link-header channel, so this module cannot follow pagination
 /// past page 1 — a user in >100 orgs still loses memberships beyond the first 100. Revisit if the ABI
 /// grows a way to chain paginated hops.
@@ -357,9 +357,8 @@ pub fn parse_user(body: &str) -> Option<GhUser> {
         .filter(|s| !s.is_empty())?
         .to_string();
     // Required: a genuine /user body always carries a numeric `id`, so its absence means a
-    // malformed/foreign body → fail closed. It used to be parsed purely as that shape check and
-    // then discarded; it is KEPT now, because it is the only stable thing GitHub gives us about an
-    // account (see `GhUser::id` and `build_principal`).
+    // malformed/foreign body → fail closed. It is also KEPT: it is the only stable thing GitHub
+    // gives us about an account (see `GhUser::id` and `build_principal`).
     let id = v.get("id").and_then(Value::as_i64)?;
     let name = v
         .get("name")
@@ -401,7 +400,7 @@ pub fn parse_org_groups(body: &str) -> Option<Vec<String>> {
 ///
 /// So the stable numeric account id is emitted ALONGSIDE, as the `github:id/<id>` role. That is
 /// purely additive: every existing login binding keeps working untouched, and an operator can bind to
-/// `github:id/12345` and migrate at their own pace. New deployments should prefer it.
+/// `github:id/12345`. New deployments should prefer it.
 ///
 /// WHAT THIS DOES AND DOES NOT FIX, because the difference is easy to overread. It narrows WHO GETS
 /// GRANTED: a binding on `github:id/<id>` cannot be inherited by whoever re-registers the handle,
