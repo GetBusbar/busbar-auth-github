@@ -1,15 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (C) 2026 Busbar Inc and contributors
 
-//! THE HOP GUARD 1.5.5's CORE APPLIED TO EVERY LOGIN HOP, now enforced by the plugin itself
-//! (ARCHITECT ruling R8, 2026-09-30: a 1.5.5 guard the core applied to a plugin's hops becomes plugin
-//! logic, IN ADDITION to the need's egress class, never weaker than 1.5.5).
+//! The hop guard applied to every login hop, enforced by the plugin itself in addition to the
+//! need's egress class.
 //!
-//! Ported from busbar v1.5.5: `auth/token.rs` (`collect_allowed_hosts`, `vet_hop_url`,
-//! `sanitize_hop_header`, `FORBIDDEN_HOP_HEADERS`). The host readers and the private/metadata
-//! judgements are `busbar_contract::net`, the one definition (a superset of 1.5.5's). The operator's
-//! `security.{allow,blocked}_metadata_hosts` / `allow_all_metadata` never reached the hop vetting in
-//! 1.5.5 (it passed `&[]`, `false`, `&[]`), so only the hardcoded denylist is here.
+//! The host readers and the private/metadata judgements are `busbar_contract::net`, the one
+//! definition. The operator's `security.{allow,blocked}_metadata_hosts` / `allow_all_metadata` do not
+//! reach the hop vetting, so only the hardcoded denylist is here.
 
 use busbar_contract::net::{
     extract_normalized_host, host_is_cloud_metadata, host_is_private_or_loopback, scheme_is,
@@ -22,15 +19,14 @@ use zeroize::Zeroizing;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Refused;
 
-/// The header names a hop may never set (1.5.5 `FORBIDDEN_HOP_HEADERS`).
+/// The header names a hop may never set.
 const FORBIDDEN_HOP_HEADERS: [&str; 3] = ["host", "content-length", "transfer-encoding"];
 
-/// The hop host-allowlist, derived from the OPERATOR's settings only (1.5.5
-/// `collect_allowed_hosts(&mc.settings, issuer)`): the host of every absolute http(s) URL string
+/// The hop host-allowlist, derived from the OPERATOR's settings only: the host of every absolute http(s) URL string
 /// anywhere in the settings tree, lowercased. Never derived from anything an IdP answered.
 ///
-/// A key the operator left at its default is not in the settings, so its host is not allowed: in
-/// 1.5.5 a GitHub method whose `token_base`/`api_base` were not written out had every hop refused.
+/// A key the operator left at its default is not in the settings, so its host is not allowed: a GitHub
+/// method whose `token_base`/`api_base` were not written out would have every hop refused.
 /// [`crate::login::GithubLogin::open`] therefore refuses such settings up front, explained.
 pub fn collect_allowed_hosts(settings: &Value) -> HashSet<String> {
     fn walk(v: &Value, hosts: &mut HashSet<String>) {
@@ -49,14 +45,13 @@ pub fn collect_allowed_hosts(settings: &Value) -> HashSet<String> {
     }
     let mut hosts = HashSet::new();
     if let Value::Object(o) = settings {
-        // 1.5.5 also added the settings' `issuer`; it is a string value of the same tree, so the
-        // walk already covers it.
+        // The settings' `issuer` is a string value of the same tree, so the walk covers it.
         o.values().for_each(|v| walk(v, &mut hosts));
     }
     hosts
 }
 
-/// 1.5.5 `vet_hop_url`: the host must be allow-listed; https for a public host (http only for a
+/// Vet a hop URL: the host must be allow-listed; https for a public host (http only for a
 /// loopback/private one); never a cloud-metadata host.
 pub fn vet_hop_url(url: &str, allowed: &HashSet<String>) -> Result<(), Refused> {
     let Some(host) = extract_normalized_host(url) else {
@@ -87,7 +82,7 @@ pub fn vet_hop_url(url: &str, allowed: &HashSet<String>) -> Result<(), Refused> 
     Ok(())
 }
 
-/// 1.5.5 `sanitize_hop_header`, answering the header as the http stack would write it: the name
+/// Sanitize a hop header, answering the header as the http stack would write it: the name
 /// lowercased (`HeaderName::from_bytes`), the value unchanged (`HeaderValue::from_str`) and wiped
 /// on drop (an `authorization` value is the bearer).
 pub fn sanitize_hop_header(
