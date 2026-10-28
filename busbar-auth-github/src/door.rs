@@ -1,12 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (C) 2026 Busbar Inc and contributors
 
-//! THE DOOR: the GitHub login on the auth kind's table (`busbar_contract::abi::auth`, v3), every
+//! The door: the GitHub login on the auth kind's table (`busbar_contract::abi::auth`, v3), every
 //! slot a [`SafeSlot`] over the SDK's safe surface, so this crate holds no `unsafe`. The verify-only
 //! `auth_verify_door!` refuses the login ops, so the door is this crate's own `plugin_door!`.
 //!
-//! * The lifecycle is the SDK's ([`Life`]): `validate`/`open`/`refresh` parse the settings with
-//!   1.5.5's texts ([`GithubLogin::open`]); the client secret is the Statement's one secret
+//! * The lifecycle is the SDK's ([`Life`]): `validate`/`open`/`refresh` parse the settings
+//!   ([`GithubLogin::open`]); the client secret is the Statement's one secret
 //!   reference, resolved by the kernel into `OpenIn.secrets[0]`, never a settings value.
 //! * `begin_login` answers the GitHub authorize URL under a lease.
 //! * `complete_login` runs the hop chain itself ([`GithubLogin::drive`]) over the Statement's one
@@ -66,7 +66,7 @@ const REWRITES: &[Rewrite] = &[Rewrite {
 const NEED: u32 = 0;
 /// The one need: outbound to the IdP over the `http` transport (the scheme the http framer
 /// claims; an `https` target is secured by the connector), its target named per hop (token,
-/// `/user`, `/user/orgs`), bounded by 1.5.5's per-hop timeout.
+/// `/user`, `/user/orgs`), bounded by a per-hop timeout.
 const NEEDS: &[Need] = &[{
     let mut n = Need::EMPTY;
     n.direction = DIRECTION_OUTBOUND;
