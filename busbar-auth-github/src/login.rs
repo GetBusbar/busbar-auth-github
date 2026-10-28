@@ -1,20 +1,19 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (C) 2026 Busbar Inc and contributors
 
-//! THE PLUGIN-OWNED LOGIN (busbar THE DESIGN §6.7: an IdP login holds its own client secret and makes
-//! its token exchange through its own need; §5 Drivers: github through a one-shot `exchange()`).
+//! The plugin-owned login: it holds its own client secret and makes its token exchange through its
+//! own need, one-shot `exchange()` per hop.
 //!
-//! In 1.5.5 the CORE ran the hop loop: it called `complete_login`, executed each described hop
-//! (vetting its URL, injecting `client_secret`, sanitising its headers), and fed the response back.
-//! Here the plugin runs that loop itself, sans-IO: [`GithubLogin::drive`] turns the 1.5.5 step
-//! machine over one flow's own state, renders each hop exactly as 1.5.5's core did, and hands it to an
-//! [`Exchange`], which answers [`Fetched::Pending`] until the response is in. A pending exchange
-//! returns [`LoginStep::Pending`] with the flow parked on that hop; the next `drive` re-issues the
-//! SAME request (a one-shot exchange answers its stored result on the re-issue, never sending twice).
+//! The plugin runs the hop loop itself, sans-IO: [`GithubLogin::drive`] turns the step machine over
+//! one flow's own state, renders each hop (vetting its URL, injecting `client_secret`, sanitising its
+//! headers), and hands it to an [`Exchange`], which answers [`Fetched::Pending`] until the response
+//! is in. A pending exchange returns [`LoginStep::Pending`] with the flow parked on that hop; the
+//! next `drive` re-issues the SAME request (a one-shot exchange answers its stored result on the
+//! re-issue, never sending twice).
 //!
-//! What the answer means, as 1.5.5 rendered it:
+//! What the answer means:
 //!
-//! | 1.5.5 core | here |
+//! | answer | step |
 //! |---|---|
 //! | module `Identify` | [`LoginStep::Identity`] |
 //! | module `Reject` ("Sign-in was declined", 401) | [`LoginStep::BadCredential`] |
@@ -22,12 +21,11 @@
 //! | hop limit spent / `Authorize` on the callback (502) | [`LoginStep::Outage`] |
 //! | a hop body's `id_token` nonce mismatch ("Sign-in couldn't be verified", 400) | [`LoginStep::SecurityCheckFailed`] |
 //!
-//! Any HTTP status the IdP answers is fed back to the step machine, as 1.5.5 did: a revoked token's
-//! `401` from `/user` is a declined sign-in, not an outage. A `5xx` or `429` is the IdP unable to
-//! answer: [`LoginStep::Outage`], which the host answers 503, retryable (ruling 2026-10-27; 1.5.5
-//! declined it).
+//! Any HTTP status the IdP answers is fed back to the step machine: a revoked token's `401` from
+//! `/user` is a declined sign-in, not an outage. A `5xx` or `429` is the IdP unable to answer:
+//! [`LoginStep::Outage`], which the host answers 503, retryable.
 //!
-//! THE AUTH ABI ADAPTER is [`crate::door`]: it calls [`GithubLogin::open`],
+//! The auth ABI adapter is [`crate::door`]: it calls [`GithubLogin::open`],
 //! [`GithubLogin::begin_login`], [`GithubLogin::start`] and [`GithubLogin::drive`], keeping one
 //! [`LoginFlow`] per ticket and each [`Exchange`] one framed `exchange()` over the plugin's need.
 
@@ -46,15 +44,15 @@ use std::collections::HashSet;
 use std::fmt;
 use zeroize::{Zeroize, Zeroizing};
 
-/// 1.5.5's per-hop request timeout (`HOP_TIMEOUT_SECS = 10`).
+/// The per-hop request timeout.
 pub const HOP_TIMEOUT_MS: u64 = 10_000;
-/// 1.5.5's bound on `complete_login` turns per callback (`MAX_HOPS = 6`).
+/// The bound on `complete_login` turns per callback.
 pub const MAX_HOPS: usize = 6;
 /// The most a hop's reply body may carry: 1 MiB, the bound busbar-auth-oidc puts on a token
 /// endpoint's answer. A GitHub token response, `/user` or a 100-entry `/user/orgs` is a few KiB.
 pub const MAX_HOP_REPLY_BYTES: usize = 1024 * 1024;
 
-/// One hop, rendered as 1.5.5's core put it on the wire: method, target, header fields in order
+/// One hop, rendered as it goes on the wire: method, target, header fields in order
 /// (lowercase names), the form-encoded body, the timeout.
 #[derive(Clone, PartialEq, Eq)]
 pub struct HopRequest {
@@ -134,12 +132,12 @@ pub enum LoginStep {
     BadCredential,
     /// The IdP could not be reached, or the login could not finish.
     Outage,
-    /// A hop body's `id_token` is not bound to the nonce minted at begin (1.5.5's 400
+    /// A hop body's `id_token` is not bound to the nonce minted at begin (400
     /// "Sign-in couldn't be verified"; the auth ABI's `LOGIN_SECURITY_CHECK_FAILED`).
     SecurityCheckFailed,
 }
 
-/// The state 1.5.5 kept per flow between hops (its `PendingLogin`), owned by the flow.
+/// The state kept per flow between hops, owned by the flow.
 #[derive(Default)]
 struct FlowState {
     access_token: Option<Held<String>>,
@@ -186,19 +184,16 @@ impl fmt::Debug for GithubLogin {
 }
 
 impl GithubLogin {
-    /// Build the login from its settings (the module config 1.5.5's `open` took, same keys, same
-    /// refusal texts) and the client secret the kernel resolved from `browser_login.client_secret`
-    /// (busbar v1.5.5 `config/mod.rs:627-646`, resolved core-side at `auth/token.rs:264-276`), which
-    /// arrives in `OpenIn.secrets`, never in `settings`: a `client_secret` key in the settings is
-    /// refused (`deny_unknown_fields`), exactly as 1.5.5's plugin refused it.
+    /// Build the login from its settings and the client secret the kernel resolved from
+    /// `browser_login.client_secret`, which arrives in `OpenIn.secrets`, never in `settings`: a
+    /// `client_secret` key in the settings is refused (`deny_unknown_fields`).
     ///
-    /// No secret (`None` or empty) is NOT a refusal: 1.5.5 opened the plugin for a headless-only
-    /// provider with no `browser_login` block, and a hop's `client_secret` field was then dropped
-    /// (`auth/token.rs:944`). A redirect method missing its secret is refused by the kernel, as 1.5.5
-    /// refused it (`validate_browser_login_secret`, `auth/token.rs:264`, `:813`).
+    /// No secret (`None` or empty) is NOT a refusal: a headless-only provider has no `browser_login`
+    /// block, and a hop's `client_secret` field is then dropped. A redirect method missing its secret
+    /// is refused by the kernel.
     ///
     /// # Errors
-    /// Empty or invalid settings (1.5.5's texts; a decoder error keeps serde's text only when it
+    /// Empty or invalid settings (a decoder error keeps serde's text only when it
     /// names a key, never a value); a set `ca_cert_pem` (it has no delivery
     /// channel); a `token_base` or `api_base` not written out (the hop allowlist is built only from
     /// the URLs written in the settings, so every hop to a defaulted base would be refused).
@@ -237,7 +232,7 @@ impl GithubLogin {
         &self.cfg
     }
 
-    /// Start a login: the GitHub authorize URL (1.5.5 `begin_login`).
+    /// Start a login: the GitHub authorize URL.
     #[must_use]
     pub fn begin_login(
         &self,
@@ -249,8 +244,7 @@ impl GithubLogin {
         build_github_authorize_url(&self.cfg, redirect_uri, state, code_challenge, scopes)
     }
 
-    /// A new flow for one callback (what 1.5.5's core put in the first `CompleteLogin`), with the
-    /// nonce the kernel minted at begin (1.5.5 kept it in the login cookie).
+    /// A new flow for one callback, with the nonce the kernel minted at begin.
     #[must_use]
     pub fn start(
         &self,
@@ -274,7 +268,7 @@ impl GithubLogin {
         }
     }
 
-    /// Run `flow` as far as it goes without waiting: 1.5.5's core hop loop, over `ex`.
+    /// Run `flow` as far as it goes without waiting: the hop loop, over `ex`.
     pub fn drive(&self, flow: &mut LoginFlow, ex: &mut dyn Exchange) -> LoginStep {
         if let Some(done) = &flow.done {
             return done.clone();
@@ -328,7 +322,7 @@ impl GithubLogin {
                         return finish(flow, LoginStep::Outage);
                     }
                     let body = String::from_utf8_lossy(&resp.body).into_owned();
-                    // 1.5.5's core NONCE BINDING, now the plugin's: a hop body carrying an
+                    // NONCE BINDING: a hop body carrying an
                     // `id_token` must carry the nonce minted at begin, before any identity is
                     // trusted. GitHub issues no id_token, so this never fires against github.com.
                     if !id_token_nonce_binds(
@@ -355,7 +349,7 @@ impl GithubLogin {
         }
     }
 
-    /// 1.5.5's `complete_login` step machine (v1.0.3), over the flow's own state.
+    /// The `complete_login` step machine, over the flow's own state.
     fn step(&self, flow: &mut LoginFlow) -> LoginOutcome {
         let req = &flow.req;
         let Some(resp) = &req.token_response else {
@@ -387,8 +381,8 @@ impl GithubLogin {
             return LoginOutcome::Reject;
         }
         // An identity provider that could not answer (5xx) or asks to be retried later (429) is
-        // an outage, never a declined credential: the host answers 503, retryable (ruling
-        // 2026-10-27), and the cause is logged here.
+        // an outage, never a declined credential: the host answers 503, retryable, and
+        // the cause is logged here.
         if resp.status >= 500 || resp.status == 429 {
             let hop = hop_name(&flow.state);
             tracing::warn!(
@@ -481,7 +475,7 @@ impl GithubLogin {
         LoginOutcome::Exchange(hop)
     }
 
-    /// 1.5.5's `execute_hop`, up to the send: vet the URL, inject the secret into the named form
+    /// Render a hop up to the send: vet the URL, inject the secret into the named form
     /// field (or drop the placeholder when there is none), form-encode, and lay out the fields as the
     /// http stack wrote them (`content-type` first, the hop's sanitised headers, then the default
     /// `accept: */*` when the hop set none).
@@ -600,7 +594,7 @@ fn settings_err(e: serde_json::Error) -> String {
     format!("{WHAT}: {class} (line {line}, column {column}; the decoder's text is withheld)")
 }
 
-/// 1.5.5's nonce binding (`extract_id_token` + `id_token_nonce` + a constant-time compare): a body
+/// The nonce binding (a constant-time compare): a body
 /// with no `id_token` binds trivially; one with an `id_token` binds only when its payload's `nonce`
 /// claim (base64url, no signature check: that is the IdP module's job) equals `minted`.
 fn id_token_nonce_binds(body: &str, minted: Option<&str>) -> bool {
@@ -640,7 +634,7 @@ fn form_len(v: &str) -> usize {
         .sum()
 }
 
-/// `application/x-www-form-urlencoded`, as 1.5.5's http stack encoded a form (`serde_urlencoded`):
+/// `application/x-www-form-urlencoded`, as `serde_urlencoded` encodes a form:
 /// ASCII alphanumerics and `*-._` literal, space as `+`, every other byte `%XX` uppercase. Built
 /// in ONE buffer sized to the exact length first (busbar-auth-oauth's `form`), so no growth frees a
 /// partial copy of the secret the form carries, and held wiped on drop.
