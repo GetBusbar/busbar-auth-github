@@ -446,6 +446,7 @@ fn an_id_token_bound_to_the_minted_nonce_passes_the_check() {
 
 #[test]
 fn b64url_decode_is_strict_url_safe_no_pad() {
+    let b64url_decode = |s: &str| URL_SAFE_NO_PAD.decode(s).ok();
     assert_eq!(b64url_decode("").as_deref(), Some(&b""[..]));
     assert_eq!(b64url_decode("Zg").as_deref(), Some(&b"f"[..]));
     assert_eq!(b64url_decode("Zm8").as_deref(), Some(&b"fo"[..]));

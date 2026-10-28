@@ -38,6 +38,8 @@ use crate::{
     build_userinfo_get, is_json_array, parse_access_token, parse_org_groups, parse_user, GhUser,
     GitHubConfig,
 };
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use base64::Engine;
 use busbar_contract::auth::{CompleteLogin, LoginHop, LoginHttpResponse, LoginOutcome, Principal};
 use serde_json::Value;
 use std::collections::HashSet;
@@ -612,7 +614,7 @@ fn id_token_nonce_binds(body: &str, minted: Option<&str>) -> bool {
     let claimed = id_token
         .split('.')
         .nth(1)
-        .and_then(b64url_decode)
+        .and_then(|seg| URL_SAFE_NO_PAD.decode(seg).ok())
         .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
         .and_then(|claims| {
             claims
@@ -624,48 +626,6 @@ fn id_token_nonce_binds(body: &str, minted: Option<&str>) -> bool {
         (Some(n), Some(m)) => busbar_contract::constant_time_eq(&n, m),
         _ => false,
     }
-}
-
-/// base64url without padding, strict as 1.5.5's `URL_SAFE_NO_PAD` decoder: no `=`, no length of
-/// `4k+1`, and the unused trailing bits must be zero.
-fn b64url_decode(s: &str) -> Option<Vec<u8>> {
-    fn val(c: u8) -> Option<u32> {
-        Some(match c {
-            b'A'..=b'Z' => c - b'A',
-            b'a'..=b'z' => c - b'a' + 26,
-            b'0'..=b'9' => c - b'0' + 52,
-            b'-' => 62,
-            b'_' => 63,
-            _ => return None,
-        } as u32)
-    }
-    let bytes = s.as_bytes();
-    if bytes.len() % 4 == 1 {
-        return None;
-    }
-    let mut out = Vec::with_capacity(bytes.len() * 3 / 4);
-    for chunk in bytes.chunks(4) {
-        let mut acc = 0u32;
-        for &c in chunk {
-            acc = (acc << 6) | val(c)?;
-        }
-        match chunk.len() {
-            4 => out.extend_from_slice(&[(acc >> 16) as u8, (acc >> 8) as u8, acc as u8]),
-            3 => {
-                if acc & 0b11 != 0 {
-                    return None;
-                }
-                out.extend_from_slice(&[(acc >> 10) as u8, (acc >> 2) as u8]);
-            }
-            _ => {
-                if acc & 0b1111 != 0 {
-                    return None;
-                }
-                out.push((acc >> 4) as u8);
-            }
-        }
-    }
-    Some(out)
 }
 
 /// Whether `b` is written as itself in a form value (ASCII alphanumerics and `*-._`).

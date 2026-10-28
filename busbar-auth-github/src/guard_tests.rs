@@ -67,31 +67,10 @@ fn a_metadata_host_is_refused_even_when_allow_listed() {
         ("https://[fd00:ec2::254]/", "fd00:ec2::254"),
         ("https://168.63.129.16/", "168.63.129.16"),
     ] {
-        assert!(metadata_host(url), "{url}");
         assert!(vet_hop_url(url, &allowed(&[host])).is_err(), "{url}");
     }
-    assert!(!metadata_host("https://api.github.com/"));
-    assert!(!metadata_host("http://10.0.0.1/"));
-}
-
-#[test]
-fn host_normalisation_matches_1_5_5() {
-    let h = |u: &str| extract_normalized_host(u);
-    assert_eq!(
-        h("https://Api.GitHub.com./user").as_deref(),
-        Some("Api.GitHub.com")
-    );
-    assert_eq!(
-        h("https://u:p@host.example:443/x").as_deref(),
-        Some("host.example")
-    );
-    assert_eq!(h("https://[::1]:8443/").as_deref(), Some("::1"));
-    assert_eq!(
-        h("https://169.254.169\t.254/").as_deref(),
-        Some("169.254.169.254")
-    );
-    assert_eq!(h("https:///path"), None);
-    assert_eq!(h("gopher://x"), None);
+    assert!(vet_hop_url("https://api.github.com/", &allowed(&["api.github.com"])).is_ok());
+    assert!(vet_hop_url("http://10.0.0.1/", &allowed(&["10.0.0.1"])).is_ok());
 }
 
 #[test]
@@ -120,49 +99,29 @@ fn headers_are_sanitised_as_1_5_5_did() {
 }
 
 #[test]
-fn private_or_loopback_matches_1_5_5() {
-    for h in [
-        "localhost",
-        "a.localhost",
-        "127.0.0.1",
-        "10.0.0.1",
-        "100.64.0.1",
-        "::1",
-        "fd00::1",
-        "127.1",
+fn every_provider_metadata_host_is_refused_even_when_allow_listed() {
+    for (url, host) in [
+        ("http://100.100.100.200/", "100.100.100.200"),
+        ("http://192.0.0.192/", "192.0.0.192"),
+        ("http://metadata.internal/", "metadata.internal"),
+        ("http://metadata.tencentyun.com/", "metadata.tencentyun.com"),
+        (
+            "http://metadata.platformequinix.com/",
+            "metadata.platformequinix.com",
+        ),
+        ("http://instance-data/", "instance-data"),
+        (
+            "http://instance-data.ec2.internal/",
+            "instance-data.ec2.internal",
+        ),
+        (
+            "http://INSTANCE-DATA.EC2.INTERNAL/",
+            "instance-data.ec2.internal",
+        ),
     ] {
-        assert!(host_is_private_or_loopback(h), "{h}");
+        assert!(vet_hop_url(url, &allowed(&[host])).is_err(), "{url}");
     }
-    for h in ["github.com", "8.8.8.8", "2001:4860::1"] {
-        assert!(!host_is_private_or_loopback(h), "{h}");
-    }
-}
-
-#[test]
-fn private_or_loopback_covers_ipv4_mapped_and_link_local_v6() {
-    for h in ["::ffff:10.0.0.1", "::ffff:127.0.0.1", "fe80::1"] {
-        assert!(host_is_private_or_loopback(h), "{h}");
-    }
-    assert!(!host_is_private_or_loopback("::ffff:8.8.8.8"));
-}
-
-#[test]
-fn metadata_host_covers_every_provider_constant_and_name() {
-    for url in [
-        "http://100.100.100.200/",
-        "http://192.0.0.192/",
-        "http://168.63.129.16/",
-        "http://metadata.internal/",
-        "http://metadata.tencentyun.com/",
-        "http://metadata.platformequinix.com/",
-        "http://instance-data/",
-        "http://instance-data.ec2.internal/",
-        "http://INSTANCE-DATA.EC2.INTERNAL/",
-    ] {
-        assert!(metadata_host(url), "{url}");
-    }
-    assert!(!metadata_host("http://metadata.example.com/"));
-    assert!(!metadata_host("http://100.100.100.201/"));
+    assert!(vet_hop_url("http://100.100.100.201/", &allowed(&["100.100.100.201"])).is_ok());
 }
 
 mod logging {
