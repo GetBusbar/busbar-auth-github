@@ -24,7 +24,8 @@ busbar-auth-github = { path = "../busbar-auth-github" }
 # with the loader's filename helper. Same pinned rev as busbar-contract, so one busbar source resolves.
 # `conformance`: busbar's PUBLISHED conformance suite (`tests/conformance.rs`'s
 # `conformance_suite!`), run against the busbar commit this repo pins.
-busbar-plugin-loader = { workspace = true, features = ["conformance"] }
+busbar-plugin-loader = { workspace = true }
+busbar-test-kit = { workspace = true }
 base64 = { workspace = true }
 reqwest = { workspace = true, features = ["json", "blocking"] }
 serde_json = { workspace = true }

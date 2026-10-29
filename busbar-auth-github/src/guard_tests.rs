@@ -126,7 +126,7 @@ fn every_provider_metadata_host_is_refused_even_when_allow_listed() {
 
 mod logging {
     use super::*;
-    use busbar_contract::testkit::WarnCapture;
+    use busbar_test_kit::warn_capture::WarnCapture;
 
     #[test]
     fn a_refused_header_logs_its_name_never_its_value() {
