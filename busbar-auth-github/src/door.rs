@@ -31,11 +31,11 @@ use busbar_contract::abi::host::conn::connector::{
     Need, DIRECTION_OUTBOUND, EGRESS_DEFAULT, KEEP_NAMED,
 };
 use busbar_contract::abi::mechanism::call::{AbiStr, Blob, Outcome, Span, BLOB_ABSENT};
-use busbar_contract::abi::mechanism::door::{Rewrite, Statement, REWRITE_ALIAS};
+use busbar_contract::abi::mechanism::door::{Rewrite, Statement};
 use busbar_contract::abi::mechanism::ticket::Ticket;
 use busbar_contract::abi::sdk::auth_door::with_tail;
 use busbar_contract::abi::sdk::conn::Connector;
-use busbar_contract::abi::sdk::door::{abi_str, statement, AbiIn, AbiOut};
+use busbar_contract::abi::sdk::door::{abi_str, alias, statement, AbiIn, AbiOut};
 use busbar_contract::abi::sdk::exchange::{exchange, Exchange as Wire, Request};
 use busbar_contract::abi::sdk::life::{Held, Life, Refreshed, Refusal};
 use busbar_contract::abi::sdk::{HostBuf, Instance, Lent, Out, SafeSlot};
@@ -56,12 +56,7 @@ pub const ALIAS: &str = "github";
 pub const CLIENT_SECRET_KEY: &str = "client_secret";
 
 const SECRET_REFS: &[AbiStr] = &[abi_str(CLIENT_SECRET_KEY)];
-const REWRITES: &[Rewrite] = &[Rewrite {
-    class: REWRITE_ALIAS,
-    _reserved: 0,
-    from: abi_str(ALIAS),
-    to: AbiStr::ABSENT,
-}];
+const REWRITES: &[Rewrite] = &[alias(ALIAS)];
 /// The index of the one need in [`NEEDS`].
 const NEED: u32 = 0;
 /// The one need: outbound to the IdP over the `http` transport (the scheme the http framer
