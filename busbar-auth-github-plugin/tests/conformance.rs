@@ -27,7 +27,7 @@ use std::path::PathBuf;
 // (the token exchange and the `/user` and `/user/orgs` hops reach the far ends in
 // `conformance.json`), exact crossings, both folds equal, its RED arms kept.
 busbar_test_kit::conformance_suite! {
-    door: busbar_auth_github::door::MACRO_DOOR,
+    door: busbar_auth_github::door::door,
     cdylib: "busbar_auth_github_plugin",
     inputs: include_str!("conformance.json"),
 }
@@ -54,8 +54,8 @@ use busbar_plugin_loader::sign::{sign, Manifest, SigningKey, TrustPolicy};
 const NAME: &str = busbar_auth_github::door::NAME;
 const ALIAS: &str = busbar_auth_github::door::ALIAS;
 
-/// The operator config both arms are opened with (the hop bases written out, as `open` requires).
-const CFG: &str = r#"{"client_id":"Iv1.conformance","fetch_orgs":true,"token_base":"https://github.com","api_base":"https://api.github.com"}"#;
+/// The operator config both arms are opened with.
+const CFG: &str = r#"{"client_id":"Iv1.conformance","fetch_orgs":true}"#;
 
 /// The client secret the kernel resolved; no transcript line may carry it.
 const SECRET: &str = "conformance-client-secret";
@@ -106,7 +106,7 @@ fn bind(d: &Dispatcher) -> Bind {
 
 /// THE LINKED DOOR: the logic crate's door as a compiled-in row.
 fn row() -> LinkedRow {
-    LinkedRow::of_macro(busbar_auth_github::door::MACRO_DOOR).expect("the door states its row")
+    LinkedRow::of(busbar_auth_github::door::door).expect("the door states its row")
 }
 
 fn linked(d: &Dispatcher) -> Plugin<Auth> {
@@ -173,31 +173,34 @@ fn dropped(d: &Dispatcher) -> Plugin<Auth> {
 }
 
 fn json(bytes: &[u8]) -> Blob {
-    // SAFETY: the caller keeps `bytes` alive across the call that reads the blob.
-    #[allow(unused_unsafe)]
-    unsafe {
-        Blob::from_raw_parts(bytes.as_ptr(), bytes.len(), BLOB_JSON, 0)
+    Blob {
+        ptr: bytes.as_ptr(),
+        len: bytes.len(),
+        fmt: BLOB_JSON,
+        flags: 0,
     }
 }
 
 fn secret_blob(bytes: &[u8]) -> Blob {
-    // SAFETY: the caller keeps `bytes` alive across the call that reads the blob.
-    #[allow(unused_unsafe)]
-    unsafe {
-        Blob::from_raw_parts(
-            bytes.as_ptr(),
-            bytes.len(),
-            BLOB_OCTETS,
-            busbar_contract::abi::mechanism::call::BLOB_SECRET,
-        )
+    Blob {
+        ptr: bytes.as_ptr(),
+        len: bytes.len(),
+        fmt: BLOB_OCTETS,
+        flags: busbar_contract::abi::mechanism::call::BLOB_SECRET,
     }
 }
 
 fn s(text: &'static str) -> AbiStr {
-    AbiStr::of(text)
+    AbiStr {
+        ptr: text.as_ptr(),
+        len: text.len(),
+    }
 }
 
-const NO_STR: AbiStr = AbiStr::ABSENT;
+const NO_STR: AbiStr = AbiStr {
+    ptr: std::ptr::null(),
+    len: 0,
+};
 
 /// A call's answer as the transcript spells it: outcome, error text, and whether a lease came back.
 fn spelled(c: &Called) -> String {
@@ -378,11 +381,11 @@ fn begin_login(p: &Plugin<Auth>) -> Vec<String> {
     let url = &f.out.authorize_url;
     // SAFETY: a READY `begin_login` names its URL in plugin memory held under the answer's lease,
     // valid until that lease is released (below, after this copy).
-    let url = if url.is_absent() {
+    let url = if url.ptr.is_null() {
         String::new()
     } else {
-        #[allow(unused_unsafe)]
-        String::from_utf8_lossy(unsafe { url.bytes() }).into_owned()
+        String::from_utf8_lossy(unsafe { std::slice::from_raw_parts(url.ptr, url.len) })
+            .into_owned()
     };
     vec![
         format!(
@@ -437,10 +440,7 @@ fn transcript(p: &Plugin<Auth>, cfg: &str) -> Vec<String> {
     t.push(complete_login(p));
     t.push(format!(
         "refresh: {}",
-        refresh(
-            p,
-            r#"{"client_id":"Iv1.refreshed","token_base":"https://github.com","api_base":"https://api.github.com"}"#,
-        )
+        refresh(p, r#"{"client_id":"Iv1.refreshed"}"#)
     ));
     t.push(format!("refresh refused: {}", refresh(p, "{ not json")));
     t.push(format!("tick: {}", tick(p)));
@@ -498,7 +498,7 @@ fn a_different_operator_config_is_a_different_transcript() {
     let linked = transcript(&linked(&d), CFG);
     let other = transcript(
         &dropped(&d),
-        r#"{"client_id":"Iv1.someone-else","fetch_orgs":false,"token_base":"https://github.com","api_base":"https://api.github.com"}"#,
+        r#"{"client_id":"Iv1.someone-else","fetch_orgs":false}"#,
     );
     assert_ne!(
         other, linked,
