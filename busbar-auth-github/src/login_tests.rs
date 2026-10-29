@@ -843,7 +843,7 @@ fn a_poisoned_orgs_array_cannot_swap_the_token_mid_flow() {
 
 mod logging {
     use super::*;
-    use busbar_contract::testkit::WarnCapture;
+    use busbar_test_kit::warn_capture::WarnCapture;
 
     /// Settings that omit `token_base`: its default host is not operator-written, so not allowed.
     const NO_TOKEN_BASE: &str =
@@ -947,7 +947,7 @@ fn a_hop_reply_over_the_cap_is_an_outage() {
 
 mod module_field {
     use super::*;
-    use busbar_contract::testkit::WarnCapture;
+    use busbar_test_kit::warn_capture::WarnCapture;
 
     /// RED: every record carries `module = "github"`, as the sibling auth plugins' do.
     #[test]
