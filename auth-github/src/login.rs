@@ -568,11 +568,12 @@ impl GithubLogin {
                 return Turn::Decline;
             };
             let Some(groups) = parse_org_groups(body) else {
-                tracing::info!(
+                // G3 (owner-signed 2026-10-30): no sign-in answer, the far end's fault: an outage.
+                tracing::warn!(
                     module = "github",
-                    "github login: declined, /user/orgs answered a malformed list"
+                    "github login: /user/orgs answered a malformed list"
                 );
-                return Turn::Decline;
+                return Turn::Outage { retry_after: None };
             };
             return Turn::Identify(build_principal(&user, groups));
         }
@@ -583,12 +584,15 @@ impl GithubLogin {
                 flow.state = FlowState::default();
                 return turn;
             }
-            tracing::info!(
+            // G3 (owner-signed 2026-10-30): a malformed or foreign 2xx from the REST API is no
+            // sign-in answer: an outage.
+            tracing::warn!(
                 module = "github",
-                "github login: declined, /user answered without a login or id"
+                hop = hop_of(&flow.state).path(),
+                "github login: the GitHub API answered 2xx with no user (a login and a numeric id) or org list"
             );
             flow.state = FlowState::default();
-            return Turn::Decline;
+            return Turn::Outage { retry_after: None };
         };
         if !self.cfg.fetch_orgs {
             flow.state = FlowState::default();

@@ -41,13 +41,19 @@ one outbound `http` need, and holds its own confidential-client **secret** (the 
 | 3 | the `/user` JSON | `GET .../user/orgs` (or identifies now if `fetch_orgs = false`) |
 | 4 | the `/user/orgs` JSON | identifies `github:<login>` + `github:id/<id>` + `github:org/<org>` groups |
 
-Declined (a bad credential, 401) on any other non-2xx, a missing `access_token`, a missing `login`,
-or malformed JSON. An outage (503, retryable) when GitHub answers `5xx` or `429`, when a hop cannot
-be made (refused, connect, TLS, timeout), or when its reply passes 256 KiB. An `id_token` on a hop
-answer (never from github.com) must carry the nonce minted at begin, else the sign-in fails its
-security check (400).
-GitHub answers its token endpoint with **HTTP 200 even on a bad code** (an `{"error":...}` body with
-no `access_token`) — that is treated as a rejection, never a success with an empty token.
+Only a credential error is a declined sign-in (a bad credential, 401): the token endpoint's
+`400`/`401` carrying an RFC 6749 §5.2 `error`, its HTTP 200 answer carrying the user's own code
+(`bad_verification_code`, `invalid_grant`, `expired_token`), and a `401` from `/user` or
+`/user/orgs` (the access token is not accepted). Everything else is an outage (503, retryable):
+GitHub answering `5xx` or `429`, its `403` rate limit (`retry-after` or `x-ratelimit-remaining: 0`),
+a `403` on `/user/orgs` (the token lacks `read:org`: logged at warn as the operator's to fix), a
+redirect, `404`, `408` or any other status; a 200 token error that is the operator's
+(`incorrect_client_credentials`, `redirect_uri_mismatch`, `application_suspended`, logged at warn)
+or unknown; a 2xx with no token, no user or no org list (empty, HTML, malformed JSON); a hop that
+cannot be made (refused, connect, TLS, timeout); a reply past 256 KiB. An outage carries GitHub's
+retry hint (`retry-after` seconds, or the seconds to `x-ratelimit-reset`) for the host. An
+`id_token` on a hop answer (never from github.com) must carry the nonce minted at begin, else the
+sign-in fails its security check (400).
 
 ## Config
 
