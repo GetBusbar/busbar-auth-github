@@ -279,7 +279,8 @@ impl GithubLogin {
     ///
     /// # Errors
     /// Empty or invalid settings (a decoder error keeps serde's text only when it
-    /// names a key, never a value); a `ca_cert_pem` that is no PEM certificate; a `token_base` or `api_base` not written out (the hop allowlist is built only from
+    /// names a key, never a value); an empty `client_id`; a base that is not an http(s) URL with a
+    /// host; a `ca_cert_pem` that is no PEM certificate; a `token_base` or `api_base` not written out (the hop allowlist is built only from
     /// the URLs written in the settings, so every hop to a defaulted base would be refused).
     pub fn open(settings: &str, client_secret: Option<&str>) -> Result<Self, String> {
         if settings.trim().is_empty() {
@@ -289,6 +290,19 @@ impl GithubLogin {
             cred::settings(settings.as_bytes()).map_err(|e| settings_line(&e))?;
         let raw: Value = serde_json::from_str(settings)
             .map_err(|_| "settings: not a JSON document".to_string())?;
+        if cfg.client_id.is_empty() {
+            return Err("settings.client_id: empty".to_string());
+        }
+        for (key, url) in [
+            ("api_base", &cfg.api_base),
+            ("authorize_base", &cfg.authorize_base),
+            ("token_base", &cfg.token_base),
+        ] {
+            let http = url.starts_with("https://") || url.starts_with("http://");
+            if !http || busbar_contract::net::extract_normalized_host(url).is_none() {
+                return Err(format!("settings.{key}: not an http(s) URL with a host"));
+            }
+        }
         if cfg
             .ca_cert_pem
             .as_deref()
