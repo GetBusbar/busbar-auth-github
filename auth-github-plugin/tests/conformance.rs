@@ -10,7 +10,7 @@
 //! Statement rendered and signed into the manifest's `statement` as the pack tool does, packed into
 //! a temp `plugins/` directory, admitted by the loader's scan, and bound from the verified bytes
 //! against that signed rendering through `load_dropped_bytes`). Each is driven over the same script
-//! through the auth table: `validate` over 1.5.5's config refusals, `open` with the kernel-resolved
+//! through the auth table: `validate` over the config refusals, `open` with the kernel-resolved
 //! client secret, `verify` (not served), `begin_login` (the authorize URL, leased, then released),
 //! a ticket-less `complete_login` (REFUSED: the token exchange waits on I/O, so it runs on a
 //! ticket), `refresh` accepted and refused, `tick` and `close`. The two transcripts must be equal.
@@ -417,7 +417,7 @@ fn complete_login(p: &Plugin<Auth>) -> String {
 fn transcript(p: &Plugin<Auth>, cfg: &str) -> Vec<String> {
     let mut t = vec![
         format!("kind={:?} name={}", p.kind(), p.name()),
-        // 1.5.5's open-time refusals, as `validate` answers them.
+        // The open-time refusals, as `validate` answers them (the contract's `settings` lines).
         format!("validate empty: {}", validate(p, "")),
         format!("validate malformed: {}", validate(p, "{ not json")),
         format!(
@@ -467,11 +467,11 @@ fn the_linked_and_the_dropped_in_github_login_are_one_plugin() {
         "a transcript carries the secret: {text}"
     );
     for refused in [
-        "validate empty: Failed lease=false github plugin requires config (client_id)",
-        "validate malformed: Failed lease=false invalid github plugin config",
-        "validate no client_id: Failed lease=false invalid github plugin config",
-        "validate unknown field: Failed lease=false invalid github plugin config",
-        "validate secret in settings: Failed lease=false invalid github plugin config: unknown field `client_secret`",
+        "validate empty: Failed lease=false settings: empty: the github plugin requires client_id",
+        "validate malformed: Failed lease=false settings: not a JSON document",
+        "validate no client_id: Failed lease=false settings: missing field `client_id`",
+        "validate unknown field: Failed lease=false settings: unknown field `bogus`",
+        "validate secret in settings: Failed lease=false settings: unknown field `client_secret`",
     ] {
         assert!(text.contains(refused), "missing {refused:?} in:\n{text}");
     }
@@ -486,7 +486,7 @@ fn the_linked_and_the_dropped_in_github_login_are_one_plugin() {
         "release again Refused",
         "complete_login Refused lease=false  verdict=0",
         "refresh: Ready",
-        "refresh refused: Failed lease=false invalid github plugin config",
+        "refresh refused: Failed lease=false settings: not a JSON document",
         "close: Ready",
     ] {
         assert!(text.contains(line), "missing {line:?} in:\n{text}");

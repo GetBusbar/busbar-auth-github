@@ -37,8 +37,7 @@ use crate::{
 };
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
-use busbar_contract::abi::sdk::auth_kit::json_error;
-use busbar_contract::abi::sdk::cred::{Cred, FormBody};
+use busbar_contract::abi::sdk::cred::{self, Cred, FormBody, SettingsError};
 use busbar_contract::abi::sdk::exchange::{Exchange as Wire, Request};
 use busbar_contract::auth::{LoginHop, LoginOutcome, Principal};
 use serde_json::Value;
@@ -46,8 +45,17 @@ use std::collections::HashSet;
 use std::fmt;
 use zeroize::{Zeroize, Zeroizing};
 
-/// What a settings decoder error is about (`abi::sdk::auth_kit::json_error`'s lead).
-const SETTINGS: &str = "invalid github plugin config";
+/// A settings decoder error as the contract's instance-relative line: `settings.<path>: <reason>`
+/// (`settings: <reason>` for the document), every value in it written `***`.
+fn settings_line(e: &SettingsError) -> String {
+    let text = e.to_string();
+    let reason = text.strip_prefix("settings: ").unwrap_or(&text);
+    if e.path().is_empty() {
+        format!("settings: {reason}")
+    } else {
+        format!("settings.{}: {reason}", e.path())
+    }
+}
 
 /// The per-hop request timeout.
 pub const HOP_TIMEOUT_MS: u64 = 10_000;
@@ -275,10 +283,12 @@ impl GithubLogin {
     /// the URLs written in the settings, so every hop to a defaulted base would be refused).
     pub fn open(settings: &str, client_secret: Option<&str>) -> Result<Self, String> {
         if settings.trim().is_empty() {
-            return Err("github plugin requires config (client_id); none provided".to_string());
+            return Err("settings: empty: the github plugin requires client_id".to_string());
         }
-        let cfg: GitHubConfig = serde_json::from_str(settings).map_err(json_error(SETTINGS))?;
-        let raw: Value = serde_json::from_str(settings).map_err(json_error(SETTINGS))?;
+        let cfg: GitHubConfig =
+            cred::settings(settings.as_bytes()).map_err(|e| settings_line(&e))?;
+        let raw: Value = serde_json::from_str(settings)
+            .map_err(|_| "settings: not a JSON document".to_string())?;
         if cfg
             .ca_cert_pem
             .as_deref()
@@ -293,7 +303,7 @@ impl GithubLogin {
         for key in ["token_base", "api_base"] {
             if raw.get(key).is_none() {
                 return Err(format!(
-                    "settings: `{key}` must be written out: the hop allowlist is built only from URLs in the settings"
+                    "settings.{key}: must be written out: the hop allowlist is built only from URLs in the settings"
                 ));
             }
         }

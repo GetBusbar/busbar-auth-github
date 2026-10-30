@@ -161,12 +161,12 @@ impl Github {
 
 /// The login from settings bytes and the resolved secrets (the client secret first, if any).
 fn login_from(settings: &[u8], secrets: &[&[u8]]) -> Result<GithubLogin, Refusal> {
-    let settings = std::str::from_utf8(settings)
-        .map_err(|e| Refusal::failed(format!("invalid github plugin config: {e}")))?;
+    let settings =
+        std::str::from_utf8(settings).map_err(|_| Refusal::failed("settings: not UTF-8"))?;
     let secret = match secrets.first() {
         None => None,
         Some(s) => Some(std::str::from_utf8(s).map_err(|_| {
-            Refusal::failed("invalid github plugin config: the client secret is not UTF-8")
+            Refusal::failed(format!("secrets: `{CLIENT_SECRET_KEY}` is not UTF-8"))
         })?),
     };
     GithubLogin::open(settings, secret).map_err(Refusal::failed)
