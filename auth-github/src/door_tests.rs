@@ -77,23 +77,46 @@ fn the_written_out_settings_validate() {
     assert!(<Github as Life>::validate(WRITTEN.as_bytes()).is_ok());
 }
 
-/// RED: a `ca_cert_pem` has no delivery channel (the one outbound need carries no CA), so a set
-/// one is refused, named, rather than accepted and silently ignored.
+const PEM: &str = "-----BEGIN CERTIFICATE-----\\nY29uZm9ybWFuY2U=\\n-----END CERTIFICATE-----\\n";
+
+/// RED: a `ca_cert_pem` (a GHES behind an internal CA) anchors every hop: the login goes out on the
+/// need that trusts it (`trust_from` = `settings.ca_cert_pem`), beside the public roots. Without
+/// one (absent, null or empty) it goes out on the public-roots need.
 #[test]
-fn a_set_ca_cert_pem_is_refused_by_name() {
+fn a_set_ca_cert_pem_anchors_the_hops() {
+    let anchored = WRITTEN.replace(
+        "\"client_id\"",
+        &format!("\"ca_cert_pem\": \"{PEM}\", \"client_id\""),
+    );
+    assert!(<Github as Life>::validate(anchored.as_bytes()).is_ok());
+    let login = GithubLogin::open(&anchored, None).expect("opens");
+    assert_eq!(need_of(&login), NEED_ANCHORED);
+    assert!(!NEEDS[NEED_ANCHORED as usize].trust_from.is_absent());
+    assert!(NEEDS[NEED_PUBLIC as usize].trust_from.is_absent());
+    for public in [
+        WRITTEN.to_string(),
+        WRITTEN.replace("\"client_id\"", "\"ca_cert_pem\": null, \"client_id\""),
+        WRITTEN.replace("\"client_id\"", "\"ca_cert_pem\": \"\", \"client_id\""),
+    ] {
+        let login = GithubLogin::open(&public, None).expect("opens");
+        assert_eq!(need_of(&login), NEED_PUBLIC, "{public}");
+    }
+}
+
+/// RED: a `ca_cert_pem` that is not a PEM certificate is refused, named, at validate (as `open`
+/// refuses it), never handed to the host to fail at the first login.
+#[test]
+fn a_ca_cert_pem_that_is_not_a_certificate_is_refused_by_name() {
     let settings = WRITTEN.replace(
         "\"client_id\"",
-        "\"ca_cert_pem\": \"-----BEGIN CERTIFICATE-----\", \"client_id\"",
+        "\"ca_cert_pem\": \"not a certificate\", \"client_id\"",
     );
     let r = refusal(&settings);
     assert_eq!(r.outcome(), Outcome::Failed);
     assert_eq!(
         r.text(),
-        Some("github ca_cert_pem is not yet supported; omit it or use a system-trusted cert")
+        Some("settings.ca_cert_pem: not a PEM certificate (no -----BEGIN CERTIFICATE----- line)")
     );
-    // Written as null it is not set.
-    let null = WRITTEN.replace("\"client_id\"", "\"ca_cert_pem\": null, \"client_id\"");
-    assert!(<Github as Life>::validate(null.as_bytes()).is_ok());
 }
 
 /// RED: a base left at its default is not on the hop allowlist (built only from URLs written in
