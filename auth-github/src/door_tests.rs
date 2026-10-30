@@ -186,3 +186,24 @@ fn a_non_utf8_client_secret_is_refused_by_name() {
     let r = login_from(&[b'{', 0xff, b'}'], &[]).expect_err("refused");
     assert_eq!(r.text(), Some("settings: not UTF-8"));
 }
+
+/// RED: an empty required string (the client id, a base URL) is refused at validate, named, as
+/// `open` refuses it: an empty client id cannot sign in, and an empty or host-less base would
+/// fail every hop.
+#[test]
+fn an_empty_client_id_or_base_is_refused_by_name() {
+    for (key, value, line) in [
+        ("client_id", "", "settings.client_id: empty"),
+        ("token_base", "", "settings.token_base: not an http(s) URL with a host"),
+        ("api_base", "", "settings.api_base: not an http(s) URL with a host"),
+        ("authorize_base", "", "settings.authorize_base: not an http(s) URL with a host"),
+        ("api_base", "api.github.com", "settings.api_base: not an http(s) URL with a host"),
+        ("token_base", "ftp://github.com", "settings.token_base: not an http(s) URL with a host"),
+    ] {
+        let mut settings: serde_json::Value = serde_json::from_str(WRITTEN).unwrap();
+        settings[key] = serde_json::Value::String(value.to_string());
+        let r = refusal(&settings.to_string());
+        assert_eq!(r.outcome(), Outcome::Failed);
+        assert_eq!(r.text(), Some(line), "{key}={value:?}");
+    }
+}
