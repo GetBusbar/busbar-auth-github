@@ -1,4 +1,5 @@
 {
+  "credentials": ["gho_conformance_token"],
   "settings": {
     "client_id": "conformance-client",
     "api_base": "https://api.github.conformance.example",
