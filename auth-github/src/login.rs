@@ -271,8 +271,7 @@ impl GithubLogin {
     ///
     /// # Errors
     /// Empty or invalid settings (a decoder error keeps serde's text only when it
-    /// names a key, never a value); a set `ca_cert_pem` (it has no delivery
-    /// channel); a `token_base` or `api_base` not written out (the hop allowlist is built only from
+    /// names a key, never a value); a `ca_cert_pem` that is no PEM certificate; a `token_base` or `api_base` not written out (the hop allowlist is built only from
     /// the URLs written in the settings, so every hop to a defaulted base would be refused).
     pub fn open(settings: &str, client_secret: Option<&str>) -> Result<Self, String> {
         if settings.trim().is_empty() {
@@ -280,9 +279,13 @@ impl GithubLogin {
         }
         let cfg: GitHubConfig = serde_json::from_str(settings).map_err(json_error(SETTINGS))?;
         let raw: Value = serde_json::from_str(settings).map_err(json_error(SETTINGS))?;
-        if cfg.ca_cert_pem.is_some() {
+        if cfg
+            .ca_cert_pem
+            .as_deref()
+            .is_some_and(|p| !p.is_empty() && !p.contains("-----BEGIN CERTIFICATE-----"))
+        {
             return Err(
-                "github ca_cert_pem is not yet supported; omit it or use a system-trusted cert"
+                "settings.ca_cert_pem: not a PEM certificate (no -----BEGIN CERTIFICATE----- line)"
                     .to_string(),
             );
         }
@@ -303,6 +306,17 @@ impl GithubLogin {
             client_secret,
             allowed_hosts: collect_allowed_hosts(&raw),
         })
+    }
+
+    /// Whether the settings name an operator CA (`ca_cert_pem`, non-empty): the hops then go out on
+    /// the need that trusts it beside the public roots. Read as the host reads a `trust_from`
+    /// path: an empty value names nothing.
+    #[must_use]
+    pub fn anchored(&self) -> bool {
+        self.cfg
+            .ca_cert_pem
+            .as_deref()
+            .is_some_and(|p| !p.is_empty())
     }
 
     /// The parsed config.

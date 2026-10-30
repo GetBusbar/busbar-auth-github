@@ -58,20 +58,43 @@ pub const CLIENT_SECRET_KEY: &str = "client_secret";
 
 const SECRET_REFS: &[AbiStr] = &[abi_str(CLIENT_SECRET_KEY)];
 const REWRITES: &[Rewrite] = &[alias(ALIAS)];
-/// The index of the one need in [`NEEDS`].
-const NEED: u32 = 0;
-/// The one need: outbound to the IdP over the `http` transport (the scheme the http framer
-/// claims; an `https` target is secured by the connector), its target named per hop (token,
-/// `/user`, `/user/orgs`), bounded by a per-hop timeout.
-const NEEDS: &[Need] = &[{
+/// The need a login whose settings name a `ca_cert_pem` goes out on (it trusts that root beside
+/// the public ones).
+const NEED_ANCHORED: u32 = 0;
+/// The need every other login goes out on (the public roots only). The host refuses a need whose
+/// `trust_from` names nothing at declaration, so the anchored one of a login with no
+/// `ca_cert_pem` is never asked for a connection.
+const NEED_PUBLIC: u32 = 1;
+/// The setting the anchored need's extra trusted root comes from (a config path the host reads).
+const CA_CERT_PATH: &str = "settings.ca_cert_pem";
+
+/// One outbound need to the IdP over the `http` transport (the scheme the http framer claims; an
+/// `https` target is secured by the connector), its target named per hop (token, `/user`,
+/// `/user/orgs`), bounded by a per-hop timeout, trusting `trust_from`'s root beside the public
+/// roots (`ABSENT`: the public roots only).
+const fn need(trust_from: AbiStr) -> Need {
     let mut n = Need::EMPTY;
     n.direction = DIRECTION_OUTBOUND;
     n.egress_class = EGRESS_DEFAULT;
     n.transport = abi_str("http");
     n.timeout_ms = crate::login::HOP_TIMEOUT_MS;
     n.keep_mode = KEEP_NAMED;
+    n.trust_from = trust_from;
     n
-}];
+}
+
+/// The needs, in index order: [`NEED_ANCHORED`], [`NEED_PUBLIC`].
+const NEEDS: &[Need] = &[need(abi_str(CA_CERT_PATH)), need(AbiStr::ABSENT)];
+
+/// The need `login`'s hops go out on.
+fn need_of(login: &GithubLogin) -> u32 {
+    if login.anchored() {
+        NEED_ANCHORED
+    } else {
+        NEED_PUBLIC
+    }
+}
+
 /// A redirect login, nothing else.
 const TAIL: AuthTail = {
     let mut t = AuthTail::EMPTY;
@@ -238,6 +261,7 @@ struct Parked {
 /// The hop exchange over the instance's connector: one framed `exchange()` per hop on the one need.
 struct Over<'c, 'h> {
     c: &'c mut Connector<'h>,
+    need: u32,
     wire: &'c mut Option<Wire>,
     base: &'c mut u32,
 }
@@ -256,7 +280,7 @@ impl Exchange for Over<'_, '_> {
         let Some(wire) = self.wire.as_mut() else {
             return Fetched::Unreachable;
         };
-        match exchange(&mut *self.c, wire, NEED, Some(origin)) {
+        match exchange(&mut *self.c, wire, self.need, Some(origin)) {
             Poll::Pending => Fetched::Pending,
             Poll::Ready(answer) => {
                 *self.wire = None;
@@ -358,6 +382,7 @@ impl SafeSlot for Complete {
                 let mut c = host.connector_from(ticket, parked.base);
                 let mut over = Over {
                     c: &mut c,
+                    need: need_of(&login),
                     wire: &mut parked.wire,
                     base: &mut parked.base,
                 };
