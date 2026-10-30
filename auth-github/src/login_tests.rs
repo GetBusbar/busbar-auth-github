@@ -6,6 +6,7 @@
 //! step machine).
 
 use super::*;
+use busbar_contract::abi::sdk::test_support::chip;
 use std::collections::HashMap;
 
 const SECRET: &str = "s3cr3t-client-value";
@@ -68,12 +69,32 @@ impl Script {
     }
 }
 
-/// A request's header fields as plain pairs, for comparison.
-fn plain(fields: &[(String, zeroize::Zeroizing<String>)]) -> Vec<(String, String)> {
-    fields
-        .iter()
-        .map(|(n, v)| (n.clone(), v.as_str().to_string()))
+/// A request's header fields as the SDK frames them (the chip's sealed bearer included), read
+/// back off the head it would send.
+fn plain(r: &HopRequest) -> Vec<(String, String)> {
+    let wire = r.wire(MAX_HOP_REPLY_BYTES).expect("the hop frames");
+    let head = chip::framed_head(&wire);
+    let block_at = r.method.len() + split(&r.target).expect("the target splits").1.len();
+    String::from_utf8(head[block_at..].to_vec())
+        .expect("a UTF-8 head")
+        .split_terminator("\r\n")
+        .map(|line| {
+            let (n, v) = line.split_once(": ").expect("a field line");
+            (n.to_string(), v.to_string())
+        })
         .collect()
+}
+
+/// A request's body as the SDK encodes it on the wire.
+fn body_text(r: &HopRequest) -> String {
+    let mut sealed = r.body.encoded().expect("the form encodes");
+    let mut out = Vec::new();
+    let done = chip::drive_sealed::<()>(&mut sealed, |b| {
+        out.extend_from_slice(b);
+        std::task::Poll::Ready(Ok(b.len()))
+    });
+    assert!(done.is_ready());
+    String::from_utf8(out).expect("a UTF-8 body")
 }
 
 impl Exchange for Script {
@@ -145,13 +166,13 @@ fn the_token_exchange_carries_the_plugins_own_secret_in_1_5_5_bytes() {
     assert_eq!(token.target, TOKEN_URL);
     assert_eq!(token.timeout_ms, 10_000);
     assert_eq!(
-        String::from_utf8(token.body.to_vec()).unwrap(),
+        body_text(token),
         "client_id=Iv1.client&code=the-code\
          &redirect_uri=https%3A%2F%2Fnode.example%2Fauth%2Ftoken\
          &code_verifier=the-verifier&client_secret=s3cr3t-client-value"
     );
     assert_eq!(
-        plain(&token.fields),
+        plain(token),
         vec![
             (
                 "content-type".to_string(),
@@ -171,9 +192,9 @@ fn the_rest_gets_carry_the_bearer_and_user_agent() {
     run(&l, &mut s);
     for get in &s.issued[1..] {
         assert_eq!(get.method, "GET");
-        assert!(get.body.is_empty());
+        assert!(body_text(get).is_empty());
         assert_eq!(
-            plain(&get.fields),
+            plain(get),
             vec![
                 (
                     "content-type".to_string(),
@@ -357,7 +378,7 @@ fn a_finished_flow_answers_again_without_new_exchanges() {
 fn defaulted_bases_are_refused_at_open_explained() {
     assert_eq!(
         GithubLogin::open(r#"{"client_id":"Iv1.client"}"#, Some(SECRET)).unwrap_err(),
-        "settings: `token_base` must be written out: the hop allowlist is built only from URLs in the settings"
+        "settings.token_base: must be written out: the hop allowlist is built only from URLs in the settings"
     );
 }
 
@@ -602,7 +623,7 @@ fn the_orgs_hop_carries_the_token_from_the_token_step() {
     let mut s = Script::happy();
     run(&l, &mut s);
     assert_eq!(s.issued[2].target, ORGS_URL);
-    assert!(plain(&s.issued[2].fields)
+    assert!(plain(&s.issued[2])
         .iter()
         .any(|(k, v)| k == "authorization" && *v == format!("Bearer {TOKEN}")));
 }
@@ -627,7 +648,7 @@ fn each_flow_owns_its_state_and_a_finished_one_holds_nothing() {
     let bearer = |s: &Script, t: &str| {
         s.issued
             .iter()
-            .any(|r| r.fields.iter().any(|(_, v)| v.contains(t)))
+            .any(|r| plain(r).iter().any(|(_, v)| v.contains(t)))
     };
     assert!(bearer(&a, "gho_a") && !bearer(&a, "gho_b"));
     assert!(bearer(&b, "gho_b") && !bearer(&b, "gho_a"));
@@ -637,28 +658,31 @@ fn each_flow_owns_its_state_and_a_finished_one_holds_nothing() {
         l.drive(&mut f, &mut s);
         assert!(f.done.is_some());
         assert!(f.state.access_token.is_none() && f.state.user.is_none());
+        assert!(f.req.answer.is_none(), "the token response is cleared");
         assert!(
-            f.req.token_response.is_none(),
-            "the token response is cleared"
+            f.req.code.is_none() && f.req.code_verifier.is_none(),
+            "the code and the verifier are wiped"
         );
     }
 }
 
 #[test]
-fn open_keeps_the_1_5_5_refusal_texts() {
+fn open_refuses_in_the_contracts_settings_lines() {
     let err = |s: &str, secret: Option<&str>| GithubLogin::open(s, secret).unwrap_err();
     assert_eq!(
         err("  ", Some(SECRET)),
-        "github plugin requires config (client_id); none provided"
+        "settings: empty: the github plugin requires client_id"
     );
-    assert!(err("{ not json", Some(SECRET)).starts_with("invalid github plugin config: "));
+    assert!(err("{ not json", Some(SECRET)).starts_with("settings: not a JSON document"));
     assert!(err(r#"{"client_id":"x","bogus":1}"#, Some(SECRET))
-        .starts_with("invalid github plugin config: unknown field `bogus`"));
+        .starts_with("settings: unknown field `bogus`"));
     // The secret is never a settings key: it comes from browser_login.client_secret.
+    let leaked = err(r#"{"client_id":"x","client_secret":"leak"}"#, Some(SECRET));
     assert!(
-        err(r#"{"client_id":"x","client_secret":"leak"}"#, Some(SECRET))
-            .starts_with("invalid github plugin config: unknown field `client_secret`")
+        leaked.starts_with("settings: unknown field `client_secret`"),
+        "{leaked}"
     );
+    assert!(!leaked.contains("leak\""), "{leaked}");
 }
 
 /// The exact v1.5.5 GitHub provider (busbar-auth-github v1.0.3 `tests/e2e.rs:301-306`):
@@ -706,7 +730,7 @@ fn the_v1_5_5_example_provider_loads_and_logs_in_with_the_secret_beside_the_sett
     expected.name = Some("octocat".to_string());
     expected.roles = vec!["github:id/1".to_string(), "github:org/testorg".to_string()];
     assert_eq!(p, expected);
-    let body = String::from_utf8(s.issued[0].body.to_vec()).unwrap();
+    let body = body_text(&s.issued[0]);
     assert!(body.starts_with("client_id=Iv1.e2eclient&"), "{body}");
     assert!(
         body.ends_with(&format!("&client_secret={SECRET}")),
@@ -718,7 +742,7 @@ fn the_v1_5_5_example_provider_loads_and_logs_in_with_the_secret_beside_the_sett
     let leaked = delivered.replace("\"client_id\"", "\"client_secret\": \"s\", \"client_id\"");
     assert!(GithubLogin::open(&leaked, Some(SECRET))
         .unwrap_err()
-        .starts_with("invalid github plugin config: unknown field `client_secret`"));
+        .starts_with("settings: unknown field `client_secret`"));
 }
 
 /// A headless-only provider (no `browser_login`, so no secret) loaded in 1.5.5 and still does; a
@@ -730,7 +754,7 @@ fn no_secret_loads_and_drops_the_secret_field_as_1_5_5_did() {
         let l = GithubLogin::open(SETTINGS, secret).expect("loads without a secret");
         let mut s = Script::happy();
         assert_eq!(identity(run(&l, &mut s)).id, "github:octocat");
-        let body = String::from_utf8(s.issued[0].body.to_vec()).unwrap();
+        let body = body_text(&s.issued[0]);
         assert!(!body.contains("client_secret"), "{body}");
         assert!(body.ends_with("&code_verifier=the-verifier"), "{body}");
     }
@@ -773,16 +797,20 @@ fn begin_login_is_the_1_5_5_authorize_url() {
 }
 
 #[test]
-fn form_encode_is_serde_urlencoded() {
-    let pairs = [("a b", "x*y-z._~!"), ("k", "é/=&")];
-    assert_eq!(
-        form_encode(&pairs).as_str(),
-        "a+b=x*y-z._%7E%21&k=%C3%A9%2F%3D%26"
-    );
-    assert_eq!(form_encode(&[]).as_str(), "");
-    // Sized exactly up front: no growth leaves a partial copy behind.
-    let encoded = form_encode(&pairs);
-    assert_eq!(encoded.capacity(), encoded.len());
+fn the_form_is_serde_urlencoded() {
+    let body = FormBody::new()
+        .public("a b", "x*y-z._~!")
+        .public("k", "é/=&");
+    let r = |body: FormBody| HopRequest {
+        method: "POST".to_string(),
+        target: TOKEN_URL.to_string(),
+        fields: Vec::new(),
+        bearer: None,
+        body,
+        timeout_ms: 0,
+    };
+    assert_eq!(body_text(&r(body)), "a+b=x*y-z._%7E%21&k=%C3%A9%2F%3D%26");
+    assert_eq!(body_text(&r(FormBody::new())), "");
 }
 
 /// A GitHub Enterprise base delivered as a plain URL logs in. HISTORY: v1.5.5 built the hop
@@ -870,7 +898,7 @@ mod logging {
             secret_form_field: None,
             headers: Vec::new(),
         };
-        let refused = tracing::subscriber::with_default(cap.clone(), || l.render(&hop));
+        let refused = tracing::subscriber::with_default(cap.clone(), || l.render(&hop, None));
         assert_eq!(refused, Err(Refused));
         assert!(cap.contains("elsewhere.example"), "{:?}", cap.messages());
         assert!(cap.contains("allow"), "{:?}", cap.messages());
@@ -930,12 +958,14 @@ fn a_hop_response_debug_shows_no_body() {
     );
 }
 
-/// RED: a hop reply past 1 MiB is not parsed: the login ends as an outage, nothing more is sent.
+/// RED: a hop reply past 256 KiB (the kind standard's bound on a token or userinfo endpoint) is not
+/// parsed: the login ends as an outage, nothing more is sent.
 #[test]
 fn a_hop_reply_over_the_cap_is_an_outage() {
+    assert_eq!(MAX_HOP_REPLY_BYTES, 256 * 1024);
     let l = login();
     let mut body = format!(r#"{{"access_token":"{TOKEN}"}}"#);
-    body.push_str(&" ".repeat(1024 * 1024 + 1 - body.len()));
+    body.push_str(&" ".repeat(256 * 1024 + 1 - body.len()));
     let mut s = Script::happy().answer(TOKEN_URL, 200, &body);
     assert_eq!(run(&l, &mut s), LoginStep::Outage);
     assert_eq!(s.targets(), vec![TOKEN_URL]);
@@ -975,12 +1005,40 @@ fn the_hop_bodies_are_wiped_on_drop() {
     run(&l, &mut s);
     let request = &s.issued[0];
     wipes(&request.body);
-    for (_, value) in &request.fields {
-        wipes(value);
-    }
     let response = HopResponse {
         status: 200,
         body: b"access_token=x".to_vec().into(),
     };
     wipes(&response.body);
+}
+
+/// GHO2, REFRESH MID-FLOW: the door swaps the login whole on `refresh` and resumes a parked flow
+/// with the login current at the next entry. The hop parked on a pending exchange is re-issued
+/// exactly as it was sent (its stored answer is read, the code is never redeemed twice), and the
+/// hops after it are rendered by the refreshed login: its client secret is never sent, as no
+/// token exchange is made again.
+#[test]
+fn a_refresh_mid_flow_resumes_the_parked_hop_unchanged() {
+    let before = login();
+    let after = GithubLogin::open(SETTINGS, Some("rotated-secret")).expect("opens");
+    let mut s = Script::happy();
+    s.pend_first = true;
+    let mut f = flow(&before);
+    assert_eq!(before.drive(&mut f, &mut s), LoginStep::Pending);
+    let mut step = after.drive(&mut f, &mut s);
+    while step == LoginStep::Pending {
+        step = after.drive(&mut f, &mut s);
+    }
+    assert_eq!(identity(step).id, "github:octocat");
+    let tokens: Vec<&HopRequest> = s.issued.iter().filter(|r| r.target == TOKEN_URL).collect();
+    assert_eq!(tokens.len(), 2, "pended once, re-issued once");
+    assert!(
+        tokens[0] == tokens[1],
+        "the parked hop is re-issued unchanged"
+    );
+    assert!(body_text(tokens[1]).ends_with(&format!("&client_secret={SECRET}")));
+    assert!(s
+        .issued
+        .iter()
+        .all(|r| !body_text(r).contains("rotated-secret")));
 }

@@ -5,7 +5,13 @@
 //! step machine and its hops are driven over a scripted exchange in `login_tests.rs`.
 
 use super::*;
+use busbar_contract::abi::sdk::test_support::chip;
 use busbar_contract::auth::LoginOutcome;
+
+/// Whether `token` holds exactly `want` (the chip's constant-time equality; it has no getter).
+fn holds(token: Option<Cred>, want: &str) -> bool {
+    token.is_some_and(|t| t == chip::cred(want))
+}
 
 /// Both bodies at once: a missing or malformed `/user` or `/user/orgs` body is a fail-closed `Reject`.
 fn identity_from_user_and_orgs(user_body: &str, orgs_body: Option<&str>) -> LoginOutcome {
@@ -104,42 +110,40 @@ fn the_token_exchange_hop_names_the_secret_field_and_leaves_it_empty() {
     assert_eq!(form.get("client_secret").map(String::as_str), Some(""));
 }
 
-/// The `/user` hop carries the bearer + User-Agent headers, no form, no secret field.
+/// The `/user` hop carries the public User-Agent + Accept headers, no form, no secret field: the
+/// bearer is the chip's, sealed in when the hop is rendered (`login_tests`).
 #[test]
-fn the_userinfo_hop_carries_the_bearer_headers() {
-    let hop = build_userinfo_get(&cfg(), "gho_opaque");
+fn the_userinfo_hop_carries_the_public_headers_and_no_bearer() {
+    let hop = build_userinfo_get(&cfg());
     assert_eq!(hop.method, "GET");
     assert_eq!(hop.url, "https://api.github.com/user");
     assert_eq!(hop.secret_form_field, None);
     assert!(hop.form.is_empty());
-    assert!(hop
+    assert!(!hop
         .headers
         .iter()
-        .any(|(k, v)| k == "Authorization" && v == "Bearer gho_opaque"));
+        .any(|(k, _)| k.eq_ignore_ascii_case("authorization")));
     assert!(hop
         .headers
         .iter()
         .any(|(k, v)| k == "User-Agent" && v == "busbar"));
-    assert_eq!(hop.headers, userinfo_headers("gho_opaque"));
+    assert_eq!(hop.headers, userinfo_headers());
 }
 
 /// Both token-response shapes parse; GitHub's 200-with-`error` body and an empty token do not.
 #[test]
 fn parse_access_token_reads_both_shapes_and_refuses_an_empty_or_missing_token() {
-    assert_eq!(
-        parse_access_token("access_token=gho_form&x=1").as_deref(),
-        Some("gho_form")
-    );
-    assert_eq!(
-        parse_access_token(r#"{"access_token":"gho_json"}"#).as_deref(),
-        Some("gho_json")
-    );
-    assert_eq!(
-        parse_access_token(r#"{"error":"bad_verification_code"}"#),
-        None
-    );
-    assert_eq!(parse_access_token(r#"{"access_token":""}"#), None);
-    assert_eq!(parse_access_token("access_token=&scope=read:org"), None);
+    assert!(holds(
+        parse_access_token("access_token=gho_form&x=1"),
+        "gho_form"
+    ));
+    assert!(holds(
+        parse_access_token(r#"{"access_token":"gho_json"}"#),
+        "gho_json"
+    ));
+    assert!(parse_access_token(r#"{"error":"bad_verification_code"}"#).is_none());
+    assert!(parse_access_token(r#"{"access_token":""}"#).is_none());
+    assert!(parse_access_token("access_token=&scope=read:org").is_none());
     assert_eq!(parse_user(r#"{"id":42,"name":"No Login"}"#), None);
 }
 
@@ -200,22 +204,16 @@ fn ghes_base_urls_config() {
     // token endpoint → GHES host
     let hop = build_token_exchange(&c, "code", "https://busbar/auth/token", "v");
     assert_eq!(hop.url, "https://ghe.corp.example/login/oauth/access_token");
-    // REST endpoints → GHES /api/v3, both bearer-authenticated with the access token.
-    let user_hop = build_userinfo_get(&c, "gho_ent");
+    // REST endpoints → GHES /api/v3 (the bearer is sealed in at render, `login_tests`).
+    let user_hop = build_userinfo_get(&c);
     assert_eq!(user_hop.url, "https://ghe.corp.example/api/v3/user");
-    assert!(user_hop
-        .headers
-        .iter()
-        .any(|(k, v)| k == "Authorization" && v == "Bearer gho_ent"));
-    let orgs_hop = build_orgs_get(&c, "gho_ent");
+    assert_eq!(user_hop.headers, userinfo_headers());
+    let orgs_hop = build_orgs_get(&c);
     assert_eq!(
         orgs_hop.url,
         "https://ghe.corp.example/api/v3/user/orgs?per_page=100"
     );
-    assert!(orgs_hop
-        .headers
-        .iter()
-        .any(|(k, v)| k == "Authorization" && v == "Bearer gho_ent"));
+    assert_eq!(orgs_hop.headers, userinfo_headers());
 }
 
 // ── parsing helpers ──────────────────────────────────────────────────────────────────────────────
@@ -284,7 +282,7 @@ fn a_user_body_without_a_numeric_id_is_refused() {
 
 #[test]
 fn orgs_hop_url_requests_per_page_100() {
-    let hop = build_orgs_get(&cfg(), "gho_x");
+    let hop = build_orgs_get(&cfg());
     assert!(
         hop.url.contains("per_page=100"),
         "orgs hop must raise the page cap: {}",
@@ -334,21 +332,21 @@ fn the_stable_numeric_id_distinguishes_two_accounts_sharing_one_handle() {
 #[test]
 fn an_orgs_array_with_an_embedded_access_token_pair_is_not_a_token_response() {
     let poisoned = r#"[{"login":"acme","description":"x&access_token=gho_ATTACKER&y"}]"#;
-    assert_eq!(parse_access_token(poisoned), None);
+    assert!(parse_access_token(poisoned).is_none());
     // Truncated/malformed array: still never a token.
     let truncated = r#"[{"login":"acme","description":"x&access_token=gho_ATTACKER&"#;
-    assert_eq!(parse_access_token(truncated), None);
+    assert!(parse_access_token(truncated).is_none());
 }
 
 /// Form-encoded token values are percent- and plus-decoded.
 #[test]
 fn parse_access_token_form_decodes_percent_and_plus() {
-    assert_eq!(
-        parse_access_token("access_token=gho%5Fab+c&scope=x").as_deref(),
-        Some("gho_ab c")
-    );
-    assert_eq!(
-        parse_access_token("scope=x&access_token=a%2Bb%3D").as_deref(),
-        Some("a+b=")
-    );
+    assert!(holds(
+        parse_access_token("access_token=gho%5Fab+c&scope=x"),
+        "gho_ab c"
+    ));
+    assert!(holds(
+        parse_access_token("scope=x&access_token=a%2Bb%3D"),
+        "a+b="
+    ));
 }

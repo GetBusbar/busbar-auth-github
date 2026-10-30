@@ -24,25 +24,26 @@ use std::time::Instant;
 
 use busbar_contract::abi::auth::{
     AuthTail, BeginLoginIn, BeginLoginOut, CompleteLoginIn, IdentifyOut, IdentityBuf,
-    BEGIN_AUTHORIZE, CANCEL_ABANDONED, CAP_LOGIN, IDENTITY_HAS_TTL, LOGIN_BAD_CREDENTIAL,
-    LOGIN_IDENTITY, LOGIN_KIND_REDIRECT, LOGIN_OUTAGE, LOGIN_SECURITY_CHECK_FAILED, SPAN_ABSENT,
+    BEGIN_AUTHORIZE, CANCEL_ABANDONED, CAP_LOGIN, LOGIN_BAD_CREDENTIAL, LOGIN_KIND_REDIRECT,
+    LOGIN_OUTAGE, LOGIN_SECURITY_CHECK_FAILED,
 };
 use busbar_contract::abi::host::conn::connector::{
     Need, DIRECTION_OUTBOUND, EGRESS_DEFAULT, KEEP_NAMED,
 };
-use busbar_contract::abi::mechanism::call::{AbiStr, Blob, Outcome, Span, BLOB_ABSENT};
+use busbar_contract::abi::mechanism::call::{AbiStr, Blob, Outcome};
 use busbar_contract::abi::mechanism::door::{Rewrite, Statement};
 use busbar_contract::abi::mechanism::ticket::Ticket;
 use busbar_contract::abi::sdk::auth_door::with_tail;
+use busbar_contract::abi::sdk::auth_kit::login_identity;
 use busbar_contract::abi::sdk::conn::Connector;
 use busbar_contract::abi::sdk::door::{abi_str, alias, statement, AbiIn, AbiOut};
-use busbar_contract::abi::sdk::exchange::{exchange, Exchange as Wire, Request};
+use busbar_contract::abi::sdk::exchange::{exchange, Exchange as Wire};
 use busbar_contract::abi::sdk::life::{Held, Life, Refreshed, Refusal};
-use busbar_contract::abi::sdk::{HostBuf, Instance, Lent, Out, SafeSlot};
+use busbar_contract::abi::sdk::{Instance, Lent, Out, SafeSlot};
 use busbar_contract::auth::Principal;
 
 use crate::login::{
-    Exchange, Fetched, GithubLogin, HopRequest, HopResponse, LoginFlow, LoginStep,
+    split, Exchange, Fetched, GithubLogin, HopRequest, HopResponse, LoginFlow, LoginStep,
     MAX_HOP_REPLY_BYTES,
 };
 use zeroize::Zeroizing;
@@ -57,20 +58,43 @@ pub const CLIENT_SECRET_KEY: &str = "client_secret";
 
 const SECRET_REFS: &[AbiStr] = &[abi_str(CLIENT_SECRET_KEY)];
 const REWRITES: &[Rewrite] = &[alias(ALIAS)];
-/// The index of the one need in [`NEEDS`].
-const NEED: u32 = 0;
-/// The one need: outbound to the IdP over the `http` transport (the scheme the http framer
-/// claims; an `https` target is secured by the connector), its target named per hop (token,
-/// `/user`, `/user/orgs`), bounded by a per-hop timeout.
-const NEEDS: &[Need] = &[{
+/// The need a login whose settings name a `ca_cert_pem` goes out on (it trusts that root beside
+/// the public ones).
+const NEED_ANCHORED: u32 = 0;
+/// The need every other login goes out on (the public roots only). The host refuses a need whose
+/// `trust_from` names nothing at declaration, so the anchored one of a login with no
+/// `ca_cert_pem` is never asked for a connection.
+const NEED_PUBLIC: u32 = 1;
+/// The setting the anchored need's extra trusted root comes from (a config path the host reads).
+const CA_CERT_PATH: &str = "settings.ca_cert_pem";
+
+/// One outbound need to the IdP over the `http` transport (the scheme the http framer claims; an
+/// `https` target is secured by the connector), its target named per hop (token, `/user`,
+/// `/user/orgs`), bounded by a per-hop timeout, trusting `trust_from`'s root beside the public
+/// roots (`ABSENT`: the public roots only).
+const fn need(trust_from: AbiStr) -> Need {
     let mut n = Need::EMPTY;
     n.direction = DIRECTION_OUTBOUND;
     n.egress_class = EGRESS_DEFAULT;
     n.transport = abi_str("http");
     n.timeout_ms = crate::login::HOP_TIMEOUT_MS;
     n.keep_mode = KEEP_NAMED;
+    n.trust_from = trust_from;
     n
-}];
+}
+
+/// The needs, in index order: [`NEED_ANCHORED`], [`NEED_PUBLIC`].
+const NEEDS: &[Need] = &[need(abi_str(CA_CERT_PATH)), need(AbiStr::ABSENT)];
+
+/// The need `login`'s hops go out on.
+fn need_of(login: &GithubLogin) -> u32 {
+    if login.anchored() {
+        NEED_ANCHORED
+    } else {
+        NEED_PUBLIC
+    }
+}
+
 /// A redirect login, nothing else.
 const TAIL: AuthTail = {
     let mut t = AuthTail::EMPTY;
@@ -137,12 +161,12 @@ impl Github {
 
 /// The login from settings bytes and the resolved secrets (the client secret first, if any).
 fn login_from(settings: &[u8], secrets: &[&[u8]]) -> Result<GithubLogin, Refusal> {
-    let settings = std::str::from_utf8(settings)
-        .map_err(|e| Refusal::failed(format!("invalid github plugin config: {e}")))?;
+    let settings =
+        std::str::from_utf8(settings).map_err(|_| Refusal::failed("settings: not UTF-8"))?;
     let secret = match secrets.first() {
         None => None,
         Some(s) => Some(std::str::from_utf8(s).map_err(|_| {
-            Refusal::failed("invalid github plugin config: the client secret is not UTF-8")
+            Refusal::failed(format!("secrets: `{CLIENT_SECRET_KEY}` is not UTF-8"))
         })?),
     };
     GithubLogin::open(settings, secret).map_err(Refusal::failed)
@@ -237,68 +261,39 @@ struct Parked {
 /// The hop exchange over the instance's connector: one framed `exchange()` per hop on the one need.
 struct Over<'c, 'h> {
     c: &'c mut Connector<'h>,
+    need: u32,
     wire: &'c mut Option<Wire>,
     base: &'c mut u32,
 }
 
-/// `url` as the need's target (scheme and authority) and the request target (path and query).
-fn split(url: &str) -> Option<(&str, String)> {
-    let host_at = url.find("://")? + 3;
-    let path_at = url[host_at..]
-        .find(['/', '?'])
-        .map_or(url.len(), |i| host_at + i);
-    let (origin, path) = url.split_at(path_at);
-    let path = match path.as_bytes().first() {
-        None => "/".to_string(),
-        Some(b'?') => format!("/{path}"),
-        Some(_) => path.to_string(),
-    };
-    Some((origin, path))
-}
-
 impl Exchange for Over<'_, '_> {
     fn exchange(&mut self, request: &HopRequest) -> Fetched {
-        let Some((origin, target)) = split(&request.target) else {
-            tracing::warn!(
-                module = "github",
-                "github login: a hop URL has no scheme and authority to split"
-            );
+        let Some((origin, _)) = split(&request.target) else {
             return Fetched::Unreachable;
         };
         if self.wire.is_none() {
-            let sent = Wire::request(Request {
-                method: request.method.clone().into_bytes(),
-                target: target.into_bytes(),
-                fields: request
-                    .fields
-                    .iter()
-                    .map(|(n, v)| (n.clone().into_bytes(), v.as_bytes().to_vec()))
-                    .collect(),
-                body: request.body.to_vec(),
-                timeout_ms: request.timeout_ms,
-            })
-            .map(|w| w.reply_limit(MAX_HOP_REPLY_BYTES));
-            match sent {
-                Ok(w) => *self.wire = Some(w),
-                Err(e) => {
-                    tracing::warn!(module = "github", error = ?e, "github login: the hop request was refused");
-                    return Fetched::Unreachable;
-                }
+            match request.wire(MAX_HOP_REPLY_BYTES) {
+                Some(w) => *self.wire = Some(w),
+                None => return Fetched::Unreachable,
             }
         }
         let Some(wire) = self.wire.as_mut() else {
             return Fetched::Unreachable;
         };
-        match exchange(&mut *self.c, wire, NEED, Some(origin)) {
+        match exchange(&mut *self.c, wire, self.need, Some(origin)) {
             Poll::Pending => Fetched::Pending,
             Poll::Ready(answer) => {
                 *self.wire = None;
                 *self.base = self.c.issued();
                 match answer {
-                    Ok(reply) => Fetched::Ready(HopResponse {
-                        status: reply.status,
-                        body: Zeroizing::new(reply.body),
-                    }),
+                    Ok(reply) => {
+                        // The whole reply wipes when it goes; its body moves on, uncopied.
+                        let mut reply = Zeroizing::new(reply);
+                        Fetched::Ready(HopResponse {
+                            status: reply.status,
+                            body: Zeroizing::new(std::mem::take(&mut reply.body)),
+                        })
+                    }
                     // A reply past the cap is refused by the exchange (`REPLY_OVER_BOUND`).
                     Err(e) => {
                         tracing::warn!(module = "github", error = ?e, "github login: the hop exchange failed");
@@ -323,11 +318,6 @@ impl Exchange for Unarmed {
     }
 }
 
-const NO_SPAN: Span = Span {
-    offset: SPAN_ABSENT,
-    len: 0,
-};
-
 /// Write `p` into the host's identity buffer and answer READY, or answer the short FAILED (every
 /// `needed_*` at its full size), keeping `p` for the retry on `ticket`.
 fn identify(
@@ -337,51 +327,11 @@ fn identify(
     buf: Lent<'_, IdentityBuf>,
     out: &mut Out<'_, IdentifyOut>,
 ) -> Outcome {
-    let mut bytes: HostBuf<'_, u8> = buf.buf();
-    let mut groups: HostBuf<'_, Span> = buf.groups();
-    let need_bytes = p.id.len()
-        + p.name.as_ref().map_or(0, String::len)
-        + p.roles.iter().map(String::len).sum::<usize>();
-    if need_bytes > bytes.cap() || p.roles.len() > groups.cap() {
-        out.set(|o| &o.needed_bytes, need_bytes as u64);
-        out.set(
-            |o| &o.needed_groups,
-            u32::try_from(p.roles.len()).unwrap_or(u32::MAX),
-        );
-        let mut answered = g.answered();
-        keep(&mut answered, ANSWERED_MAX, Instant::now(), ticket, p);
-        return Outcome::Failed;
+    let outcome = login_identity(&p, buf, out);
+    if outcome == Outcome::Failed {
+        keep(&mut g.answered(), ANSWERED_MAX, Instant::now(), ticket, p);
     }
-    let mut span = |s: &str| -> Span {
-        let at = bytes.extend(s.as_bytes());
-        Span {
-            offset: u32::try_from(at).unwrap_or(u32::MAX),
-            len: u32::try_from(s.len()).unwrap_or(u32::MAX),
-        }
-    };
-    let subject = span(&p.id);
-    let name = p.name.as_deref().map_or(NO_SPAN, &mut span);
-    for role in &p.roles {
-        let s = span(role);
-        groups.push(s);
-    }
-    out.set(|o| &o.identity.subject, subject);
-    out.set(|o| &o.identity.key_id, NO_SPAN);
-    out.set(|o| &o.identity.key_name, NO_SPAN);
-    out.set(|o| &o.identity.user, NO_SPAN);
-    out.set(|o| &o.identity.provider, NO_SPAN);
-    out.set(|o| &o.identity.name, name);
-    out.set(|o| &o.identity.claims, NO_SPAN);
-    out.set(|o| &o.identity.claims_fmt, BLOB_ABSENT);
-    let (flags, ttl) = p.ttl_secs.map_or((0, 0), |t| (IDENTITY_HAS_TTL, t));
-    out.set(|o| &o.identity.flags, flags);
-    out.set(|o| &o.identity.ttl_secs, ttl);
-    out.set(
-        |o| &o.identity.groups_len,
-        u32::try_from(groups.written()).unwrap_or(u32::MAX),
-    );
-    out.set(|o| &o.verdict, LOGIN_IDENTITY);
-    Outcome::Ready
+    outcome
 }
 
 /// `complete_login`: the hop chain, run by the plugin over its need.
@@ -420,7 +370,7 @@ impl SafeSlot for Complete {
                     blob_text(input.code()),
                     text(input.redirect_uri()),
                     blob_text(input.code_verifier()),
-                    None,
+                    text(input.nonce()),
                 ),
                 wire: None,
                 base: 0,
@@ -432,6 +382,7 @@ impl SafeSlot for Complete {
                 let mut c = host.connector_from(ticket, parked.base);
                 let mut over = Over {
                     c: &mut c,
+                    need: need_of(&login),
                     wire: &mut parked.wire,
                     base: &mut parked.base,
                 };
