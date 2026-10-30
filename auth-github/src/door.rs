@@ -346,7 +346,7 @@ impl SafeSlot for Complete {
                     blob_text(input.code()),
                     text(input.redirect_uri()),
                     blob_text(input.code_verifier()),
-                    None,
+                    text(input.nonce()),
                 ),
                 wire: None,
                 base: 0,
