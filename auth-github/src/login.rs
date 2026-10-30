@@ -21,9 +21,13 @@
 //! | hop limit spent / `Authorize` on the callback (502) | [`LoginStep::Outage`] |
 //! | a hop body's `id_token` nonce mismatch ("Sign-in couldn't be verified", 400) | [`LoginStep::SecurityCheckFailed`] |
 //!
-//! Any HTTP status the IdP answers is fed back to the step machine: a revoked token's `401` from
-//! `/user` is a declined sign-in, not an outage. A `5xx` or `429` is the IdP unable to answer:
-//! [`LoginStep::Outage`], which the host answers 503, retryable.
+//! Any HTTP status the IdP answers is fed back to the step machine, per hop (OWNER-SIGNED
+//! 2026-10-30: only a credential error is a declined sign-in). The token endpoint's `400`/`401`
+//! carrying an RFC 6749 §5.2 `error`, and a revoked token's `401` from `/user` or `/user/orgs`, are
+//! declined. A `5xx`, a `429`, GitHub's `403` rate limit, a `403` on `/user/orgs` (the token lacks
+//! `read:org`), a redirect, a `404`, a `408` or any other status is the IdP not answering:
+//! [`LoginStep::Outage`], which the host answers 503, retryable, carrying the IdP's retry hint
+//! (`retry-after`, or the seconds to `x-ratelimit-reset`) when it gave one.
 //!
 //! The auth ABI adapter is [`crate::door`]: it calls [`GithubLogin::open`],
 //! [`GithubLogin::begin_login`], [`GithubLogin::start`] and [`GithubLogin::drive`], keeping one
@@ -39,7 +43,7 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
 use busbar_contract::abi::sdk::cred::{self, Cred, FormBody, SettingsError};
 use busbar_contract::abi::sdk::exchange::{Exchange as Wire, Request};
-use busbar_contract::auth::{LoginHop, LoginOutcome, Principal};
+use busbar_contract::auth::{LoginHop, Principal};
 use serde_json::Value;
 use std::collections::HashSet;
 use std::fmt;
@@ -448,13 +452,13 @@ impl GithubLogin {
                     }
                     flow.turns += 1;
                     match self.step(flow) {
-                        LoginOutcome::Identify(p) => return finish(flow, LoginStep::Identity(p)),
-                        LoginOutcome::Reject => return finish(flow, LoginStep::BadCredential),
+                        Turn::Identify(p) => return finish(flow, LoginStep::Identity(p)),
+                        Turn::Decline => return finish(flow, LoginStep::BadCredential),
                         // The step has already said why.
-                        LoginOutcome::Outage => {
-                            return finish(flow, LoginStep::Outage { retry_after: None })
+                        Turn::Outage { retry_after } => {
+                            return finish(flow, LoginStep::Outage { retry_after })
                         }
-                        LoginOutcome::Exchange(mut hop) => {
+                        Turn::Exchange(mut hop) => {
                             let rendered = self.render(&hop, flow.state.access_token.as_ref());
                             wipe_hop(&mut hop);
                             match rendered {
@@ -464,10 +468,6 @@ impl GithubLogin {
                                     return finish(flow, LoginStep::Outage { retry_after: None })
                                 }
                             }
-                        }
-                        _ => {
-                            tracing::warn!(module = "github", "github login: the step machine asked for an outcome this login cannot serve");
-                            return finish(flow, LoginStep::Outage { retry_after: None });
                         }
                     }
                 }
@@ -511,18 +511,18 @@ impl GithubLogin {
     }
 
     /// The `complete_login` step machine, over the flow's own state.
-    fn step(&self, flow: &mut LoginFlow) -> LoginOutcome {
+    fn step(&self, flow: &mut LoginFlow) -> Turn {
         let req = &flow.req;
-        let Some((status, _fields, body)) = &req.answer else {
+        let Some((status, fields, body)) = &req.answer else {
             let (Some(code), Some(redirect_uri), Some(code_verifier)) = (
                 req.code.as_deref(),
                 req.redirect_uri.as_deref(),
                 req.code_verifier.as_deref(),
             ) else {
                 tracing::info!(module = "github", "github login: declined, the callback lacks its code, redirect_uri or code_verifier");
-                return LoginOutcome::Reject;
+                return Turn::Decline;
             };
-            return LoginOutcome::Exchange(build_token_exchange(
+            return Turn::Exchange(build_token_exchange(
                 &self.cfg,
                 code,
                 redirect_uri,
@@ -540,32 +540,15 @@ impl GithubLogin {
                 module = "github",
                 "github login: declined, the callback has neither a code_verifier nor a code"
             );
-            return LoginOutcome::Reject;
+            return Turn::Decline;
         }
-        // An identity provider that could not answer (5xx) or asks to be retried later (429) is
-        // an outage, never a declined credential: the host answers 503, retryable, and
-        // the cause is logged here.
-        if status >= 500 || status == 429 {
-            let hop = hop_name(&flow.state);
-            tracing::warn!(
-                module = "github",
-                status = status,
-                hop,
-                "github login: the identity provider is unavailable"
-            );
-            flow.state = FlowState::default();
-            return LoginOutcome::Outage;
-        }
+        // OWNER-SIGNED 2026-10-30: only a credential error is a declined sign-in; every other
+        // answer that is no 2xx is the IdP not answering this hop, an outage (the host answers
+        // 503, retryable), carrying the IdP's retry hint when it gave one.
         if !(200..300).contains(&status) {
-            let hop = hop_name(&flow.state);
-            tracing::info!(
-                module = "github",
-                status = status,
-                hop,
-                "github login: declined, non-2xx answer"
-            );
+            let turn = refused_answer(hop_of(&flow.state), status, fields, body);
             flow.state = FlowState::default();
-            return LoginOutcome::Reject;
+            return turn;
         }
         if let Some(token) = parse_access_token(body) {
             let hop = build_userinfo_get(&self.cfg);
@@ -573,7 +556,7 @@ impl GithubLogin {
                 access_token: Some(token.secure_for(&self.cfg.api_base)),
                 user: None,
             };
-            return LoginOutcome::Exchange(hop);
+            return Turn::Exchange(hop);
         }
         if is_json_array(body) {
             let state = std::mem::take(&mut flow.state);
@@ -582,16 +565,16 @@ impl GithubLogin {
                     module = "github",
                     "github login: declined, an org list arrived before the user"
                 );
-                return LoginOutcome::Reject;
+                return Turn::Decline;
             };
             let Some(groups) = parse_org_groups(body) else {
                 tracing::info!(
                     module = "github",
                     "github login: declined, /user/orgs answered a malformed list"
                 );
-                return LoginOutcome::Reject;
+                return Turn::Decline;
             };
-            return LoginOutcome::Identify(build_principal(&user, groups));
+            return Turn::Identify(build_principal(&user, groups));
         }
         let Some(user) = parse_user(body) else {
             if flow.state.access_token.is_none() {
@@ -619,22 +602,22 @@ impl GithubLogin {
                 );
             }
             flow.state = FlowState::default();
-            return LoginOutcome::Reject;
+            return Turn::Decline;
         };
         if !self.cfg.fetch_orgs {
             flow.state = FlowState::default();
-            return LoginOutcome::Identify(build_principal(&user, Vec::new()));
+            return Turn::Identify(build_principal(&user, Vec::new()));
         }
         if flow.state.access_token.is_none() {
             tracing::info!(
                 module = "github",
                 "github login: declined, no access token held at /user"
             );
-            return LoginOutcome::Reject;
+            return Turn::Decline;
         }
         let hop = build_orgs_get(&self.cfg);
         flow.state.user = Some(user);
-        LoginOutcome::Exchange(hop)
+        Turn::Exchange(hop)
     }
 
     /// Render a hop up to the send: vet the URL, seal the client secret into the named form
@@ -711,12 +694,189 @@ fn text_of(bytes: Vec<u8>) -> Zeroizing<String> {
     }
 }
 
-/// Which hop a held state means the last answer came from (never the URL string).
-fn hop_name(state: &FlowState) -> &'static str {
+/// What one turn of the step machine decided.
+enum Turn {
+    /// Send this hop.
+    Exchange(LoginHop),
+    /// Identified.
+    Identify(Principal),
+    /// The IdP declined the sign-in.
+    Decline,
+    /// The IdP could not answer, or answered something that is no sign-in answer.
+    Outage {
+        /// The IdP's retry hint, in seconds.
+        retry_after: Option<u64>,
+    },
+}
+
+/// The hops of a GitHub login.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Hop {
+    /// The token exchange.
+    Token,
+    /// `GET /user`.
+    User,
+    /// `GET /user/orgs`.
+    Orgs,
+}
+
+impl Hop {
+    /// The hop as a log names it (never the URL string).
+    fn path(self) -> &'static str {
+        match self {
+            Hop::Token => "/login/oauth/access_token",
+            Hop::User => "/user",
+            Hop::Orgs => "/user/orgs",
+        }
+    }
+}
+
+/// Which hop a held state means the last answer came from.
+fn hop_of(state: &FlowState) -> Hop {
     match (&state.access_token, &state.user) {
-        (None, _) => "/login/oauth/access_token",
-        (Some(_), None) => "/user",
-        (Some(_), Some(_)) => "/user/orgs",
+        (None, _) => Hop::Token,
+        (Some(_), None) => Hop::User,
+        (Some(_), Some(_)) => Hop::Orgs,
+    }
+}
+
+/// The seconds since the Unix epoch, now.
+fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs())
+}
+
+/// Whether a reply is GitHub's rate limit: it names a `retry-after`, or no requests remain.
+fn rate_limited(fields: &ReplyFields) -> bool {
+    fields.retry_after.is_some() || fields.ratelimit_remaining.as_deref() == Some("0")
+}
+
+/// The IdP's retry hint, in seconds at `now`: its `retry-after` (delta seconds), else, when no
+/// requests remain, the seconds to its `x-ratelimit-reset`. An HTTP-date `retry-after` is not read.
+fn retry_hint(fields: &ReplyFields, now: u64) -> Option<u64> {
+    let secs = |v: &str| {
+        (!v.is_empty() && v.bytes().all(|b| b.is_ascii_digit()))
+            .then(|| v.parse::<u64>().ok())
+            .flatten()
+    };
+    if let Some(after) = fields.retry_after.as_deref().and_then(secs) {
+        return Some(after);
+    }
+    if fields.ratelimit_remaining.as_deref() == Some("0") {
+        return fields
+            .ratelimit_reset
+            .as_deref()
+            .and_then(secs)
+            .map(|reset| reset.saturating_sub(now));
+    }
+    None
+}
+
+/// An IdP error code as a log may print it: the code when it is `[a-z0-9_]{1,64}`, else
+/// `<unrecognised>` (a far-end string is never logged raw).
+fn loggable(code: &str) -> &str {
+    let plain = !code.is_empty()
+        && code.len() <= 64
+        && code
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_');
+    if plain {
+        code
+    } else {
+        "<unrecognised>"
+    }
+}
+
+/// The turn a non-2xx answer on `hop` is (OWNER-SIGNED 2026-10-30: only RFC 6749 §5.2 credential
+/// errors are a declined sign-in):
+///
+/// * any hop: a 5xx or 429 is the IdP unavailable, an outage carrying its retry hint;
+/// * the token endpoint: a 400/401 carrying an `error` (JSON or form) is declined; anything else
+///   is an outage;
+/// * `/user`, `/user/orgs`: a 401 (the token is not accepted) is declined; a 403 that is GitHub's
+///   rate limit is an outage carrying its retry hint; any other 403 on `/user/orgs` is the token
+///   lacking `read:org`, the operator's to fix (an outage, at warn); anything else is an outage.
+fn refused_answer(hop: Hop, status: u16, fields: &ReplyFields, body: &str) -> Turn {
+    let path = hop.path();
+    if status >= 500 || status == 429 {
+        let retry_after = retry_hint(fields, unix_now());
+        tracing::warn!(
+            module = "github",
+            status,
+            hop = path,
+            retry_after,
+            "github login: the identity provider is unavailable"
+        );
+        return Turn::Outage { retry_after };
+    }
+    match hop {
+        Hop::Token => {
+            if let (400 | 401, Some(code)) = (status, github_error(body)) {
+                let code = loggable(&code);
+                if matches!(code, "invalid_client" | "unauthorized_client") {
+                    tracing::warn!(
+                        module = "github",
+                        status,
+                        error = code,
+                        "github login: declined, the token endpoint refused this client (check client_id and client_secret)"
+                    );
+                } else {
+                    tracing::info!(
+                        module = "github",
+                        status,
+                        error = code,
+                        "github login: declined, the token endpoint refused the code"
+                    );
+                }
+                return Turn::Decline;
+            }
+            tracing::warn!(
+                module = "github",
+                status,
+                hop = path,
+                "github login: the token endpoint answered a status that is no credential error"
+            );
+            Turn::Outage { retry_after: None }
+        }
+        Hop::User | Hop::Orgs => {
+            if status == 401 {
+                tracing::info!(
+                    module = "github",
+                    status,
+                    hop = path,
+                    "github login: declined, GitHub did not accept the access token"
+                );
+                return Turn::Decline;
+            }
+            if status == 403 && rate_limited(fields) {
+                let retry_after = retry_hint(fields, unix_now());
+                tracing::warn!(
+                    module = "github",
+                    status,
+                    hop = path,
+                    retry_after,
+                    "github login: GitHub's API rate limit is spent"
+                );
+                return Turn::Outage { retry_after };
+            }
+            if status == 403 && hop == Hop::Orgs {
+                tracing::warn!(
+                    module = "github",
+                    status,
+                    hop = path,
+                    "github login: /user/orgs answered 403: the access token lacks the read:org scope (check the OAuth App and the scopes setting)"
+                );
+                return Turn::Outage { retry_after: None };
+            }
+            tracing::warn!(
+                module = "github",
+                status,
+                hop = path,
+                "github login: the GitHub API answered a status that is no sign-in answer"
+            );
+            Turn::Outage { retry_after: None }
+        }
     }
 }
 
