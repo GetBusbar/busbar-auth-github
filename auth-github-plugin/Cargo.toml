@@ -16,7 +16,7 @@ crate-type = ["rlib", "cdylib"]   # cdylib: the dropped-in image exporting the d
 # logic lives here, not in busbar). The one busbar crate is busbar-contract (#40), whose
 # `abi::sdk` carries the export macro — pinned by git rev to `.busbar-ref` field 1.
 busbar-contract = { workspace = true }
-busbar-auth-github = { path = "../busbar-auth-github" }
+busbar-auth-github = { path = "../auth-github" }
 
 [dev-dependencies]
 # Dev-only: the linked + dropped-in conformance test (tests/conformance.rs) signs, packs, scans and
