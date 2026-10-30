@@ -29,3 +29,8 @@ busbar-test-kit = { workspace = true }
 base64 = { workspace = true }
 reqwest = { workspace = true, features = ["json", "blocking"] }
 serde_json = { workspace = true }
+# THE SUITE'S HOST (tests/support/conformance_host.rs, the test kit's framed form): busbar's
+# connector and its TLS test kit, and the transport doors this plugin's `http` need names. Dev-only.
+busbar-core-connector = { workspace = true }
+busbar-transport-http = { workspace = true }
+busbar-transport-tcp = { workspace = true }

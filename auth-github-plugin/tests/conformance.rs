@@ -31,6 +31,9 @@ busbar_test_kit::conformance_suite! {
     cdylib: "busbar_auth_github_plugin",
     inputs: include_str!("conformance.json"),
 }
+
+#[path = "support/conformance_host.rs"]
+mod conformance_host;
 use std::sync::Arc;
 use std::time::Duration;
 
