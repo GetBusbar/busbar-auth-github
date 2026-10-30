@@ -132,7 +132,7 @@ fn a_hop_base_left_at_its_default_is_refused_explained() {
         assert_eq!(
             r.text().map(str::to_string),
             Some(format!(
-                "settings: `{key}` must be written out: the hop allowlist is built only from URLs in the settings"
+                "settings.{key}: must be written out: the hop allowlist is built only from URLs in the settings"
             ))
         );
     }
@@ -142,29 +142,44 @@ fn a_hop_base_left_at_its_default_is_refused_explained() {
 }
 
 /// RED: a mistyped value is never echoed into the refusal (it may be a secret pasted into the
-/// wrong key); a refusal naming a KEY keeps serde's text.
+/// wrong key); every line is the contract's instance-relative `settings.<path>: <reason>`.
 #[test]
 fn a_mistyped_value_is_not_echoed_in_the_refusal() {
     let settings = WRITTEN.replace("\"Iv1.client\"", "12345678");
     let r = refusal(&settings);
     let text = r.text().unwrap_or_default();
     assert!(!text.contains("12345678"), "{text}");
-    assert!(text.starts_with("invalid github plugin config: "), "{text}");
-    assert!(text.contains("line "), "{text}");
+    assert_eq!(
+        text,
+        "settings.client_id: invalid type: integer `***`, expected a string"
+    );
     // Malformed JSON: no fragment of the input either.
     let r = refusal(r#"{"client_id": "x", "api_base": SECRETVALUE}"#);
-    assert!(!r.text().unwrap_or_default().contains("SECRETVALUE"));
+    let text = r.text().unwrap_or_default();
+    assert!(!text.contains("SECRETVALUE"), "{text}");
+    assert!(text.starts_with("settings: not a JSON document (line 1"), "{text}");
     // A missing or unknown key keeps the decoder's text: it names the key, never a value.
     assert!(
         refusal(r#"{"api_base":"https://a.example","token_base":"https://a.example"}"#)
             .text()
             .unwrap_or_default()
-            .starts_with("invalid github plugin config: missing field `client_id`")
+            .starts_with("settings: missing field `client_id`")
     );
     assert!(
         refusal(&WRITTEN.replace("\"client_id\"", "\"bogus\": 1, \"client_id\""))
             .text()
             .unwrap_or_default()
-            .starts_with("invalid github plugin config: unknown field `bogus`")
+            .starts_with("settings: unknown field `bogus`")
     );
+}
+
+/// RED: a client secret that is not UTF-8 is refused in the kind's secrets line, by name.
+#[test]
+fn a_non_utf8_client_secret_is_refused_by_name() {
+    let r = login_from(WRITTEN.as_bytes(), &[&[0xff, 0xfe]]).expect_err("refused");
+    assert_eq!(r.outcome(), Outcome::Failed);
+    assert_eq!(r.text(), Some("secrets: `client_secret` is not UTF-8"));
+    // Settings bytes that are not UTF-8: named, no byte quoted.
+    let r = login_from(&[b'{', 0xff, b'}'], &[]).expect_err("refused");
+    assert_eq!(r.text(), Some("settings: not UTF-8"));
 }

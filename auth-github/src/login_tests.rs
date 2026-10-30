@@ -378,7 +378,7 @@ fn a_finished_flow_answers_again_without_new_exchanges() {
 fn defaulted_bases_are_refused_at_open_explained() {
     assert_eq!(
         GithubLogin::open(r#"{"client_id":"Iv1.client"}"#, Some(SECRET)).unwrap_err(),
-        "settings: `token_base` must be written out: the hop allowlist is built only from URLs in the settings"
+        "settings.token_base: must be written out: the hop allowlist is built only from URLs in the settings"
     );
 }
 
@@ -667,20 +667,22 @@ fn each_flow_owns_its_state_and_a_finished_one_holds_nothing() {
 }
 
 #[test]
-fn open_keeps_the_1_5_5_refusal_texts() {
+fn open_refuses_in_the_contracts_settings_lines() {
     let err = |s: &str, secret: Option<&str>| GithubLogin::open(s, secret).unwrap_err();
     assert_eq!(
         err("  ", Some(SECRET)),
-        "github plugin requires config (client_id); none provided"
+        "settings: empty: the github plugin requires client_id"
     );
-    assert!(err("{ not json", Some(SECRET)).starts_with("invalid github plugin config: "));
+    assert!(err("{ not json", Some(SECRET)).starts_with("settings: not a JSON document"));
     assert!(err(r#"{"client_id":"x","bogus":1}"#, Some(SECRET))
-        .starts_with("invalid github plugin config: unknown field `bogus`"));
+        .starts_with("settings: unknown field `bogus`"));
     // The secret is never a settings key: it comes from browser_login.client_secret.
+    let leaked = err(r#"{"client_id":"x","client_secret":"leak"}"#, Some(SECRET));
     assert!(
-        err(r#"{"client_id":"x","client_secret":"leak"}"#, Some(SECRET))
-            .starts_with("invalid github plugin config: unknown field `client_secret`")
+        leaked.starts_with("settings: unknown field `client_secret`"),
+        "{leaked}"
     );
+    assert!(!leaked.contains("leak\""), "{leaked}");
 }
 
 /// The exact v1.5.5 GitHub provider (busbar-auth-github v1.0.3 `tests/e2e.rs:301-306`):
@@ -740,7 +742,7 @@ fn the_v1_5_5_example_provider_loads_and_logs_in_with_the_secret_beside_the_sett
     let leaked = delivered.replace("\"client_id\"", "\"client_secret\": \"s\", \"client_id\"");
     assert!(GithubLogin::open(&leaked, Some(SECRET))
         .unwrap_err()
-        .starts_with("invalid github plugin config: unknown field `client_secret`"));
+        .starts_with("settings: unknown field `client_secret`"));
 }
 
 /// A headless-only provider (no `browser_login`, so no secret) loaded in 1.5.5 and still does; a
