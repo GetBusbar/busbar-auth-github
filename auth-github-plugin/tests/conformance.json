@@ -11,7 +11,7 @@
       "url": "https://github.conformance.example/login/oauth/access_token",
       "cert_pem": null,
       "status": 200,
-      "body": "{\"access_token\": \"gho_conformance_token\", \"token_type\": \"bearer\", \"scope\": \"read:user,read:org\"}"
+      "body": "{\"access_token\": \"gho_conformance_token\", \"token_type\": \"bearer\", \"scope\": \"read:user,read:org\", \"id_token\": \"eyJhbGciOiJub25lIn0.eyJub25jZSI6ImNvbmZvcm1hbmNlLW5vbmNlIn0.\"}"
     },
     {
       "url": "https://api.github.conformance.example/user",
