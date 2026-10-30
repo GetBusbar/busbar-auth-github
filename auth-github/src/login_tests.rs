@@ -1011,3 +1011,34 @@ fn the_hop_bodies_are_wiped_on_drop() {
     };
     wipes(&response.body);
 }
+
+/// GHO2, REFRESH MID-FLOW: the door swaps the login whole on `refresh` and resumes a parked flow
+/// with the login current at the next entry. The hop parked on a pending exchange is re-issued
+/// exactly as it was sent (its stored answer is read, the code is never redeemed twice), and the
+/// hops after it are rendered by the refreshed login: its client secret is never sent, as no
+/// token exchange is made again.
+#[test]
+fn a_refresh_mid_flow_resumes_the_parked_hop_unchanged() {
+    let before = login();
+    let after = GithubLogin::open(SETTINGS, Some("rotated-secret")).expect("opens");
+    let mut s = Script::happy();
+    s.pend_first = true;
+    let mut f = flow(&before);
+    assert_eq!(before.drive(&mut f, &mut s), LoginStep::Pending);
+    let mut step = after.drive(&mut f, &mut s);
+    while step == LoginStep::Pending {
+        step = after.drive(&mut f, &mut s);
+    }
+    assert_eq!(identity(step).id, "github:octocat");
+    let tokens: Vec<&HopRequest> = s.issued.iter().filter(|r| r.target == TOKEN_URL).collect();
+    assert_eq!(tokens.len(), 2, "pended once, re-issued once");
+    assert!(
+        tokens[0] == tokens[1],
+        "the parked hop is re-issued unchanged"
+    );
+    assert!(body_text(tokens[1]).ends_with(&format!("&client_secret={SECRET}")));
+    assert!(s
+        .issued
+        .iter()
+        .all(|r| !body_text(r).contains("rotated-secret")));
+}
