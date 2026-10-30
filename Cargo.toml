@@ -17,8 +17,8 @@
 [workspace]
 resolver = "2"
 members = [
-    "busbar-auth-github",
-    "busbar-auth-github-plugin",
+    "auth-github",
+    "auth-github-plugin",
 ]
 
 [workspace.package]
