@@ -157,7 +157,10 @@ fn a_mistyped_value_is_not_echoed_in_the_refusal() {
     let r = refusal(r#"{"client_id": "x", "api_base": SECRETVALUE}"#);
     let text = r.text().unwrap_or_default();
     assert!(!text.contains("SECRETVALUE"), "{text}");
-    assert!(text.starts_with("settings: not a JSON document (line 1"), "{text}");
+    assert!(
+        text.starts_with("settings: not a JSON document (line 1"),
+        "{text}"
+    );
     // A missing or unknown key keeps the decoder's text: it names the key, never a value.
     assert!(
         refusal(r#"{"api_base":"https://a.example","token_base":"https://a.example"}"#)
