@@ -53,9 +53,10 @@ const SETTINGS: &str = "invalid github plugin config";
 pub const HOP_TIMEOUT_MS: u64 = 10_000;
 /// The bound on `complete_login` turns per callback.
 pub const MAX_HOPS: usize = 6;
-/// The most a hop's reply body may carry: 1 MiB, the bound busbar-auth-oidc puts on a token
-/// endpoint's answer. A GitHub token response, `/user` or a 100-entry `/user/orgs` is a few KiB.
-pub const MAX_HOP_REPLY_BYTES: usize = 1024 * 1024;
+/// The most a hop's reply body may carry: 256 KiB, the auth kind's bound on a token or userinfo
+/// endpoint's answer (the exchange refuses past it, `reply_limit`; `drive` checks it again). A
+/// GitHub token response or `/user` is under 2 KiB; a full 100-entry `/user/orgs` page is ~100 KiB.
+pub const MAX_HOP_REPLY_BYTES: usize = 256 * 1024;
 
 /// One hop, rendered as it goes on the wire: method, target, the public header fields in order
 /// (lowercase names), the bearer (the chip's), the form body (its secret the chip's), the timeout.
