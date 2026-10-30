@@ -956,12 +956,14 @@ fn a_hop_response_debug_shows_no_body() {
     );
 }
 
-/// RED: a hop reply past 1 MiB is not parsed: the login ends as an outage, nothing more is sent.
+/// RED: a hop reply past 256 KiB (the kind standard's bound on a token or userinfo endpoint) is not
+/// parsed: the login ends as an outage, nothing more is sent.
 #[test]
 fn a_hop_reply_over_the_cap_is_an_outage() {
+    assert_eq!(MAX_HOP_REPLY_BYTES, 256 * 1024);
     let l = login();
     let mut body = format!(r#"{{"access_token":"{TOKEN}"}}"#);
-    body.push_str(&" ".repeat(1024 * 1024 + 1 - body.len()));
+    body.push_str(&" ".repeat(256 * 1024 + 1 - body.len()));
     let mut s = Script::happy().answer(TOKEN_URL, 200, &body);
     assert_eq!(run(&l, &mut s), LoginStep::Outage);
     assert_eq!(s.targets(), vec![TOKEN_URL]);
