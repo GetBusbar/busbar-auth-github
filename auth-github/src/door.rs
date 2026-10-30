@@ -44,7 +44,7 @@ use busbar_contract::auth::Principal;
 
 use crate::login::{
     split, Exchange, Fetched, GithubLogin, HopRequest, HopResponse, LoginFlow, LoginStep,
-    MAX_HOP_REPLY_BYTES,
+    ReplyFields, MAX_HOP_REPLY_BYTES,
 };
 use zeroize::Zeroizing;
 
@@ -291,6 +291,12 @@ impl Exchange for Over<'_, '_> {
                         let mut reply = Zeroizing::new(reply);
                         Fetched::Ready(HopResponse {
                             status: reply.status,
+                            fields: ReplyFields::kept(
+                                reply
+                                    .fields
+                                    .iter()
+                                    .map(|(n, v)| (n.as_slice(), v.as_slice())),
+                            ),
                             body: Zeroizing::new(std::mem::take(&mut reply.body)),
                         })
                     }
@@ -397,7 +403,7 @@ impl SafeSlot for Complete {
             LoginStep::Identity(p) => identify(g, ticket, p, buf, &mut out),
             other @ (LoginStep::BadCredential
             | LoginStep::SecurityCheckFailed
-            | LoginStep::Outage) => {
+            | LoginStep::Outage { .. }) => {
                 out.set(|o| &o.verdict, verdict(&other));
                 Outcome::Ready
             }
@@ -408,7 +414,7 @@ impl SafeSlot for Complete {
 /// The verdict a step that reached no identity answers.
 fn verdict(step: &LoginStep) -> u32 {
     match step {
-        LoginStep::Outage => LOGIN_OUTAGE,
+        LoginStep::Outage { .. } => LOGIN_OUTAGE,
         LoginStep::SecurityCheckFailed => LOGIN_SECURITY_CHECK_FAILED,
         _ => LOGIN_BAD_CREDENTIAL,
     }

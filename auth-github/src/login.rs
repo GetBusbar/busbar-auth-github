@@ -159,11 +159,51 @@ impl HopRequest {
     }
 }
 
+/// The reply header fields the step machine reads, and no others: GitHub's rate-limit answer
+/// (`retry-after`, `x-ratelimit-remaining`, `x-ratelimit-reset`) and its pagination (`link`). Every
+/// other field the far end sent is dropped where the reply is read.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ReplyFields {
+    /// `retry-after`.
+    pub retry_after: Option<String>,
+    /// `x-ratelimit-remaining`.
+    pub ratelimit_remaining: Option<String>,
+    /// `x-ratelimit-reset` (Unix seconds).
+    pub ratelimit_reset: Option<String>,
+    /// `link` (RFC 8288).
+    pub link: Option<String>,
+}
+
+impl ReplyFields {
+    /// The kept fields of a reply's field block, names matched case-insensitively, the first of a
+    /// repeated name kept; a value that is not UTF-8 is dropped.
+    pub fn kept<'a>(fields: impl IntoIterator<Item = (&'a [u8], &'a [u8])>) -> Self {
+        let mut kept = Self::default();
+        for (name, value) in fields {
+            let slot = match name.to_ascii_lowercase().as_slice() {
+                b"retry-after" => &mut kept.retry_after,
+                b"x-ratelimit-remaining" => &mut kept.ratelimit_remaining,
+                b"x-ratelimit-reset" => &mut kept.ratelimit_reset,
+                b"link" => &mut kept.link,
+                _ => continue,
+            };
+            if slot.is_none() {
+                *slot = std::str::from_utf8(value)
+                    .ok()
+                    .map(|v| v.trim().to_string());
+            }
+        }
+        kept
+    }
+}
+
 /// What the far end answered.
 #[derive(Clone, PartialEq, Eq)]
 pub struct HopResponse {
     /// The HTTP status.
     pub status: u16,
+    /// The header fields the step machine reads ([`ReplyFields`]).
+    pub fields: ReplyFields,
     /// The body bytes, wiped on drop: the token response carries the access token.
     pub body: Zeroizing<Vec<u8>>,
 }
@@ -205,7 +245,11 @@ pub enum LoginStep {
     /// The IdP answered and the sign-in is declined.
     BadCredential,
     /// The IdP could not be reached, or the login could not finish.
-    Outage,
+    Outage {
+        /// The seconds the IdP asked to be left alone for (its `Retry-After`, or its rate-limit
+        /// reset), when it named any.
+        retry_after: Option<u64>,
+    },
     /// A hop body's `id_token` is not bound to the nonce minted at begin (400
     /// "Sign-in couldn't be verified"; the auth ABI's `LOGIN_SECURITY_CHECK_FAILED`).
     SecurityCheckFailed,
@@ -225,8 +269,9 @@ struct Callback {
     code: Option<Zeroizing<String>>,
     redirect_uri: Option<String>,
     code_verifier: Option<Zeroizing<String>>,
-    /// The last answer: its status and body (the token response carries the access token).
-    answer: Option<(u16, Zeroizing<String>)>,
+    /// The last answer: its status, its kept fields and its body (the token response carries the
+    /// access token).
+    answer: Option<(u16, ReplyFields, Zeroizing<String>)>,
 }
 
 /// One login in flight: the callback's inputs, the step machine's state, the hop parked on a
@@ -399,26 +444,30 @@ impl GithubLogin {
                             module = "github",
                             "github login: hop limit ({MAX_HOPS}) spent without an identity"
                         );
-                        return finish(flow, LoginStep::Outage);
+                        return finish(flow, LoginStep::Outage { retry_after: None });
                     }
                     flow.turns += 1;
                     match self.step(flow) {
                         LoginOutcome::Identify(p) => return finish(flow, LoginStep::Identity(p)),
                         LoginOutcome::Reject => return finish(flow, LoginStep::BadCredential),
                         // The step has already said why.
-                        LoginOutcome::Outage => return finish(flow, LoginStep::Outage),
+                        LoginOutcome::Outage => {
+                            return finish(flow, LoginStep::Outage { retry_after: None })
+                        }
                         LoginOutcome::Exchange(mut hop) => {
                             let rendered = self.render(&hop, flow.state.access_token.as_ref());
                             wipe_hop(&mut hop);
                             match rendered {
                                 Ok(r) => r,
                                 // The guard has already said why.
-                                Err(Refused) => return finish(flow, LoginStep::Outage),
+                                Err(Refused) => {
+                                    return finish(flow, LoginStep::Outage { retry_after: None })
+                                }
                             }
                         }
                         _ => {
                             tracing::warn!(module = "github", "github login: the step machine asked for an outcome this login cannot serve");
-                            return finish(flow, LoginStep::Outage);
+                            return finish(flow, LoginStep::Outage { retry_after: None });
                         }
                     }
                 }
@@ -428,7 +477,9 @@ impl GithubLogin {
                     flow.inflight = Some(request);
                     return LoginStep::Pending;
                 }
-                Fetched::Unreachable => return finish(flow, LoginStep::Outage),
+                Fetched::Unreachable => {
+                    return finish(flow, LoginStep::Outage { retry_after: None })
+                }
                 Fetched::Ready(mut resp) => {
                     if resp.body.len() > MAX_HOP_REPLY_BYTES {
                         tracing::warn!(
@@ -436,7 +487,7 @@ impl GithubLogin {
                             bytes = resp.body.len(),
                             "github login: a hop reply passed the {MAX_HOP_REPLY_BYTES}-byte cap"
                         );
-                        return finish(flow, LoginStep::Outage);
+                        return finish(flow, LoginStep::Outage { retry_after: None });
                     }
                     let body = text_of(std::mem::take(&mut *resp.body));
                     // NONCE BINDING: a hop body carrying an
@@ -446,13 +497,13 @@ impl GithubLogin {
                         tracing::warn!(module = "github", "github login: a hop body's id_token is not bound to the nonce minted at begin");
                         return finish(flow, LoginStep::SecurityCheckFailed);
                     }
-                    flow.req.answer = Some((resp.status, body));
+                    flow.req.answer = Some((resp.status, std::mem::take(&mut resp.fields), body));
                     if flow.turns >= MAX_HOPS {
                         tracing::warn!(
                             module = "github",
                             "github login: hop limit ({MAX_HOPS}) spent without an identity"
                         );
-                        return finish(flow, LoginStep::Outage);
+                        return finish(flow, LoginStep::Outage { retry_after: None });
                     }
                 }
             }
@@ -462,7 +513,7 @@ impl GithubLogin {
     /// The `complete_login` step machine, over the flow's own state.
     fn step(&self, flow: &mut LoginFlow) -> LoginOutcome {
         let req = &flow.req;
-        let Some((status, body)) = &req.answer else {
+        let Some((status, _fields, body)) = &req.answer else {
             let (Some(code), Some(redirect_uri), Some(code_verifier)) = (
                 req.code.as_deref(),
                 req.redirect_uri.as_deref(),
