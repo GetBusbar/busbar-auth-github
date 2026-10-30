@@ -297,6 +297,49 @@ fn a_bad_code_answered_200_with_an_error_body_is_declined() {
     assert_eq!(s.targets(), vec![TOKEN_URL]);
 }
 
+/// RED G2 (owner-signed 2026-10-30): GitHub answers a token exchange it refuses with HTTP 200 and an
+/// `error`. Only the user's own codes (a bad or expired code, an invalid grant) are a declined
+/// sign-in; the operator's (wrong client credentials, a redirect_uri mismatch, a suspended app),
+/// any other code, and a 2xx with neither a token nor an error are an outage. Both reply shapes.
+#[test]
+fn red_g2_a_200_token_error_is_declined_only_for_the_users_own_code() {
+    let l = login();
+    for code in ["bad_verification_code", "invalid_grant", "expired_token"] {
+        for body in [format!(r#"{{"error":"{code}"}}"#), format!("error={code}")] {
+            let mut s = Script::happy().answer(TOKEN_URL, 200, &body);
+            assert_eq!(run(&l, &mut s), LoginStep::BadCredential, "{body}");
+            assert_eq!(s.targets(), vec![TOKEN_URL]);
+        }
+    }
+    for code in [
+        "incorrect_client_credentials",
+        "redirect_uri_mismatch",
+        "application_suspended",
+        "unverified_user_email",
+        "something_new",
+    ] {
+        for body in [
+            format!(r#"{{"error":"{code}","error_description":"x"}}"#),
+            format!("error={code}&error_description=x"),
+        ] {
+            let mut s = Script::happy().answer(TOKEN_URL, 200, &body);
+            assert_eq!(run(&l, &mut s), OUTAGE, "{body}");
+            assert_eq!(s.targets(), vec![TOKEN_URL]);
+        }
+    }
+    for body in [
+        "",
+        "<html>sign in</html>",
+        "{not json",
+        r#"{"token_type":"bearer"}"#,
+        "scope=read%3Aorg",
+    ] {
+        let mut s = Script::happy().answer(TOKEN_URL, 200, body);
+        assert_eq!(run(&l, &mut s), OUTAGE, "{body:?}");
+        assert_eq!(s.targets(), vec![TOKEN_URL]);
+    }
+}
+
 #[test]
 fn a_form_encoded_token_response_is_accepted() {
     let l = login();
@@ -1072,12 +1115,33 @@ mod logging {
         let mut s = Script::new().answer(TOKEN_URL, 200, "error=incorrect_client_credentials");
         let cap = WarnCapture::default();
         let step = tracing::subscriber::with_default(cap.clone(), || run(&l, &mut s));
-        assert_eq!(step, LoginStep::BadCredential);
+        assert_eq!(
+            step, OUTAGE,
+            "the operator's misconfiguration is no declined sign-in"
+        );
         assert!(
             cap.contains("incorrect_client_credentials"),
             "{:?}",
             cap.messages()
         );
+    }
+
+    /// RED G2: an error code is logged only when it is `[a-z0-9_]{1,64}`; any other far-end string
+    /// is `<unrecognised>`, never echoed.
+    #[test]
+    fn red_g2_a_foreign_error_string_is_never_logged() {
+        let l = login();
+        for body in [
+            r#"{"error":"EVIL\u001b[31m forged line"}"#.to_string(),
+            format!("error=EVIL{}", "x".repeat(80)),
+        ] {
+            let mut s = Script::new().answer(TOKEN_URL, 200, &body);
+            let cap = WarnCapture::capturing_debug();
+            let step = tracing::subscriber::with_default(cap.clone(), || run(&l, &mut s));
+            assert_eq!(step, OUTAGE, "{body}");
+            assert!(!cap.contains("EVIL"), "{:?}", cap.messages());
+            assert!(cap.contains("<unrecognised>"), "{:?}", cap.messages());
+        }
     }
 }
 
