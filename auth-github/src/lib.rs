@@ -199,8 +199,9 @@ pub fn build_github_authorize_url(
 
 /// Build the token-exchange hop: `POST` to the token endpoint with `client_id`, `code`,
 /// `redirect_uri`, and the PKCE `code_verifier`. The `client_secret` is an EMPTY placeholder keyed by
-/// `secret_form_field`: the step machine writes the KEY, and [`login`]'s renderer injects the held
-/// VALUE into the wiped request body (or drops the field when no secret was given).
+/// `secret_form_field`: the step machine writes the KEY, and [`login`]'s renderer seals the client
+/// secret (the chip's `Cred`) into that slot of the form body (or drops the field when no secret
+/// was given).
 ///
 /// NOTE: GitHub's token endpoint returns `application/x-www-form-urlencoded` UNLESS the request sends
 /// `Accept: application/json`. This hop sets no `headers` (simpler than relying on an `Accept` header
