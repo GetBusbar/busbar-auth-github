@@ -12,6 +12,8 @@ use std::collections::HashMap;
 const SECRET: &str = "s3cr3t-client-value";
 const TOKEN: &str = "gho_live_bearer";
 const NONCE: &str = "kernel-minted-nonce";
+/// An outage with no retry hint.
+const OUTAGE: LoginStep = LoginStep::Outage { retry_after: None };
 
 /// The operator writes every base out (as a 1.5.5 GitHub method had to, for its hops to pass).
 const SETTINGS: &str = r#"{
@@ -44,6 +46,7 @@ impl Script {
             target.to_string(),
             Fetched::Ready(HopResponse {
                 status,
+                fields: ReplyFields::default(),
                 body: body.as_bytes().to_vec().into(),
             }),
         );
@@ -247,10 +250,10 @@ fn an_idp_5xx_or_429_is_an_outage_not_a_decline() {
     let l = login();
     for status in [500, 502, 503, 429] {
         let mut s = Script::happy().answer(TOKEN_URL, status, r#"{"error":"busy"}"#);
-        assert_eq!(run(&l, &mut s), LoginStep::Outage, "token {status}");
+        assert_eq!(run(&l, &mut s), OUTAGE, "token {status}");
         assert_eq!(s.targets(), vec![TOKEN_URL]);
         let mut s = Script::happy().answer(USER_URL, status, "{}");
-        assert_eq!(run(&l, &mut s), LoginStep::Outage, "user {status}");
+        assert_eq!(run(&l, &mut s), OUTAGE, "user {status}");
         assert_eq!(s.targets(), vec![TOKEN_URL, USER_URL]);
     }
 }
@@ -298,7 +301,7 @@ fn a_form_encoded_token_response_is_accepted() {
 fn an_unreachable_idp_is_an_outage() {
     let l = login();
     let mut s = Script::happy().unreachable(USER_URL);
-    assert_eq!(run(&l, &mut s), LoginStep::Outage);
+    assert_eq!(run(&l, &mut s), OUTAGE);
 }
 
 #[test]
@@ -390,7 +393,7 @@ fn a_plaintext_public_token_base_is_refused_before_the_secret_leaves() {
     );
     let l = GithubLogin::open(&settings, Some(SECRET)).unwrap();
     let mut s = Script::happy();
-    assert_eq!(run(&l, &mut s), LoginStep::Outage);
+    assert_eq!(run(&l, &mut s), OUTAGE);
     assert!(s.issued.is_empty());
 }
 
@@ -399,7 +402,7 @@ fn a_bearer_with_a_line_break_fails_the_hop_closed() {
     // A token that would split the request: 1.5.5's header sanitiser failed the hop (an outage).
     let l = login();
     let mut s = Script::happy().answer(TOKEN_URL, 200, r#"{"access_token":"gho_x\r\nX-Evil: 1"}"#);
-    assert_eq!(run(&l, &mut s), LoginStep::Outage);
+    assert_eq!(run(&l, &mut s), OUTAGE);
     assert_eq!(s.targets(), vec![TOKEN_URL]);
 }
 
@@ -485,7 +488,7 @@ fn the_hop_loop_is_bounded() {
     let l = login();
     let tok = r#"{"access_token":"gho_again"}"#;
     let mut s = Script::happy().answer(USER_URL, 200, tok);
-    assert_eq!(run(&l, &mut s), LoginStep::Outage);
+    assert_eq!(run(&l, &mut s), OUTAGE);
     assert_eq!(s.issued.len(), MAX_HOPS);
 }
 
@@ -946,6 +949,7 @@ mod logging {
 fn a_hop_response_debug_shows_no_body() {
     let r = HopResponse {
         status: 200,
+        fields: ReplyFields::default(),
         body: b"access_token=SECRETX".to_vec().into(),
     };
     let text = format!("{r:?} {:?}", Fetched::Ready(r.clone()));
@@ -967,7 +971,7 @@ fn a_hop_reply_over_the_cap_is_an_outage() {
     let mut body = format!(r#"{{"access_token":"{TOKEN}"}}"#);
     body.push_str(&" ".repeat(256 * 1024 + 1 - body.len()));
     let mut s = Script::happy().answer(TOKEN_URL, 200, &body);
-    assert_eq!(run(&l, &mut s), LoginStep::Outage);
+    assert_eq!(run(&l, &mut s), OUTAGE);
     assert_eq!(s.targets(), vec![TOKEN_URL]);
     // At the cap exactly it is read.
     body.pop();
@@ -1007,6 +1011,7 @@ fn the_hop_bodies_are_wiped_on_drop() {
     wipes(&request.body);
     let response = HopResponse {
         status: 200,
+        fields: ReplyFields::default(),
         body: b"access_token=x".to_vec().into(),
     };
     wipes(&response.body);

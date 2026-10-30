@@ -14,7 +14,10 @@ fn security_check_failed_is_its_own_verdict() {
 #[test]
 fn other_steps_keep_their_verdicts() {
     assert_eq!(verdict(&LoginStep::BadCredential), LOGIN_BAD_CREDENTIAL);
-    assert_eq!(verdict(&LoginStep::Outage), LOGIN_OUTAGE);
+    assert_eq!(
+        verdict(&LoginStep::Outage { retry_after: None }),
+        LOGIN_OUTAGE
+    );
 }
 
 fn who(id: &str) -> Principal {
