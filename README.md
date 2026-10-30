@@ -16,8 +16,8 @@ The GitHub-OAuth login module as a droppable busbar plugin: a cdylib exporting t
 
 <a href="https://codecov.io/gh/GetBusbar/busbar-auth-github"><img src="https://codecov.io/gh/GetBusbar/busbar-auth-github/branch/dev/graph/badge.svg" alt="Coverage"></a>
 
-**GitHub-OAuth login for busbar** — a login-capable auth plugin (auth ABI v2, 1.5.2
-token-exchange). A user signs in with GitHub; busbar establishes their identity as
+**GitHub-OAuth login for busbar** — a login-capable auth plugin (the auth kind's door, auth ABI
+v3). A user signs in with GitHub; busbar establishes their identity as
 `github:<login>` with `github:org/<org>` group memberships, then resolves those groups to policy
 through the operator's `auth.role_bindings.github:` bindings.
 
@@ -41,8 +41,11 @@ one outbound `http` need, and holds its own confidential-client **secret** (the 
 | 3 | the `/user` JSON | `GET .../user/orgs` (or identifies now if `fetch_orgs = false`) |
 | 4 | the `/user/orgs` JSON | identifies `github:<login>` + `github:id/<id>` + `github:org/<org>` groups |
 
-Declined (a bad credential) on any non-2xx, missing `access_token`, missing `login`, or malformed
-JSON; a hop that cannot be made or whose reply passes 1 MiB is an outage.
+Declined (a bad credential, 401) on any other non-2xx, a missing `access_token`, a missing `login`,
+or malformed JSON. An outage (503, retryable) when GitHub answers `5xx` or `429`, when a hop cannot
+be made (refused, connect, TLS, timeout), or when its reply passes 256 KiB. An `id_token` on a hop
+answer (never from github.com) must carry the nonce minted at begin, else the sign-in fails its
+security check (400).
 GitHub answers its token endpoint with **HTTP 200 even on a bad code** (an `{"error":...}` body with
 no `access_token`) — that is treated as a rejection, never a success with an empty token.
 
@@ -50,9 +53,10 @@ no `access_token`) — that is treated as a rejection, never a success with an e
 
 `client_id`, `token_base` and `api_base` are required, **even for github.com**: the hop allowlist
 is built only from the URL strings written in the settings (1.5.5 parity), so `validate`/`open`
-refuse settings that leave either at its default (`settings: `token_base` must be written out: the
+refuse settings that leave either at its default (`settings.token_base: must be written out: the
 hop allowlist is built only from URLs in the settings`). `authorize_base` is a browser redirect, not
-a hop, and may stay at its default. The `client_secret` is **never** in this config — it is
+a hop, and may stay at its default. An empty `client_id`, or a base that is not an http(s) URL with
+a host, is refused too. The `client_secret` is **never** in this config — it is
 `browser_login.client_secret`, which the kernel delivers to the plugin.
 
 ```json
@@ -74,10 +78,13 @@ a hop, and may stay at its default. The `client_secret` is **never** in this con
 | `authorize_base` | `https://github.com` | GHES: `https://<host>` |
 | `token_base` | *(required)* | `https://github.com`; GHES: `https://<host>` |
 | `fetch_orgs` | `true` | `false` = login-only, no org groups, one fewer hop |
-| `ca_cert_pem` | *(must not be set)* | Reserved: a config that sets it is **refused** (see below) |
+| `ca_cert_pem` | *(none)* | An extra trusted root (PEM) for a GHES behind an internal CA (see below) |
 
-The config is `deny_unknown_fields` (a typo fails loudly at boot). A refusal quotes the decoder's
-text only when it names a key (a missing or unknown field), never a value.
+The config is `deny_unknown_fields` (a typo fails loudly at boot). Every refusal is the contract's
+instance-relative line, `settings.<path>: <reason>` (`settings: <reason>` for the document), and
+never quotes a value: a mistyped value is written `***` (`settings.client_id: invalid type: integer
+\`***\`, expected a string`). A client secret that is not UTF-8 answers
+`secrets: \`client_secret\` is not UTF-8`.
 
 ### GitHub Enterprise Server (GHES)
 
@@ -107,8 +114,8 @@ cargo clippy --all-targets -- -D warnings
 cargo test
 ```
 
-The `busbar-auth-github` crate is the reusable logic (statically linkable); `busbar-auth-github-plugin`
-is the thin `cdylib` that exports the auth C ABI via `busbar_contract::export_door!` (exporting
+The `busbar-auth-github` crate (`auth-github/`) is the reusable logic (statically linkable);
+`busbar-auth-github-plugin` (`auth-github-plugin/`) is the thin `cdylib` that exports the auth C ABI via `busbar_contract::export_door!` (exporting
 `busbar_auth_github::door::door`).
 
 ### ABI notes / caveats
@@ -117,19 +124,25 @@ is the thin `cdylib` that exports the auth C ABI via `busbar_contract::export_do
   `code_challenge` is always sent; a GitHub OAuth App that has not opted into PKCE simply ignores it,
   and the paired `code_verifier` rides the token exchange harmlessly.
 - **Request headers on GET hops.** GitHub REST calls **require** an `Authorization: Bearer <token>`
-  and a `User-Agent` header. Auth ABI v2's `LoginHop` / `HttpRequest` carries a `headers:
-  Vec<(String,String)>` field for exactly this; `busbar_auth_github::userinfo_headers()` computes the
-  headers, and `build_userinfo_get`/`build_orgs_get` attach them directly to the `/user` and
-  `/user/orgs` hops. Headers are sanitized (CR/LF/NUL and hop-control headers rejected) and a hop
-  only goes to a host on the allowlist built from the settings' URLs.
-- **`ca_cert_pem` is not wired.** The plugin's one outbound `http` need carries no CA, so a GHES CA
-  has no delivery channel: a config that sets it is refused (`github ca_cert_pem is not yet
-  supported; omit it or use a system-trusted cert`), never accepted and silently ignored.
+  and a `User-Agent` header. `busbar_auth_github::userinfo_headers()` gives the public ones
+  (`User-Agent`, `Accept`), and `build_userinfo_get`/`build_orgs_get` attach them to the `/user`
+  and `/user/orgs` hops. Headers are sanitized (CR/LF/NUL and hop-control headers rejected) and a
+  hop only goes to a host on the allowlist built from the settings' URLs.
+- **Credentials are the SDK chip's.** The client secret and the access token are
+  `abi::sdk::cred::Cred`s: the secret goes out only as a sealed `FormBody` value, the token only as
+  the sealed `authorization: Bearer` field, both written by the SDK at the wire and required to go
+  out on a secured connection when their base is `https`. The plugin holds neither as text; the
+  code, the verifier and every hop answer are wiped when they go, and nothing formats them.
+- **`ca_cert_pem`.** The Statement declares two outbound `http` needs: one trusting
+  `settings.ca_cert_pem` beside the public roots, one the public roots only. A config that names a
+  `ca_cert_pem` goes out on the first, any other on the second; the host's connector does the TLS,
+  and certificate validation is only widened, never disabled. A value with no PEM certificate in it
+  is refused (`settings.ca_cert_pem: not a PEM certificate (no -----BEGIN CERTIFICATE----- line)`).
 - **Multi-hop flow state.** The access token is seen once (the token response) but is needed to
   authenticate both GETs, and the `/user` identity is needed at the `/user/orgs` step. Each flow
   (`LoginFlow`) owns this state, so concurrent logins never share a slot; a finished flow holds
   neither.
-- **Reply cap.** Every hop's reply is capped at 1 MiB (`MAX_HOP_REPLY_BYTES`, the exchange's
+- **Reply cap.** Every hop's reply is capped at 256 KiB (`MAX_HOP_REPLY_BYTES`, the exchange's
   `reply_limit`); a reply past it ends the login as an outage.
 
 ## Tests
@@ -137,6 +150,11 @@ is the thin `cdylib` that exports the auth C ABI via `busbar_contract::export_do
 ```bash
 cargo test --workspace --locked
 ```
+
+`auth-github-plugin/tests/conformance.rs` runs busbar's published conformance suite (both doors,
+the far ends in `conformance.json`) and mounts the test kit's host
+(`tests/support/conformance_host.rs`). `tests/e2e.rs` is the live end-to-end against a real busbar
+and a wiremock GitHub (CI's `wiremock` service).
 
 ## License
 
