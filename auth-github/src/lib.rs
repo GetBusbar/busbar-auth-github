@@ -73,8 +73,8 @@ fn default_true() -> bool {
 ///
 /// `#[serde(deny_unknown_fields)]` makes a typo'd/stray operator key a loud boot failure, never a
 /// silent no-op. [`login::GithubLogin::open`] further refuses a `token_base` or `api_base` not
-/// written out (the hop allowlist is built only from the URLs in the settings) and a set
-/// `ca_cert_pem`. The confidential-client `client_secret` is DELIBERATELY absent: the kernel
+/// written out (the hop allowlist is built only from the URLs in the settings) and a
+/// `ca_cert_pem` that is no PEM certificate. The confidential-client `client_secret` is DELIBERATELY absent: the kernel
 /// resolves `browser_login.client_secret` and hands it to the plugin beside the settings.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -103,9 +103,10 @@ pub struct GitHubConfig {
     /// `false` establishes identity from `/user` alone (no groups) and saves a hop.
     #[serde(default = "default_true")]
     pub fetch_orgs: bool,
-    /// Reserved: an additional trusted root CA (PEM) for a GHES instance behind an internal CA. It
-    /// has no delivery channel (the plugin's one outbound `http` need carries no CA), so a config
-    /// that SETS it is refused at validate/open rather than accepted and silently ignored.
+    /// An ADDITIONAL trusted root CA certificate (PEM) for a GHES instance behind an internal CA,
+    /// layered on top of the public roots, never a replacement. The host's connector does the TLS:
+    /// the hops go out on the need whose `trust_from` is this setting. A value with no PEM
+    /// certificate in it is refused at validate/open, named.
     #[serde(default)]
     pub ca_cert_pem: Option<String>,
 }
