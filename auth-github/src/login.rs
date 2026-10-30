@@ -579,28 +579,14 @@ impl GithubLogin {
         let Some(user) = parse_user(body) else {
             if flow.state.access_token.is_none() {
                 // The token hop: GitHub answered no access_token.
-                match github_error(body) {
-                    None => tracing::info!(
-                        module = "github",
-                        "github login: declined, the token endpoint answered no access_token"
-                    ),
-                    Some(e) if e == "bad_verification_code" => tracing::info!(
-                        module = "github",
-                        error = ?e,
-                        "github login: declined, the token endpoint refused the code"
-                    ),
-                    Some(e) => tracing::warn!(
-                        module = "github",
-                        error = ?e,
-                        "github login: the token endpoint refused the exchange (check client_id, client_secret and redirect_uri)"
-                    ),
-                }
-            } else {
-                tracing::info!(
-                    module = "github",
-                    "github login: declined, /user answered without a login or id"
-                );
+                let turn = token_refusal(body);
+                flow.state = FlowState::default();
+                return turn;
             }
+            tracing::info!(
+                module = "github",
+                "github login: declined, /user answered without a login or id"
+            );
             flow.state = FlowState::default();
             return Turn::Decline;
         };
@@ -891,6 +877,53 @@ fn github_error(body: &str) -> Option<String> {
         .split('&')
         .find_map(|p| p.strip_prefix("error="))
         .map(str::to_string)
+}
+
+/// The token endpoint's codes that are the user's own: a bad or expired code, an invalid grant.
+const USER_TOKEN_ERRORS: [&str; 3] = ["bad_verification_code", "invalid_grant", "expired_token"];
+/// The token endpoint's codes that are the operator's: the OAuth App's credentials, its callback
+/// URL, the app itself.
+const OPERATOR_TOKEN_ERRORS: [&str; 3] = [
+    "incorrect_client_credentials",
+    "redirect_uri_mismatch",
+    "application_suspended",
+];
+
+/// The turn a 2xx token reply carrying no access token is (GitHub answers a refused exchange with
+/// HTTP 200 and an `error`), OWNER-SIGNED 2026-10-30: only the user's own code is a declined
+/// sign-in (at info); the operator's misconfiguration is an outage at warn; any other code, and a
+/// reply with neither a token nor an error (empty, HTML, not JSON), is an outage.
+fn token_refusal(body: &str) -> Turn {
+    let Some(code) = github_error(body) else {
+        tracing::warn!(
+            module = "github",
+            "github login: the token endpoint answered 2xx with neither an access_token nor an error"
+        );
+        return Turn::Outage { retry_after: None };
+    };
+    let code = loggable(&code);
+    if USER_TOKEN_ERRORS.contains(&code) {
+        tracing::info!(
+            module = "github",
+            error = code,
+            "github login: declined, the token endpoint refused the code"
+        );
+        return Turn::Decline;
+    }
+    if OPERATOR_TOKEN_ERRORS.contains(&code) {
+        tracing::warn!(
+            module = "github",
+            error = code,
+            "github login: the token endpoint refused this client: the operator's configuration (check client_id, client_secret, the OAuth App's callback URL and that the app is not suspended)"
+        );
+    } else {
+        tracing::warn!(
+            module = "github",
+            error = code,
+            "github login: the token endpoint answered an error that is no declined sign-in"
+        );
+    }
+    Turn::Outage { retry_after: None }
 }
 
 fn finish(flow: &mut LoginFlow, step: LoginStep) -> LoginStep {
