@@ -752,7 +752,8 @@ fn red_g1_a_rate_limit_is_an_outage_with_the_idps_retry_hint() {
     assert_eq!(run(&l, &mut s), OUTAGE);
 }
 
-/// An empty access token (either shape) is declined: never a `Bearer ` with nothing after it.
+/// An empty access token (either shape) is no token: never a `Bearer ` with nothing after it. A
+/// 2xx with no token and no error is an outage (G2, owner-signed 2026-10-30).
 #[test]
 fn an_empty_access_token_is_refused() {
     let l = login();
@@ -761,7 +762,7 @@ fn an_empty_access_token_is_refused() {
         "access_token=&scope=read:org&token_type=bearer",
     ] {
         let mut s = Script::happy().answer(TOKEN_URL, 200, body);
-        assert_eq!(run(&l, &mut s), LoginStep::BadCredential, "{body}");
+        assert_eq!(run(&l, &mut s), OUTAGE, "{body}");
         assert_eq!(s.targets(), vec![TOKEN_URL]);
     }
 }
