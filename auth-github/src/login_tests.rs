@@ -358,11 +358,39 @@ fn an_unreachable_idp_is_an_outage() {
     assert_eq!(run(&l, &mut s), OUTAGE);
 }
 
+/// A truncated org list is never a zero-group login; it is no sign-in answer either (G3,
+/// owner-signed 2026-10-30): an outage.
 #[test]
-fn a_malformed_org_list_is_declined_not_a_zero_group_login() {
+fn a_malformed_org_list_is_an_outage_not_a_zero_group_login() {
     let l = login();
     let mut s = Script::happy().answer(ORGS_URL, 200, "[{truncated");
-    assert_eq!(run(&l, &mut s), LoginStep::BadCredential);
+    assert_eq!(run(&l, &mut s), OUTAGE);
+}
+
+/// RED G3 (owner-signed 2026-10-30): a malformed or foreign 2xx from `/user` or `/user/orgs` is
+/// the far end answering something that is no sign-in answer: an outage, never a declined
+/// sign-in, and nothing more is sent.
+#[test]
+fn red_g3_a_malformed_rest_answer_is_an_outage() {
+    let l = login();
+    for body in [
+        "",
+        "<html>maintenance</html>",
+        "{not json",
+        r#"{"id":1}"#,
+        r#"{"login":"octocat"}"#,
+        r#"{"login":"octocat","id":"1"}"#,
+        r#"{"login":"","id":1}"#,
+    ] {
+        let mut s = Script::happy().answer(USER_URL, 200, body);
+        assert_eq!(run(&l, &mut s), OUTAGE, "/user {body:?}");
+        assert_eq!(s.targets(), vec![TOKEN_URL, USER_URL]);
+    }
+    for body in ["", "[{bad", r#"{"message":"x"}"#, "<html></html>"] {
+        let mut s = Script::happy().answer(ORGS_URL, 200, body);
+        assert_eq!(run(&l, &mut s), OUTAGE, "/user/orgs {body:?}");
+        assert_eq!(s.targets(), vec![TOKEN_URL, USER_URL, ORGS_URL]);
+    }
 }
 
 #[test]
@@ -578,14 +606,15 @@ fn the_flow_answers_as_the_1_5_5_module_driven_by_the_1_5_5_core() {
             LoginStep::BadCredential,
             vec![TOKEN_URL],
         ),
+        // G3 (owner-signed 2026-10-30): a malformed REST answer is an outage, where 1.5.5 declined.
         (
             Script::happy().answer(ORGS_URL, 200, "[{bad"),
-            LoginStep::BadCredential,
+            OUTAGE,
             vec![TOKEN_URL, USER_URL, ORGS_URL],
         ),
         (
             Script::happy().answer(USER_URL, 200, r#"{"login":"no-id"}"#),
-            LoginStep::BadCredential,
+            OUTAGE,
             vec![TOKEN_URL, USER_URL],
         ),
     ];
@@ -767,12 +796,12 @@ fn an_empty_access_token_is_refused() {
     }
 }
 
-/// A `/user` without a `login` is declined.
+/// A `/user` without a `login` is no sign-in answer: an outage (G3).
 #[test]
-fn a_user_without_a_login_is_declined() {
+fn a_user_without_a_login_is_an_outage() {
     let l = login();
     let mut s = Script::happy().answer(USER_URL, 200, r#"{"id":42,"name":"No Login"}"#);
-    assert_eq!(run(&l, &mut s), LoginStep::BadCredential);
+    assert_eq!(run(&l, &mut s), OUTAGE);
     assert_eq!(s.targets(), vec![TOKEN_URL, USER_URL]);
 }
 
