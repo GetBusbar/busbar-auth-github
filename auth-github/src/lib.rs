@@ -31,6 +31,7 @@
 //! [`login`] renders and sends it.
 
 #![forbid(unsafe_code)]
+#![deny(missing_docs)]
 
 pub mod door;
 pub mod guard;
