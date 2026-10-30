@@ -52,6 +52,17 @@ impl Script {
         );
         self
     }
+    fn answer_with(mut self, target: &str, status: u16, fields: ReplyFields, body: &str) -> Self {
+        self.answers.insert(
+            target.to_string(),
+            Fetched::Ready(HopResponse {
+                status,
+                fields,
+                body: body.as_bytes().to_vec().into(),
+            }),
+        );
+        self
+    }
     fn unreachable(mut self, target: &str) -> Self {
         self.answers
             .insert(target.to_string(), Fetched::Unreachable);
@@ -575,13 +586,127 @@ fn a_callback_without_the_full_triple_is_declined_with_no_exchange() {
     }
 }
 
-/// The token endpoint's non-2xx is declined even when its body carries a token.
+/// The token endpoint's non-2xx is never a token, even when its body carries one: a 401 with an
+/// RFC 6749 §5.2 `error` is declined, a 401 without one is an outage (owner-signed 2026-10-30).
 #[test]
-fn a_non_2xx_token_answer_is_declined_even_with_a_token_in_it() {
+fn a_non_2xx_token_answer_is_never_a_token_even_with_one_in_it() {
     let l = login();
-    let mut s = Script::happy().answer(TOKEN_URL, 401, r#"{"access_token":"should-be-ignored"}"#);
+    let mut s = Script::happy().answer(
+        TOKEN_URL,
+        401,
+        r#"{"error":"invalid_grant","access_token":"should-be-ignored"}"#,
+    );
     assert_eq!(run(&l, &mut s), LoginStep::BadCredential);
     assert_eq!(s.targets(), vec![TOKEN_URL]);
+    let mut s = Script::happy().answer(TOKEN_URL, 401, r#"{"access_token":"should-be-ignored"}"#);
+    assert_eq!(run(&l, &mut s), OUTAGE);
+    assert_eq!(s.targets(), vec![TOKEN_URL]);
+}
+
+/// RED G1 (owner-signed 2026-10-30: only RFC 6749 §5.2 credential errors are a declined sign-in):
+/// at the token endpoint a 400/401 carrying a §5.2 `error` (JSON or form) is declined; every other
+/// non-2xx (a redirect, 403, 404, 408, a 400/401 with no `error`) is an outage, and nothing more is
+/// sent.
+#[test]
+fn red_g1_the_token_endpoint_declines_only_a_5_2_error() {
+    let l = login();
+    for (status, body) in [
+        (400, r#"{"error":"invalid_grant"}"#),
+        (401, r#"{"error":"invalid_client","error_description":"x"}"#),
+        (400, "error=invalid_grant&error_description=gone"),
+    ] {
+        let mut s = Script::happy().answer(TOKEN_URL, status, body);
+        assert_eq!(run(&l, &mut s), LoginStep::BadCredential, "{status} {body}");
+        assert_eq!(s.targets(), vec![TOKEN_URL]);
+    }
+    for (status, body) in [
+        (302, ""),
+        (301, "<html>moved</html>"),
+        (403, r#"{"message":"forbidden"}"#),
+        (404, "Not Found"),
+        (408, ""),
+        (400, "<html>bad request</html>"),
+        (401, r#"{"message":"Bad credentials"}"#),
+        (418, r#"{"error":"invalid_grant"}"#),
+    ] {
+        let mut s = Script::happy().answer(TOKEN_URL, status, body);
+        assert_eq!(run(&l, &mut s), OUTAGE, "{status} {body}");
+        assert_eq!(s.targets(), vec![TOKEN_URL]);
+    }
+}
+
+/// RED G1: on `/user` and `/user/orgs` only a 401 (the token is not accepted) is a declined
+/// sign-in; a redirect, a 404, a 408 or a 403 that is no rate limit is an outage.
+#[test]
+fn red_g1_the_rest_hops_decline_only_a_401() {
+    let l = login();
+    for (url, before) in [
+        (USER_URL, vec![TOKEN_URL, USER_URL]),
+        (ORGS_URL, vec![TOKEN_URL, USER_URL, ORGS_URL]),
+    ] {
+        let mut s = Script::happy().answer(url, 401, r#"{"message":"Bad credentials"}"#);
+        assert_eq!(run(&l, &mut s), LoginStep::BadCredential, "{url} 401");
+        for status in [301, 302, 304, 403, 404, 408, 410, 422] {
+            let mut s = Script::happy().answer(url, status, r#"{"message":"x"}"#);
+            assert_eq!(run(&l, &mut s), OUTAGE, "{url} {status}");
+            assert_eq!(s.targets(), before, "{url} {status}");
+        }
+    }
+}
+
+/// RED G1: a rate limit on any REST hop (a 403 or 429 with `retry-after` or
+/// `x-ratelimit-remaining: 0`), and a 5xx or 429 anywhere, is an outage carrying the IdP's retry
+/// hint: its `retry-after` seconds, else the seconds to its `x-ratelimit-reset`.
+#[test]
+fn red_g1_a_rate_limit_is_an_outage_with_the_idps_retry_hint() {
+    let l = login();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("after the epoch")
+        .as_secs();
+    let after = |secs: &str| ReplyFields {
+        retry_after: Some(secs.to_string()),
+        ..ReplyFields::default()
+    };
+    let spent = ReplyFields {
+        ratelimit_remaining: Some("0".to_string()),
+        ratelimit_reset: Some((now + 100).to_string()),
+        ..ReplyFields::default()
+    };
+    for url in [USER_URL, ORGS_URL] {
+        for status in [403, 429] {
+            let mut s = Script::happy().answer_with(url, status, after("60"), "{}");
+            assert_eq!(
+                run(&l, &mut s),
+                LoginStep::Outage {
+                    retry_after: Some(60)
+                },
+                "{url} {status}"
+            );
+            let mut s = Script::happy().answer_with(url, status, spent.clone(), "{}");
+            match run(&l, &mut s) {
+                LoginStep::Outage {
+                    retry_after: Some(secs),
+                } => assert!((90..=100).contains(&secs), "{url} {status}: {secs}"),
+                other => panic!("{url} {status}: {other:?}"),
+            }
+        }
+    }
+    for url in [TOKEN_URL, USER_URL, ORGS_URL] {
+        for status in [429, 500, 503] {
+            let mut s = Script::happy().answer_with(url, status, after("120"), "{}");
+            assert_eq!(
+                run(&l, &mut s),
+                LoginStep::Outage {
+                    retry_after: Some(120)
+                },
+                "{url} {status}"
+            );
+        }
+    }
+    // A hint that is no number of seconds is none.
+    let mut s = Script::happy().answer_with(USER_URL, 503, after("soon"), "{}");
+    assert_eq!(run(&l, &mut s), OUTAGE);
 }
 
 /// An empty access token (either shape) is declined: never a `Bearer ` with nothing after it.
@@ -926,6 +1051,19 @@ mod logging {
         for secret in [SECRET, "the-code", "the-verifier"] {
             assert!(!cap.contains(secret), "{:?}", cap.messages());
         }
+    }
+
+    /// RED G1: a 403 on `/user/orgs` that is no rate limit is the operator's (the token lacks the
+    /// `read:org` scope): an outage, and a WARN naming the scope.
+    #[test]
+    fn red_g1_a_403_on_the_org_list_warns_of_the_scope() {
+        let l = login();
+        let mut s = Script::happy().answer(ORGS_URL, 403, r#"{"message":"forbidden"}"#);
+        let cap = WarnCapture::default();
+        let step = tracing::subscriber::with_default(cap.clone(), || run(&l, &mut s));
+        assert_eq!(step, OUTAGE);
+        assert!(cap.contains("read:org"), "{:?}", cap.messages());
+        assert!(cap.contains("module=github"), "{:?}", cap.messages());
     }
 
     #[test]
