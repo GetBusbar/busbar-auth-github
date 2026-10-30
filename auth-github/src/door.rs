@@ -37,13 +37,13 @@ use busbar_contract::abi::sdk::auth_door::with_tail;
 use busbar_contract::abi::sdk::auth_kit::login_identity;
 use busbar_contract::abi::sdk::conn::Connector;
 use busbar_contract::abi::sdk::door::{abi_str, alias, statement, AbiIn, AbiOut};
-use busbar_contract::abi::sdk::exchange::{exchange, Exchange as Wire, Request};
+use busbar_contract::abi::sdk::exchange::{exchange, Exchange as Wire};
 use busbar_contract::abi::sdk::life::{Held, Life, Refreshed, Refusal};
 use busbar_contract::abi::sdk::{Instance, Lent, Out, SafeSlot};
 use busbar_contract::auth::Principal;
 
 use crate::login::{
-    Exchange, Fetched, GithubLogin, HopRequest, HopResponse, LoginFlow, LoginStep,
+    split, Exchange, Fetched, GithubLogin, HopRequest, HopResponse, LoginFlow, LoginStep,
     MAX_HOP_REPLY_BYTES,
 };
 use zeroize::Zeroizing;
@@ -242,49 +242,15 @@ struct Over<'c, 'h> {
     base: &'c mut u32,
 }
 
-/// `url` as the need's target (scheme and authority) and the request target (path and query).
-fn split(url: &str) -> Option<(&str, String)> {
-    let host_at = url.find("://")? + 3;
-    let path_at = url[host_at..]
-        .find(['/', '?'])
-        .map_or(url.len(), |i| host_at + i);
-    let (origin, path) = url.split_at(path_at);
-    let path = match path.as_bytes().first() {
-        None => "/".to_string(),
-        Some(b'?') => format!("/{path}"),
-        Some(_) => path.to_string(),
-    };
-    Some((origin, path))
-}
-
 impl Exchange for Over<'_, '_> {
     fn exchange(&mut self, request: &HopRequest) -> Fetched {
-        let Some((origin, target)) = split(&request.target) else {
-            tracing::warn!(
-                module = "github",
-                "github login: a hop URL has no scheme and authority to split"
-            );
+        let Some((origin, _)) = split(&request.target) else {
             return Fetched::Unreachable;
         };
         if self.wire.is_none() {
-            let sent = Wire::request(Request {
-                method: request.method.clone().into_bytes(),
-                target: target.into_bytes(),
-                fields: request
-                    .fields
-                    .iter()
-                    .map(|(n, v)| (n.clone().into_bytes(), v.as_bytes().to_vec()))
-                    .collect(),
-                body: request.body.to_vec(),
-                timeout_ms: request.timeout_ms,
-            })
-            .map(|w| w.reply_limit(MAX_HOP_REPLY_BYTES));
-            match sent {
-                Ok(w) => *self.wire = Some(w),
-                Err(e) => {
-                    tracing::warn!(module = "github", error = ?e, "github login: the hop request was refused");
-                    return Fetched::Unreachable;
-                }
+            match request.wire(MAX_HOP_REPLY_BYTES) {
+                Some(w) => *self.wire = Some(w),
+                None => return Fetched::Unreachable,
             }
         }
         let Some(wire) = self.wire.as_mut() else {
@@ -296,10 +262,14 @@ impl Exchange for Over<'_, '_> {
                 *self.wire = None;
                 *self.base = self.c.issued();
                 match answer {
-                    Ok(reply) => Fetched::Ready(HopResponse {
-                        status: reply.status,
-                        body: Zeroizing::new(reply.body),
-                    }),
+                    Ok(reply) => {
+                        // The whole reply wipes when it goes; its body moves on, uncopied.
+                        let mut reply = Zeroizing::new(reply);
+                        Fetched::Ready(HopResponse {
+                            status: reply.status,
+                            body: Zeroizing::new(std::mem::take(&mut reply.body)),
+                        })
+                    }
                     // A reply past the cap is refused by the exchange (`REPLY_OVER_BOUND`).
                     Err(e) => {
                         tracing::warn!(module = "github", error = ?e, "github login: the hop exchange failed");

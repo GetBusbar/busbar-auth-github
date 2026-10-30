@@ -20,5 +20,8 @@ zeroize = { workspace = true }
 tracing = { workspace = true }
 
 [dev-dependencies]
+# The chip in this crate's own tests (`abi::sdk::test_support::chip`): a request's sealed head and
+# form body read back as the wire carries them. Dev-only (`test-seal`), never in a shipped image.
+busbar-contract = { workspace = true, features = ["test-seal"] }
 # The test kit's in-memory log double (`busbar_test_kit::warn_capture::WarnCapture`).
 busbar-test-kit = { workspace = true }

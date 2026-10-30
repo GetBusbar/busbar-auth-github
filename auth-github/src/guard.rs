@@ -13,7 +13,6 @@ use busbar_contract::net::{
 };
 use serde_json::Value;
 use std::collections::HashSet;
-use zeroize::Zeroizing;
 
 /// A hop the guard refuses: no request is built, and nothing (the secret least of all) is sent.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -83,12 +82,9 @@ pub fn vet_hop_url(url: &str, allowed: &HashSet<String>) -> Result<(), Refused> 
 }
 
 /// Sanitize a hop header, answering the header as the http stack would write it: the name
-/// lowercased (`HeaderName::from_bytes`), the value unchanged (`HeaderValue::from_str`) and wiped
-/// on drop (an `authorization` value is the bearer).
-pub fn sanitize_hop_header(
-    name: &str,
-    value: &str,
-) -> Result<(String, Zeroizing<String>), Refused> {
+/// lowercased (`HeaderName::from_bytes`), the value unchanged (`HeaderValue::from_str`). A hop's
+/// headers are public: the bearer is the chip's ([`crate::login::HopRequest::bearer`]).
+pub fn sanitize_hop_header(name: &str, value: &str) -> Result<(String, String), Refused> {
     // Only the header NAME is ever logged (as `?`, so CR/LF cannot forge a line): never the value.
     let refuse = |why: &str| {
         tracing::warn!(module = "github", header = ?name, "github login: hop refused, {why}");
@@ -107,7 +103,7 @@ pub fn sanitize_hop_header(
     if !value.bytes().all(|b| (b >= 32 && b != 127) || b == b'\t') {
         return refuse("a header value has a control byte");
     }
-    Ok((name.to_ascii_lowercase(), Zeroizing::new(value.to_string())))
+    Ok((name.to_ascii_lowercase(), value.to_string()))
 }
 
 /// An RFC 7230 `tchar` (what `http::HeaderName` accepts).

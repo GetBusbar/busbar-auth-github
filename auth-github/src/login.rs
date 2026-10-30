@@ -30,7 +30,6 @@
 //! [`LoginFlow`] per ticket and each [`Exchange`] one framed `exchange()` over the plugin's need.
 
 use crate::guard::{collect_allowed_hosts, sanitize_hop_header, vet_hop_url, Refused};
-use crate::held::Held;
 use crate::{
     build_github_authorize_url, build_orgs_get, build_principal, build_token_exchange,
     build_userinfo_get, is_json_array, parse_access_token, parse_org_groups, parse_user, GhUser,
@@ -39,7 +38,9 @@ use crate::{
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
 use busbar_contract::abi::sdk::auth_kit::json_error;
-use busbar_contract::auth::{CompleteLogin, LoginHop, LoginHttpResponse, LoginOutcome, Principal};
+use busbar_contract::abi::sdk::cred::{Cred, FormBody};
+use busbar_contract::abi::sdk::exchange::{Exchange as Wire, Request};
+use busbar_contract::auth::{LoginHop, LoginOutcome, Principal};
 use serde_json::Value;
 use std::collections::HashSet;
 use std::fmt;
@@ -56,26 +57,29 @@ pub const MAX_HOPS: usize = 6;
 /// endpoint's answer. A GitHub token response, `/user` or a 100-entry `/user/orgs` is a few KiB.
 pub const MAX_HOP_REPLY_BYTES: usize = 1024 * 1024;
 
-/// One hop, rendered as it goes on the wire: method, target, header fields in order
-/// (lowercase names), the form-encoded body, the timeout.
+/// One hop, rendered as it goes on the wire: method, target, the public header fields in order
+/// (lowercase names), the bearer (the chip's), the form body (its secret the chip's), the timeout.
 #[derive(Clone, PartialEq, Eq)]
 pub struct HopRequest {
     /// `GET` or `POST`.
     pub method: String,
     /// The absolute URL.
     pub target: String,
-    /// The header fields, in order. The values are wiped on drop: `authorization` carries the
-    /// bearer.
-    pub fields: Vec<(String, Zeroizing<String>)>,
-    /// The `application/x-www-form-urlencoded` body (empty for a GET), wiped on drop: the token
-    /// exchange's carries the client secret, the code and the verifier.
-    pub body: Zeroizing<Vec<u8>>,
+    /// The public header fields, in order.
+    pub fields: Vec<(String, String)>,
+    /// The access token an authenticated hop presents: sealed in as `authorization: Bearer` right
+    /// after `content-type`, where 1.5.5's http stack wrote it.
+    pub bearer: Option<Cred>,
+    /// The `application/x-www-form-urlencoded` body (empty for a GET). The token exchange's
+    /// carries the client secret sealed; its public values (the code, the verifier) are wiped
+    /// with it.
+    pub body: FormBody,
     /// The hop's timeout.
     pub timeout_ms: u64,
 }
 
 impl fmt::Debug for HopRequest {
-    // The body carries the client secret and the fields a bearer: neither is ever formatted.
+    // The body's secret and the bearer are the chip's: only names and presence are formatted.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("HopRequest")
             .field("method", &self.method)
@@ -84,8 +88,65 @@ impl fmt::Debug for HopRequest {
                 "fields",
                 &self.fields.iter().map(|(n, _)| n).collect::<Vec<_>>(),
             )
-            .field("body_len", &self.body.len())
+            .field("bearer", &self.bearer.is_some())
+            .field("body", &self.body)
             .finish()
+    }
+}
+
+/// `url` as the need's target (scheme and authority) and the request target (path and query).
+pub(crate) fn split(url: &str) -> Option<(&str, String)> {
+    let host_at = url.find("://")? + 3;
+    let path_at = url[host_at..]
+        .find(['/', '?'])
+        .map_or(url.len(), |i| host_at + i);
+    let (origin, path) = url.split_at(path_at);
+    let path = match path.as_bytes().first() {
+        None => "/".to_string(),
+        Some(b'?') => format!("/{path}"),
+        Some(_) => path.to_string(),
+    };
+    Some((origin, path))
+}
+
+impl HopRequest {
+    /// The SDK exchange that sends this hop: the public fields framed as they are, the bearer
+    /// sealed in as `authorization` after `content-type`, the form encoded by the SDK into the body
+    /// it sends, the reply bounded by `reply_limit`. `None`: the URL has no scheme and authority,
+    /// the form could not be encoded, or the exchange refused the request.
+    #[must_use]
+    pub fn wire(&self, reply_limit: usize) -> Option<Wire> {
+        let Some((_, target)) = split(&self.target) else {
+            tracing::warn!(
+                module = "github",
+                "github login: a hop URL has no scheme and authority to split"
+            );
+            return None;
+        };
+        let body = self.body.encoded().ok()?;
+        let sealed = self
+            .bearer
+            .iter()
+            .map(|b| (1, b"authorization".to_vec(), b.bearer()))
+            .collect();
+        let request = Request {
+            method: self.method.clone().into_bytes(),
+            target: target.into_bytes(),
+            fields: self
+                .fields
+                .iter()
+                .map(|(n, v)| (n.clone().into_bytes(), v.clone().into_bytes()))
+                .collect(),
+            body: Vec::new(),
+            timeout_ms: self.timeout_ms,
+        };
+        match Wire::request_with(request, sealed, Some(body)) {
+            Ok(w) => Some(w.reply_limit(reply_limit)),
+            Err(e) => {
+                tracing::warn!(module = "github", error = ?e, "github login: the hop request was refused");
+                None
+            }
+        }
     }
 }
 
@@ -144,21 +205,32 @@ pub enum LoginStep {
 /// The state kept per flow between hops, owned by the flow.
 #[derive(Default)]
 struct FlowState {
-    access_token: Option<Held<String>>,
+    access_token: Option<Cred>,
     user: Option<GhUser>,
+}
+
+/// The callback's inputs and the last hop answer the step machine reads, every credential among
+/// them wiped on drop.
+#[derive(Default)]
+struct Callback {
+    code: Option<Zeroizing<String>>,
+    redirect_uri: Option<String>,
+    code_verifier: Option<Zeroizing<String>>,
+    /// The last answer: its status and body (the token response carries the access token).
+    answer: Option<(u16, Zeroizing<String>)>,
 }
 
 /// One login in flight: the callback's inputs, the step machine's state, the hop parked on a
 /// pending exchange, and the answer once reached (a re-call is served from it, never re-run: an
 /// authorization code redeems once).
 pub struct LoginFlow {
-    req: CompleteLogin,
+    req: Callback,
     state: FlowState,
     turns: usize,
     inflight: Option<HopRequest>,
     done: Option<LoginStep>,
     /// The nonce the kernel minted at begin (`CompleteLoginIn.nonce`), bound to any `id_token`.
-    nonce: Option<Held<String>>,
+    nonce: Option<Zeroizing<String>>,
 }
 
 impl fmt::Debug for LoginFlow {
@@ -175,7 +247,7 @@ impl fmt::Debug for LoginFlow {
 /// The GitHub login, holding its own client secret.
 pub struct GithubLogin {
     cfg: GitHubConfig,
-    client_secret: Option<Held<String>>,
+    client_secret: Option<Cred>,
     allowed_hosts: HashSet<String>,
 }
 
@@ -221,11 +293,13 @@ impl GithubLogin {
                 ));
             }
         }
+        // The secret goes only to the token endpoint: an `https` one requires a secured connection.
+        let client_secret = client_secret.filter(|s| !s.is_empty()).map(|s| {
+            Cred::captured(Zeroizing::new(s.as_bytes().to_vec())).secure_for(&cfg.token_base)
+        });
         Ok(Self {
             cfg,
-            client_secret: client_secret
-                .filter(|s| !s.is_empty())
-                .map(|s| Held::new(s.to_string())),
+            client_secret,
             allowed_hosts: collect_allowed_hosts(&raw),
         })
     }
@@ -258,17 +332,17 @@ impl GithubLogin {
         nonce: Option<&str>,
     ) -> LoginFlow {
         LoginFlow {
-            req: CompleteLogin {
-                code: code.map(str::to_string),
+            req: Callback {
+                code: code.map(|c| Zeroizing::new(c.to_string())),
                 redirect_uri: redirect_uri.map(str::to_string),
-                code_verifier: code_verifier.map(str::to_string),
-                ..Default::default()
+                code_verifier: code_verifier.map(|v| Zeroizing::new(v.to_string())),
+                answer: None,
             },
             state: FlowState::default(),
             turns: 0,
             inflight: None,
             done: None,
-            nonce: nonce.map(|n| Held::new(n.to_string())),
+            nonce: nonce.map(|n| Zeroizing::new(n.to_string())),
         }
     }
 
@@ -295,7 +369,7 @@ impl GithubLogin {
                         // The step has already said why.
                         LoginOutcome::Outage => return finish(flow, LoginStep::Outage),
                         LoginOutcome::Exchange(mut hop) => {
-                            let rendered = self.render(&hop);
+                            let rendered = self.render(&hop, flow.state.access_token.as_ref());
                             wipe_hop(&mut hop);
                             match rendered {
                                 Ok(r) => r,
@@ -316,7 +390,7 @@ impl GithubLogin {
                     return LoginStep::Pending;
                 }
                 Fetched::Unreachable => return finish(flow, LoginStep::Outage),
-                Fetched::Ready(resp) => {
+                Fetched::Ready(mut resp) => {
                     if resp.body.len() > MAX_HOP_REPLY_BYTES {
                         tracing::warn!(
                             module = "github",
@@ -325,22 +399,15 @@ impl GithubLogin {
                         );
                         return finish(flow, LoginStep::Outage);
                     }
-                    let body = String::from_utf8_lossy(&resp.body).into_owned();
+                    let body = text_of(std::mem::take(&mut *resp.body));
                     // NONCE BINDING: a hop body carrying an
                     // `id_token` must carry the nonce minted at begin, before any identity is
                     // trusted. GitHub issues no id_token, so this never fires against github.com.
-                    if !id_token_nonce_binds(
-                        &body,
-                        flow.nonce.as_ref().map(|n| n.reveal().as_str()),
-                    ) {
+                    if !id_token_nonce_binds(&body, flow.nonce.as_ref().map(|n| n.as_str())) {
                         tracing::warn!(module = "github", "github login: a hop body's id_token is not bound to the nonce minted at begin");
                         return finish(flow, LoginStep::SecurityCheckFailed);
                     }
-                    wipe_answer(&mut flow.req);
-                    flow.req.token_response = Some(LoginHttpResponse {
-                        status: resp.status,
-                        body,
-                    });
+                    flow.req.answer = Some((resp.status, body));
                     if flow.turns >= MAX_HOPS {
                         tracing::warn!(
                             module = "github",
@@ -356,7 +423,7 @@ impl GithubLogin {
     /// The `complete_login` step machine, over the flow's own state.
     fn step(&self, flow: &mut LoginFlow) -> LoginOutcome {
         let req = &flow.req;
-        let Some(resp) = &req.token_response else {
+        let Some((status, body)) = &req.answer else {
             let (Some(code), Some(redirect_uri), Some(code_verifier)) = (
                 req.code.as_deref(),
                 req.redirect_uri.as_deref(),
@@ -374,9 +441,10 @@ impl GithubLogin {
         };
         let correlated = req
             .code_verifier
-            .clone()
-            .or_else(|| req.code.clone())
+            .as_deref()
+            .or(req.code.as_deref())
             .is_some_and(|s| !s.is_empty());
+        let (status, body) = (*status, body.as_str());
         if !correlated {
             tracing::info!(
                 module = "github",
@@ -387,37 +455,37 @@ impl GithubLogin {
         // An identity provider that could not answer (5xx) or asks to be retried later (429) is
         // an outage, never a declined credential: the host answers 503, retryable, and
         // the cause is logged here.
-        if resp.status >= 500 || resp.status == 429 {
+        if status >= 500 || status == 429 {
             let hop = hop_name(&flow.state);
             tracing::warn!(
                 module = "github",
-                status = resp.status,
+                status = status,
                 hop,
                 "github login: the identity provider is unavailable"
             );
             flow.state = FlowState::default();
             return LoginOutcome::Outage;
         }
-        if !(200..300).contains(&resp.status) {
+        if !(200..300).contains(&status) {
             let hop = hop_name(&flow.state);
             tracing::info!(
                 module = "github",
-                status = resp.status,
+                status = status,
                 hop,
                 "github login: declined, non-2xx answer"
             );
             flow.state = FlowState::default();
             return LoginOutcome::Reject;
         }
-        if let Some(token) = parse_access_token(&resp.body) {
-            let hop = build_userinfo_get(&self.cfg, &token);
+        if let Some(token) = parse_access_token(body) {
+            let hop = build_userinfo_get(&self.cfg);
             flow.state = FlowState {
-                access_token: Some(Held::new(token)),
+                access_token: Some(token.secure_for(&self.cfg.api_base)),
                 user: None,
             };
             return LoginOutcome::Exchange(hop);
         }
-        if is_json_array(&resp.body) {
+        if is_json_array(body) {
             let state = std::mem::take(&mut flow.state);
             let Some(user) = state.user else {
                 tracing::info!(
@@ -426,7 +494,7 @@ impl GithubLogin {
                 );
                 return LoginOutcome::Reject;
             };
-            let Some(groups) = parse_org_groups(&resp.body) else {
+            let Some(groups) = parse_org_groups(body) else {
                 tracing::info!(
                     module = "github",
                     "github login: declined, /user/orgs answered a malformed list"
@@ -435,10 +503,10 @@ impl GithubLogin {
             };
             return LoginOutcome::Identify(build_principal(&user, groups));
         }
-        let Some(user) = parse_user(&resp.body) else {
+        let Some(user) = parse_user(body) else {
             if flow.state.access_token.is_none() {
                 // The token hop: GitHub answered no access_token.
-                match github_error(&resp.body) {
+                match github_error(body) {
                     None => tracing::info!(
                         module = "github",
                         "github login: declined, the token endpoint answered no access_token"
@@ -467,44 +535,52 @@ impl GithubLogin {
             flow.state = FlowState::default();
             return LoginOutcome::Identify(build_principal(&user, Vec::new()));
         }
-        let Some(token) = &flow.state.access_token else {
+        if flow.state.access_token.is_none() {
             tracing::info!(
                 module = "github",
                 "github login: declined, no access token held at /user"
             );
             return LoginOutcome::Reject;
-        };
-        let hop = build_orgs_get(&self.cfg, token.reveal());
+        }
+        let hop = build_orgs_get(&self.cfg);
         flow.state.user = Some(user);
         LoginOutcome::Exchange(hop)
     }
 
-    /// Render a hop up to the send: vet the URL, inject the secret into the named form
-    /// field (or drop the placeholder when there is none), form-encode, and lay out the fields as the
-    /// http stack wrote them (`content-type` first, the hop's sanitised headers, then the default
-    /// `accept: */*` when the hop set none).
+    /// Render a hop up to the send: vet the URL, seal the client secret into the named form
+    /// field (or drop the placeholder when there is none), and lay out the fields as the http
+    /// stack wrote them (`content-type` first, the hop's sanitised headers, then the default
+    /// `accept: */*` when the hop set none). An authenticated hop carries `bearer`, which the chip
+    /// writes as `authorization` after `content-type`.
     ///
-    /// The form is laid out as borrows of the hop's values and the held secret, so the secret is
-    /// never copied before the one wiped body it is encoded into.
-    fn render(&self, hop: &LoginHop) -> Result<HopRequest, Refused> {
+    /// The plugin never holds the secret's or the bearer's bytes here: the body is a [`FormBody`]
+    /// the SDK encodes at the wire.
+    fn render(&self, hop: &LoginHop, bearer: Option<&Cred>) -> Result<HopRequest, Refused> {
         vet_hop_url(&hop.url, &self.allowed_hosts)?;
-        let mut form: Vec<(&str, &str)> = hop
-            .form
-            .iter()
-            .map(|(k, v)| (k.as_str(), v.as_str()))
-            .collect();
-        if let Some(field) = hop.secret_form_field.as_deref() {
-            match &self.client_secret {
-                Some(secret) => {
-                    let secret = secret.reveal().as_str();
-                    if let Some(slot) = form.iter_mut().find(|(k, _)| *k == field) {
-                        slot.1 = secret;
-                    } else {
-                        form.push((field, secret));
-                    }
+        // A token that would split the request fails the hop closed (an outage).
+        if bearer.is_some_and(|b| !b.is_field_value()) {
+            tracing::warn!(
+                module = "github",
+                header = "authorization",
+                "github login: hop refused, a header value has a control byte"
+            );
+            return Err(Refused);
+        }
+        let field = hop.secret_form_field.as_deref();
+        let mut body = FormBody::new();
+        let mut sealed = false;
+        for (k, v) in &hop.form {
+            if Some(k.as_str()) == field {
+                if let Some(secret) = &self.client_secret {
+                    body = body.sealed(k, secret);
+                    sealed = true;
                 }
-                None => form.retain(|(k, _)| *k != field),
+            } else {
+                body = body.public(k, v);
             }
+        }
+        if let (Some(field), Some(secret), false) = (field, &self.client_secret, sealed) {
+            body = body.sealed(field, secret);
         }
         let method = match hop.method.as_str() {
             m if !m.is_empty() && m.bytes().all(|b| b.is_ascii_alphabetic()) => m.to_string(),
@@ -512,23 +588,36 @@ impl GithubLogin {
         };
         let mut fields = vec![(
             "content-type".to_string(),
-            Zeroizing::new("application/x-www-form-urlencoded".to_string()),
+            "application/x-www-form-urlencoded".to_string(),
         )];
         for (name, value) in &hop.headers {
             fields.push(sanitize_hop_header(name, value)?);
         }
         if !fields.iter().any(|(n, _)| n == "accept") {
-            fields.push(("accept".to_string(), Zeroizing::new("*/*".to_string())));
+            fields.push(("accept".to_string(), "*/*".to_string()));
         }
-        let mut body = form_encode(&form);
         Ok(HopRequest {
             method,
             target: hop.url.clone(),
             fields,
-            // Moves the encoded buffer, no copy.
-            body: Zeroizing::new(std::mem::take(&mut *body).into_bytes()),
+            bearer: bearer.cloned(),
+            body,
             timeout_ms: HOP_TIMEOUT_MS,
         })
+    }
+}
+
+/// A reply body as text, moved, never copied: valid UTF-8 is the buffer itself; otherwise the
+/// lossy text, the bytes it was read from wiped.
+fn text_of(bytes: Vec<u8>) -> Zeroizing<String> {
+    match String::from_utf8(bytes) {
+        Ok(text) => Zeroizing::new(text),
+        Err(e) => {
+            let mut bytes = e.into_bytes();
+            let text = Zeroizing::new(String::from_utf8_lossy(&bytes).into_owned());
+            bytes.zeroize();
+            text
+        }
     }
 }
 
@@ -557,21 +646,13 @@ fn github_error(body: &str) -> Option<String> {
 fn finish(flow: &mut LoginFlow, step: LoginStep) -> LoginStep {
     flow.inflight = None;
     flow.state = FlowState::default();
-    wipe_answer(&mut flow.req);
+    flow.req = Callback::default();
     flow.done = Some(step.clone());
     step
 }
 
-/// Wipe and clear the last hop answer the step machine read (the token response carries the
-/// access token): `LoginHttpResponse.body` is the contract's plain `String`, so it is wiped here.
-fn wipe_answer(req: &mut CompleteLogin) {
-    if let Some(mut answer) = req.token_response.take() {
-        answer.body.zeroize();
-    }
-}
-
 /// Wipe the plugin-owned values of a described hop once it is rendered: `LoginHop.form` carries
-/// the code and the verifier and `LoginHop.headers` the bearer, in the contract's plain `String`s.
+/// the code and the verifier, in the contract's plain `String`s.
 fn wipe_hop(hop: &mut LoginHop) {
     for (_, v) in hop.form.iter_mut().chain(hop.headers.iter_mut()) {
         v.zeroize();
@@ -582,78 +663,35 @@ fn wipe_hop(hop: &mut LoginHop) {
 /// with no `id_token` binds trivially; one with an `id_token` binds only when its payload's `nonce`
 /// claim (base64url, no signature check: that is the IdP module's job) equals `minted`.
 fn id_token_nonce_binds(body: &str, minted: Option<&str>) -> bool {
-    let Some(id_token) = serde_json::from_str::<Value>(body).ok().and_then(|v| {
-        v.get("id_token")
-            .and_then(Value::as_str)
-            .map(str::to_string)
-    }) else {
+    /// Only the `id_token` member is read: the rest of the body (an access token) is skipped,
+    /// never copied.
+    #[derive(serde::Deserialize)]
+    struct IdToken {
+        id_token: Option<String>,
+    }
+    let Some(id_token) = serde_json::from_str::<IdToken>(body)
+        .ok()
+        .and_then(|t| t.id_token)
+        .map(Zeroizing::new)
+    else {
         return true;
     };
     let claimed = id_token
         .split('.')
         .nth(1)
         .and_then(|seg| URL_SAFE_NO_PAD.decode(seg).ok())
+        .map(Zeroizing::new)
         .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
         .and_then(|claims| {
             claims
                 .get("nonce")
                 .and_then(Value::as_str)
-                .map(str::to_string)
+                .map(|n| Zeroizing::new(n.to_string()))
         });
     match (claimed, minted) {
-        (Some(n), Some(m)) => busbar_contract::constant_time_eq(&n, m),
+        (Some(n), Some(m)) => busbar_contract::constant_time_eq(n.as_str(), m),
         _ => false,
     }
-}
-
-/// Whether `b` is written as itself in a form value (ASCII alphanumerics and `*-._`).
-const fn form_kept(b: u8) -> bool {
-    b.is_ascii_alphanumeric() || matches!(b, b'*' | b'-' | b'.' | b'_')
-}
-
-/// How many bytes `v` takes form-encoded.
-fn form_len(v: &str) -> usize {
-    v.bytes()
-        .map(|b| if form_kept(b) || b == b' ' { 1 } else { 3 })
-        .sum()
-}
-
-/// `application/x-www-form-urlencoded`, as `serde_urlencoded` encodes a form:
-/// ASCII alphanumerics and `*-._` literal, space as `+`, every other byte `%XX` uppercase. Built
-/// in ONE buffer sized to the exact length first (busbar-auth-oauth's `form`), so no growth frees a
-/// partial copy of the secret the form carries, and held wiped on drop.
-#[must_use]
-pub fn form_encode(pairs: &[(&str, &str)]) -> Zeroizing<String> {
-    const HEX: &[u8; 16] = b"0123456789ABCDEF";
-    let len = pairs
-        .iter()
-        .map(|(k, v)| form_len(k) + 1 + form_len(v))
-        .sum::<usize>()
-        + pairs.len().saturating_sub(1);
-    let mut out = Zeroizing::new(String::with_capacity(len));
-    for (i, (k, v)) in pairs.iter().enumerate() {
-        if i > 0 {
-            out.push('&');
-        }
-        for (j, part) in [k, v].into_iter().enumerate() {
-            if j == 1 {
-                out.push('=');
-            }
-            for b in part.bytes() {
-                if form_kept(b) {
-                    out.push(char::from(b));
-                } else if b == b' ' {
-                    out.push('+');
-                } else {
-                    out.push('%');
-                    out.push(char::from(HEX[usize::from(b >> 4)]));
-                    out.push(char::from(HEX[usize::from(b & 0x0f)]));
-                }
-            }
-        }
-    }
-    debug_assert_eq!(out.len(), len);
-    out
 }
 
 #[cfg(test)]

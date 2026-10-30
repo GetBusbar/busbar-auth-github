@@ -34,12 +34,13 @@
 
 pub mod door;
 pub mod guard;
-mod held;
 pub mod login;
 
+use busbar_contract::abi::sdk::cred::{json_reply, Cred};
 use busbar_contract::auth::{LoginHop, Principal};
 use serde::Deserialize;
 use serde_json::Value;
+use zeroize::Zeroizing;
 
 /// The default OAuth scopes requested: `read:org` (to enumerate the caller's org memberships → groups)
 /// and `read:user` (the profile `/user` read). Operators can override via `scopes`, and `begin_login`
@@ -141,8 +142,8 @@ fn orgs_endpoint(cfg: &GitHubConfig) -> String {
 }
 
 /// Percent-encode `s` for a URL QUERY-component value (RFC 3986 unreserved kept literal, everything
-/// else `%`-escaped). Used only for the authorize URL; the token-exchange form is encoded by
-/// [`login::form_encode`].
+/// else `%`-escaped). Used only for the authorize URL; the token-exchange form is encoded by the
+/// SDK's `FormBody`.
 fn pct(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for &b in s.as_bytes() {
@@ -225,16 +226,11 @@ pub fn build_token_exchange(
     }
 }
 
-/// The request headers of an authenticated GitHub REST hop: `Authorization: Bearer <token>`, the
-/// mandatory `User-Agent` (GitHub rejects a UA-less request), and the `Accept` GitHub recommends.
-/// The values are the contract's plain `String`s ([`LoginHop::headers`]); [`login`] sanitises them
-/// into the wiped request and wipes these once rendered.
-pub fn userinfo_headers(access_token: &str) -> Vec<(String, String)> {
+/// The public request headers of an authenticated GitHub REST hop: the mandatory `User-Agent`
+/// (GitHub rejects a UA-less request) and the `Accept` GitHub recommends. Its `Authorization:
+/// Bearer <token>` is the chip's, sealed in ahead of them when the hop is rendered.
+pub fn userinfo_headers() -> Vec<(String, String)> {
     vec![
-        (
-            "Authorization".to_string(),
-            format!("Bearer {access_token}"),
-        ),
         ("User-Agent".to_string(), "busbar".to_string()),
         (
             "Accept".to_string(),
@@ -243,27 +239,26 @@ pub fn userinfo_headers(access_token: &str) -> Vec<(String, String)> {
     ]
 }
 
-/// Build the `/user` profile GET hop (no secret), with the `Authorization: Bearer <access_token>` +
-/// `User-Agent` + `Accept` headers ([`userinfo_headers`]) attached via the `headers` field.
-pub fn build_userinfo_get(cfg: &GitHubConfig, access_token: &str) -> LoginHop {
+/// Build the `/user` profile GET hop, with the `User-Agent` + `Accept` headers
+/// ([`userinfo_headers`]); the bearer is sealed in when it is rendered.
+pub fn build_userinfo_get(cfg: &GitHubConfig) -> LoginHop {
     LoginHop {
         method: "GET".to_string(),
         url: user_endpoint(cfg),
         form: Vec::new(),
         secret_form_field: None,
-        headers: userinfo_headers(access_token),
+        headers: userinfo_headers(),
     }
 }
 
-/// Build the `/user/orgs` GET hop (no secret), with the same authenticated headers as
-/// [`build_userinfo_get`].
-pub fn build_orgs_get(cfg: &GitHubConfig, access_token: &str) -> LoginHop {
+/// Build the `/user/orgs` GET hop, with the same headers as [`build_userinfo_get`].
+pub fn build_orgs_get(cfg: &GitHubConfig) -> LoginHop {
     LoginHop {
         method: "GET".to_string(),
         url: orgs_endpoint(cfg),
         form: Vec::new(),
         secret_form_field: None,
-        headers: userinfo_headers(access_token),
+        headers: userinfo_headers(),
     }
 }
 
@@ -283,28 +278,31 @@ pub struct GhUser {
 /// Parse the access token out of a token-endpoint response body, accepting BOTH the JSON shape
 /// (`{"access_token": "..."}`) and the `application/x-www-form-urlencoded` shape
 /// (`access_token=...&scope=...&token_type=bearer`) GitHub returns without an `Accept: application/json`
-/// header. Returns `None` when absent — which covers GitHub's fail-CLOSED case where the token endpoint
+/// header. The token is captured into the chip's [`Cred`] as it is read (the plugin never holds it
+/// as text). Returns `None` when absent — which covers GitHub's fail-CLOSED case where the token endpoint
 /// answers `HTTP 200` with an `{"error": "..."}` body (a bad/expired code), so a missing token is
 /// treated as a rejection, never a success with an empty token. A JSON array (the `/user/orgs` shape)
 /// is never a token response, so its text can never reach the form branch.
-pub fn parse_access_token(body: &str) -> Option<String> {
+pub fn parse_access_token(body: &str) -> Option<Cred> {
+    /// Only `access_token` is read, captured as the parser meets it.
+    #[derive(Deserialize)]
+    struct TokenReply {
+        access_token: Option<Cred>,
+    }
     let trimmed = body.trim();
     if trimmed.starts_with('{') || trimmed.starts_with('[') {
-        let v: Value = serde_json::from_str(trimmed).ok()?;
-        return v
-            .get("access_token")
-            .and_then(Value::as_str)
-            .filter(|s| !s.is_empty())
-            .map(str::to_string);
+        return json_reply::<TokenReply>(trimmed.as_bytes())
+            .ok()?
+            .access_token
+            .filter(|t| !t.is_empty());
     }
-    // form-urlencoded: split on '&', find access_token=...
     for pair in trimmed.split('&') {
         let mut it = pair.splitn(2, '=');
         if it.next() == Some("access_token") {
             if let Some(val) = it.next() {
                 let val = form_decode(val);
                 if !val.is_empty() {
-                    return Some(val);
+                    return Some(Cred::captured(val));
                 }
             }
         }
@@ -312,11 +310,12 @@ pub fn parse_access_token(body: &str) -> Option<String> {
     None
 }
 
-/// Minimal `application/x-www-form-urlencoded` value decode (`+` → space, `%XX` → byte). Sufficient for
-/// a GitHub access token / scope value; not a general-purpose decoder.
-fn form_decode(s: &str) -> String {
+/// Minimal `application/x-www-form-urlencoded` value decode (`+` → space, `%XX` → byte), into a
+/// buffer wiped on drop, sized once so no growth leaves a copy behind. Sufficient for a GitHub
+/// access token / scope value; not a general-purpose decoder.
+fn form_decode(s: &str) -> Zeroizing<Vec<u8>> {
     let bytes = s.as_bytes();
-    let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
+    let mut out = Zeroizing::new(Vec::with_capacity(bytes.len()));
     let mut i = 0;
     while i < bytes.len() {
         match bytes[i] {
@@ -344,7 +343,7 @@ fn form_decode(s: &str) -> String {
             }
         }
     }
-    String::from_utf8_lossy(&out).into_owned()
+    out
 }
 
 /// Parse a GitHub `/user` response body into a [`GhUser`]. Fail-CLOSED: a missing/empty `login`, a
