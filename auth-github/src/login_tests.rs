@@ -393,6 +393,116 @@ fn red_g3_a_malformed_rest_answer_is_an_outage() {
     }
 }
 
+/// The URL of org page `n`.
+fn orgs_page(n: usize) -> String {
+    format!("https://api.github.com/user/orgs?per_page=100&page={n}")
+}
+
+/// An org page's reply fields: a `link` to page `next` (and the last), or none.
+fn link_to(next: Option<&str>) -> ReplyFields {
+    ReplyFields {
+        link: next.map(|n| {
+            format!(r#"<{n}>; rel="next", <https://api.github.com/user/orgs?per_page=100&page=99>; rel="last""#)
+        }),
+        ..ReplyFields::default()
+    }
+}
+
+/// RED G4: a user in more orgs than one page holds keeps every org: `/user/orgs` is followed by
+/// its `Link: rel="next"` to the end.
+#[test]
+fn red_g4_the_org_list_is_followed_past_page_one() {
+    let l = login();
+    let mut s = Script::happy()
+        .answer_with(
+            ORGS_URL,
+            200,
+            link_to(Some(&orgs_page(2))),
+            r#"[{"login":"acme"}]"#,
+        )
+        .answer_with(
+            &orgs_page(2),
+            200,
+            link_to(Some(&orgs_page(3))),
+            r#"[{"login":"widgets"}]"#,
+        )
+        .answer_with(
+            &orgs_page(3),
+            200,
+            link_to(None),
+            r#"[{"login":"gadgets"}]"#,
+        );
+    let p = identity(run(&l, &mut s));
+    assert_eq!(
+        p.roles,
+        vec![
+            "github:id/1".to_string(),
+            "github:org/acme".to_string(),
+            "github:org/widgets".to_string(),
+            "github:org/gadgets".to_string(),
+        ]
+    );
+    let (p2, p3) = (orgs_page(2), orgs_page(3));
+    assert_eq!(
+        s.targets(),
+        vec![TOKEN_URL, USER_URL, ORGS_URL, p2.as_str(), p3.as_str()]
+    );
+    // Every page is authenticated with the same token.
+    for page in &s.issued[2..] {
+        assert!(plain(page)
+            .iter()
+            .any(|(k, v)| k == "authorization" && *v == format!("Bearer {TOKEN}")));
+    }
+}
+
+/// RED G4: the org list is read for at most 10 pages (1000 orgs); a next link left after the
+/// tenth is a WARN that the org groups are truncated, and the login identifies with what it read
+/// (fail-safe: fewer roles, never more).
+#[test]
+fn red_g4_the_org_list_stops_at_ten_pages_with_a_warn() {
+    use busbar_test_kit::warn_capture::WarnCapture;
+    let l = login();
+    let mut s = Script::happy().answer_with(
+        ORGS_URL,
+        200,
+        link_to(Some(&orgs_page(2))),
+        r#"[{"login":"o1"}]"#,
+    );
+    for n in 2..=12 {
+        s = s.answer_with(
+            &orgs_page(n),
+            200,
+            link_to(Some(&orgs_page(n + 1))),
+            &format!(r#"[{{"login":"o{n}"}}]"#),
+        );
+    }
+    let cap = WarnCapture::default();
+    let step = tracing::subscriber::with_default(cap.clone(), || run(&l, &mut s));
+    let p = identity(step);
+    assert_eq!(p.roles.len(), 1 + 10, "{:?}", p.roles);
+    assert_eq!(p.roles.last().map(String::as_str), Some("github:org/o10"));
+    assert_eq!(s.issued.len(), 2 + 10);
+    assert!(cap.contains("truncated"), "{:?}", cap.messages());
+}
+
+/// RED G4: a next link is followed only on the API's own origin (and through the hop guard): one
+/// to another host, or to plain http, is an outage and is never sent.
+#[test]
+fn red_g4_a_next_link_off_the_api_origin_is_never_followed() {
+    let l = login();
+    for next in [
+        "https://evil.example/user/orgs?page=2",
+        "http://api.github.com/user/orgs?page=2",
+        "https://github.com/user/orgs?page=2",
+    ] {
+        let mut s = Script::happy()
+            .answer_with(ORGS_URL, 200, link_to(Some(next)), r#"[{"login":"acme"}]"#)
+            .answer(next, 200, r#"[{"login":"injected"}]"#);
+        assert_eq!(run(&l, &mut s), OUTAGE, "{next}");
+        assert_eq!(s.targets(), vec![TOKEN_URL, USER_URL, ORGS_URL], "{next}");
+    }
+}
+
 #[test]
 fn fetch_orgs_false_identifies_after_user_with_two_hops() {
     let settings = SETTINGS.replace("\"client_id\"", "\"fetch_orgs\": false, \"client_id\"");
