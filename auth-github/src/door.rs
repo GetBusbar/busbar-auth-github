@@ -24,21 +24,22 @@ use std::time::Instant;
 
 use busbar_contract::abi::auth::{
     AuthTail, BeginLoginIn, BeginLoginOut, CompleteLoginIn, IdentifyOut, IdentityBuf,
-    BEGIN_AUTHORIZE, CANCEL_ABANDONED, CAP_LOGIN, IDENTITY_HAS_TTL, LOGIN_BAD_CREDENTIAL,
-    LOGIN_IDENTITY, LOGIN_KIND_REDIRECT, LOGIN_OUTAGE, LOGIN_SECURITY_CHECK_FAILED, SPAN_ABSENT,
+    BEGIN_AUTHORIZE, CANCEL_ABANDONED, CAP_LOGIN, LOGIN_BAD_CREDENTIAL, LOGIN_KIND_REDIRECT,
+    LOGIN_OUTAGE, LOGIN_SECURITY_CHECK_FAILED,
 };
 use busbar_contract::abi::host::conn::connector::{
     Need, DIRECTION_OUTBOUND, EGRESS_DEFAULT, KEEP_NAMED,
 };
-use busbar_contract::abi::mechanism::call::{AbiStr, Blob, Outcome, Span, BLOB_ABSENT};
+use busbar_contract::abi::mechanism::call::{AbiStr, Blob, Outcome};
 use busbar_contract::abi::mechanism::door::{Rewrite, Statement};
 use busbar_contract::abi::mechanism::ticket::Ticket;
 use busbar_contract::abi::sdk::auth_door::with_tail;
+use busbar_contract::abi::sdk::auth_kit::login_identity;
 use busbar_contract::abi::sdk::conn::Connector;
 use busbar_contract::abi::sdk::door::{abi_str, alias, statement, AbiIn, AbiOut};
 use busbar_contract::abi::sdk::exchange::{exchange, Exchange as Wire, Request};
 use busbar_contract::abi::sdk::life::{Held, Life, Refreshed, Refusal};
-use busbar_contract::abi::sdk::{HostBuf, Instance, Lent, Out, SafeSlot};
+use busbar_contract::abi::sdk::{Instance, Lent, Out, SafeSlot};
 use busbar_contract::auth::Principal;
 
 use crate::login::{
@@ -323,11 +324,6 @@ impl Exchange for Unarmed {
     }
 }
 
-const NO_SPAN: Span = Span {
-    offset: SPAN_ABSENT,
-    len: 0,
-};
-
 /// Write `p` into the host's identity buffer and answer READY, or answer the short FAILED (every
 /// `needed_*` at its full size), keeping `p` for the retry on `ticket`.
 fn identify(
@@ -337,51 +333,11 @@ fn identify(
     buf: Lent<'_, IdentityBuf>,
     out: &mut Out<'_, IdentifyOut>,
 ) -> Outcome {
-    let mut bytes: HostBuf<'_, u8> = buf.buf();
-    let mut groups: HostBuf<'_, Span> = buf.groups();
-    let need_bytes = p.id.len()
-        + p.name.as_ref().map_or(0, String::len)
-        + p.roles.iter().map(String::len).sum::<usize>();
-    if need_bytes > bytes.cap() || p.roles.len() > groups.cap() {
-        out.set(|o| &o.needed_bytes, need_bytes as u64);
-        out.set(
-            |o| &o.needed_groups,
-            u32::try_from(p.roles.len()).unwrap_or(u32::MAX),
-        );
-        let mut answered = g.answered();
-        keep(&mut answered, ANSWERED_MAX, Instant::now(), ticket, p);
-        return Outcome::Failed;
+    let outcome = login_identity(&p, buf, out);
+    if outcome == Outcome::Failed {
+        keep(&mut g.answered(), ANSWERED_MAX, Instant::now(), ticket, p);
     }
-    let mut span = |s: &str| -> Span {
-        let at = bytes.extend(s.as_bytes());
-        Span {
-            offset: u32::try_from(at).unwrap_or(u32::MAX),
-            len: u32::try_from(s.len()).unwrap_or(u32::MAX),
-        }
-    };
-    let subject = span(&p.id);
-    let name = p.name.as_deref().map_or(NO_SPAN, &mut span);
-    for role in &p.roles {
-        let s = span(role);
-        groups.push(s);
-    }
-    out.set(|o| &o.identity.subject, subject);
-    out.set(|o| &o.identity.key_id, NO_SPAN);
-    out.set(|o| &o.identity.key_name, NO_SPAN);
-    out.set(|o| &o.identity.user, NO_SPAN);
-    out.set(|o| &o.identity.provider, NO_SPAN);
-    out.set(|o| &o.identity.name, name);
-    out.set(|o| &o.identity.claims, NO_SPAN);
-    out.set(|o| &o.identity.claims_fmt, BLOB_ABSENT);
-    let (flags, ttl) = p.ttl_secs.map_or((0, 0), |t| (IDENTITY_HAS_TTL, t));
-    out.set(|o| &o.identity.flags, flags);
-    out.set(|o| &o.identity.ttl_secs, ttl);
-    out.set(
-        |o| &o.identity.groups_len,
-        u32::try_from(groups.written()).unwrap_or(u32::MAX),
-    );
-    out.set(|o| &o.verdict, LOGIN_IDENTITY);
-    Outcome::Ready
+    outcome
 }
 
 /// `complete_login`: the hop chain, run by the plugin over its need.

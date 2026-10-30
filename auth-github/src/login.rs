@@ -38,11 +38,15 @@ use crate::{
 };
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
+use busbar_contract::abi::sdk::auth_kit::json_error;
 use busbar_contract::auth::{CompleteLogin, LoginHop, LoginHttpResponse, LoginOutcome, Principal};
 use serde_json::Value;
 use std::collections::HashSet;
 use std::fmt;
 use zeroize::{Zeroize, Zeroizing};
+
+/// What a settings decoder error is about (`abi::sdk::auth_kit::json_error`'s lead).
+const SETTINGS: &str = "invalid github plugin config";
 
 /// The per-hop request timeout.
 pub const HOP_TIMEOUT_MS: u64 = 10_000;
@@ -201,8 +205,8 @@ impl GithubLogin {
         if settings.trim().is_empty() {
             return Err("github plugin requires config (client_id); none provided".to_string());
         }
-        let cfg: GitHubConfig = serde_json::from_str(settings).map_err(settings_err)?;
-        let raw: Value = serde_json::from_str(settings).map_err(settings_err)?;
+        let cfg: GitHubConfig = serde_json::from_str(settings).map_err(json_error(SETTINGS))?;
+        let raw: Value = serde_json::from_str(settings).map_err(json_error(SETTINGS))?;
         if cfg.ca_cert_pem.is_some() {
             return Err(
                 "github ca_cert_pem is not yet supported; omit it or use a system-trusted cert"
@@ -572,26 +576,6 @@ fn wipe_hop(hop: &mut LoginHop) {
     for (_, v) in hop.form.iter_mut().chain(hop.headers.iter_mut()) {
         v.zeroize();
     }
-}
-
-/// The text of a settings decoder error. `serde_json::Error`'s own `Display` quotes an offending
-/// VALUE (`invalid type: integer `12345678``), which may be a secret pasted into the wrong key, so
-/// it is kept only when it names a KEY (a missing or unknown field, spelled from the schema and the
-/// key); otherwise the class of failure and where (busbar-auth-oauth's `json_err` shape).
-fn settings_err(e: serde_json::Error) -> String {
-    const WHAT: &str = "invalid github plugin config";
-    let text = e.to_string();
-    if e.is_data() && (text.starts_with("missing field `") || text.starts_with("unknown field `")) {
-        return format!("{WHAT}: {text}");
-    }
-    let class = match e.classify() {
-        serde_json::error::Category::Io => "the input could not be read",
-        serde_json::error::Category::Syntax => "it is not well-formed JSON",
-        serde_json::error::Category::Data => "a field is missing or has the wrong type",
-        serde_json::error::Category::Eof => "it ends before the JSON does",
-    };
-    let (line, column) = (e.line(), e.column());
-    format!("{WHAT}: {class} (line {line}, column {column}; the decoder's text is withheld)")
 }
 
 /// The nonce binding (a constant-time compare): a body
