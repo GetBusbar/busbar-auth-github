@@ -20,6 +20,35 @@ fn sources(dir: &Path, out: &mut Vec<PathBuf>) {
     }
 }
 
+/// `line` up to its `//` comment, a `//` inside a string literal (`"https://x"`) being code.
+fn code_of(line: &str) -> &str {
+    let bytes = line.as_bytes();
+    let (mut in_string, mut i) = (false, 0);
+    while i < bytes.len() {
+        match bytes[i] {
+            b'\\' if in_string => i += 1,
+            b'"' => in_string = !in_string,
+            b'/' if !in_string && bytes.get(i + 1) == Some(&b'/') => return &line[..i],
+            _ => {}
+        }
+        i += 1;
+    }
+    line
+}
+
+#[test]
+fn the_scan_reads_past_a_url_and_stops_at_a_comment() {
+    assert_eq!(
+        code_of(r#"let u = "http://x"; unsafe{ x() }"#),
+        r#"let u = "http://x"; unsafe{ x() }"#
+    );
+    assert_eq!(
+        code_of(r#"let s = "a\"//b"; // unsafe { }"#),
+        r#"let s = "a\"//b"; "#
+    );
+    assert_eq!(code_of("// unsafe { }"), "");
+}
+
 #[test]
 fn the_crate_root_forbids_unsafe_code() {
     let root = std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("src/lib.rs"))
@@ -45,11 +74,21 @@ fn no_source_file_lifts_the_policy_or_holds_unsafe() {
     for file in files {
         let text = std::fs::read_to_string(&file).expect("a source file");
         for (n, line) in text.lines().enumerate() {
-            let code = line.split("//").next().unwrap_or_default();
+            let code: String = code_of(line)
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ");
             if code.contains("allow(unsafe_code)")
-                || code.contains("unsafe {")
-                || code.contains("unsafe impl")
-                || code.contains("unsafe fn")
+                || [
+                    "unsafe {",
+                    "unsafe{",
+                    "unsafe impl",
+                    "unsafe fn",
+                    "unsafe extern",
+                    "unsafe trait",
+                ]
+                .iter()
+                .any(|form| code.contains(form))
             {
                 found.push(format!("{}:{}: {}", file.display(), n + 1, line.trim()));
             }
