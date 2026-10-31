@@ -393,14 +393,27 @@ fn form_decode(s: &str) -> Zeroizing<Vec<u8>> {
     out
 }
 
-/// Parse a GitHub `/user` response body into a [`GhUser`]. Fail-CLOSED: a missing/empty `login`, a
-/// missing numeric `id`, or non-JSON yields `None` (→ the caller `Reject`s).
+/// The most bytes a GitHub login (a user's or an org's) may hold here; GitHub's own limit is 39.
+pub const MAX_LOGIN_BYTES: usize = 64;
+/// The most characters of a profile `name` kept; a longer one is cut.
+pub const MAX_NAME_CHARS: usize = 256;
+
+/// Whether `login` is one a GitHub reply can carry: non-empty, at most [`MAX_LOGIN_BYTES`], no
+/// control character.
+fn plain_login(login: &str) -> bool {
+    !login.is_empty() && login.len() <= MAX_LOGIN_BYTES && !login.chars().any(char::is_control)
+}
+
+/// Parse a GitHub `/user` response body into a [`GhUser`]. Fail-CLOSED: a missing, empty or
+/// foreign `login` (a control character, over [`MAX_LOGIN_BYTES`]), a missing numeric `id`, or
+/// non-JSON yields `None` (the caller's outage). A `name` holding a control character is not
+/// taken; a longer one than [`MAX_NAME_CHARS`] is cut.
 pub fn parse_user(body: &str) -> Option<GhUser> {
     let v: Value = serde_json::from_str(body.trim()).ok()?;
     let login = v
         .get("login")
         .and_then(Value::as_str)
-        .filter(|s| !s.is_empty())?
+        .filter(|s| plain_login(s))?
         .to_string();
     // Required: a genuine /user body always carries a numeric `id`, so its absence means a
     // malformed/foreign body → fail closed. It is also KEPT: it is the only stable thing GitHub
@@ -409,26 +422,29 @@ pub fn parse_user(body: &str) -> Option<GhUser> {
     let name = v
         .get("name")
         .and_then(Value::as_str)
-        .filter(|s| !s.is_empty())
-        .map(str::to_string);
+        .filter(|s| !s.is_empty() && !s.chars().any(char::is_control))
+        .map(|s| s.chars().take(MAX_NAME_CHARS).collect());
     Some(GhUser { login, id, name })
 }
 
 /// Parse a GitHub `/user/orgs` response (a JSON array of org objects) into `github:org/<org-login>`
-/// group strings. Fail-CLOSED: malformed JSON or a non-array body yields `None` so the caller can
-/// `Reject` — a truncated orgs response must NOT be mistaken for "no orgs" and silently drop the user's
-/// org groups (which would lock them out of org-gated roles). A VALID empty array is `Some(vec![])`
-/// (login succeeds with zero groups). Individual entries lacking a non-empty `login` are skipped.
+/// group strings. Fail-CLOSED: malformed JSON, a non-array body, or an org `login` no GitHub reply
+/// carries (a control character, over [`MAX_LOGIN_BYTES`]) yields `None` (the caller's outage) — a
+/// truncated or foreign orgs response must NOT be mistaken for "no orgs" and silently drop the
+/// user's org groups (which would lock them out of org-gated roles). A VALID empty array is
+/// `Some(vec![])` (login succeeds with zero groups). Individual entries lacking a non-empty `login`
+/// are skipped.
 pub fn parse_org_groups(body: &str) -> Option<Vec<String>> {
     let v: Value = serde_json::from_str(body.trim()).ok()?;
-    let arr = v.as_array()?;
-    Some(
-        arr.iter()
-            .filter_map(|o| o.get("login").and_then(Value::as_str))
-            .filter(|s| !s.is_empty())
-            .map(|org| format!("github:org/{org}"))
-            .collect(),
-    )
+    let mut groups = Vec::new();
+    for org in v.as_array()? {
+        match org.get("login").and_then(Value::as_str) {
+            None | Some("") => {}
+            Some(login) if plain_login(login) => groups.push(format!("github:org/{login}")),
+            Some(_) => return None,
+        }
+    }
+    Some(groups)
 }
 
 /// Assemble the identity [`Principal`] from the parsed `/user` and org groups: id `github:<login>`,
