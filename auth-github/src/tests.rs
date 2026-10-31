@@ -350,3 +350,28 @@ fn parse_access_token_form_decodes_percent_and_plus() {
         "a+b="
     ));
 }
+
+#[test]
+fn next_link_reads_the_next_relation_only() {
+    let link = r#"<https://api.github.com/user/orgs?page=2>; rel="next", <https://api.github.com/user/orgs?page=5>; rel="last""#;
+    assert_eq!(
+        next_link(link),
+        Some("https://api.github.com/user/orgs?page=2")
+    );
+    let last_first =
+        r#"<https://a.example/p?page=1>; rel="prev", <https://a.example/p?page=3>; REL=next"#;
+    assert_eq!(next_link(last_first), Some("https://a.example/p?page=3"));
+    assert_eq!(
+        next_link(r#"<https://a.example/x>; rel="next last""#),
+        Some("https://a.example/x")
+    );
+    for none in [
+        "",
+        r#"<https://a.example/p?page=1>; rel="prev""#,
+        r#"<https://a.example/p?page=1>; rel="nextish""#,
+        "garbage",
+        "<unterminated; rel=\"next\"",
+    ] {
+        assert_eq!(next_link(none), None, "{none}");
+    }
+}

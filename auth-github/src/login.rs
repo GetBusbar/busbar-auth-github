@@ -35,9 +35,9 @@
 
 use crate::guard::{collect_allowed_hosts, sanitize_hop_header, vet_hop_url, Refused};
 use crate::{
-    build_github_authorize_url, build_orgs_get, build_principal, build_token_exchange,
-    build_userinfo_get, is_json_array, parse_access_token, parse_org_groups, parse_user, GhUser,
-    GitHubConfig,
+    build_github_authorize_url, build_orgs_get, build_orgs_page_get, build_principal,
+    build_token_exchange, build_userinfo_get, is_json_array, next_link, parse_access_token,
+    parse_org_groups, parse_user, GhUser, GitHubConfig,
 };
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
@@ -63,8 +63,11 @@ fn settings_line(e: &SettingsError) -> String {
 
 /// The per-hop request timeout.
 pub const HOP_TIMEOUT_MS: u64 = 10_000;
-/// The bound on `complete_login` turns per callback.
-pub const MAX_HOPS: usize = 6;
+/// The most `/user/orgs` pages read per login (100 orgs a page: 1000 orgs). A next link left after
+/// the last is logged as a truncated org list, and the login identifies with the orgs read.
+pub const MAX_ORG_PAGES: usize = 10;
+/// The bound on the hops one callback sends: the token exchange, `/user`, and the org pages.
+pub const MAX_HOPS: usize = 2 + MAX_ORG_PAGES;
 /// The most a hop's reply body may carry: 256 KiB, the auth kind's bound on a token or userinfo
 /// endpoint's answer (the exchange refuses past it, `reply_limit`; `drive` checks it again). A
 /// GitHub token response or `/user` is under 2 KiB; a full 100-entry `/user/orgs` page is ~100 KiB.
@@ -264,6 +267,10 @@ pub enum LoginStep {
 struct FlowState {
     access_token: Option<Cred>,
     user: Option<GhUser>,
+    /// The org groups the pages read so far gave.
+    orgs: Vec<String>,
+    /// The org pages read so far.
+    pages: usize,
 }
 
 /// The callback's inputs and the last hop answer the step machine reads, every credential among
@@ -443,14 +450,6 @@ impl GithubLogin {
             let request = match flow.inflight.take() {
                 Some(parked) => parked,
                 None => {
-                    if flow.turns >= MAX_HOPS {
-                        tracing::warn!(
-                            module = "github",
-                            "github login: hop limit ({MAX_HOPS}) spent without an identity"
-                        );
-                        return finish(flow, LoginStep::Outage { retry_after: None });
-                    }
-                    flow.turns += 1;
                     match self.step(flow) {
                         Turn::Identify(p) => return finish(flow, LoginStep::Identity(p)),
                         Turn::Decline => return finish(flow, LoginStep::BadCredential),
@@ -459,6 +458,15 @@ impl GithubLogin {
                             return finish(flow, LoginStep::Outage { retry_after })
                         }
                         Turn::Exchange(mut hop) => {
+                            if flow.turns >= MAX_HOPS {
+                                wipe_hop(&mut hop);
+                                tracing::warn!(
+                                    module = "github",
+                                    "github login: hop limit ({MAX_HOPS}) spent without an identity"
+                                );
+                                return finish(flow, LoginStep::Outage { retry_after: None });
+                            }
+                            flow.turns += 1;
                             let rendered = self.render(&hop, flow.state.access_token.as_ref());
                             wipe_hop(&mut hop);
                             match rendered {
@@ -498,13 +506,6 @@ impl GithubLogin {
                         return finish(flow, LoginStep::SecurityCheckFailed);
                     }
                     flow.req.answer = Some((resp.status, std::mem::take(&mut resp.fields), body));
-                    if flow.turns >= MAX_HOPS {
-                        tracing::warn!(
-                            module = "github",
-                            "github login: hop limit ({MAX_HOPS}) spent without an identity"
-                        );
-                        return finish(flow, LoginStep::Outage { retry_after: None });
-                    }
                 }
             }
         }
@@ -554,7 +555,7 @@ impl GithubLogin {
             let hop = build_userinfo_get(&self.cfg);
             flow.state = FlowState {
                 access_token: Some(token.secure_for(&self.cfg.api_base)),
-                user: None,
+                ..FlowState::default()
             };
             return Turn::Exchange(hop);
         }
@@ -575,7 +576,37 @@ impl GithubLogin {
                 );
                 return Turn::Outage { retry_after: None };
             };
-            return Turn::Identify(build_principal(&user, groups));
+            let mut orgs = state.orgs;
+            orgs.extend(groups);
+            let pages = state.pages + 1;
+            // G4: the list is paginated; its `Link: rel="next"` is followed on the API's own
+            // origin (and through the hop guard, as every hop), up to MAX_ORG_PAGES pages.
+            match fields.link.as_deref().and_then(next_link) {
+                None => {}
+                Some(_) if pages >= MAX_ORG_PAGES => tracing::warn!(
+                    module = "github",
+                    pages,
+                    "github login: the org list is truncated at {MAX_ORG_PAGES} pages: org groups past it are not granted"
+                ),
+                Some(next) => {
+                    if !same_origin(next, &self.cfg.api_base) {
+                        tracing::warn!(
+                            module = "github",
+                            "github login: /user/orgs answered a next link off the API's origin; not followed"
+                        );
+                        return Turn::Outage { retry_after: None };
+                    }
+                    let hop = build_orgs_page_get(next);
+                    flow.state = FlowState {
+                        access_token: state.access_token,
+                        user: Some(user),
+                        orgs,
+                        pages,
+                    };
+                    return Turn::Exchange(hop);
+                }
+            }
+            return Turn::Identify(build_principal(&user, orgs));
         }
         let Some(user) = parse_user(body) else {
             if flow.state.access_token.is_none() {
@@ -718,6 +749,14 @@ impl Hop {
             Hop::User => "/user",
             Hop::Orgs => "/user/orgs",
         }
+    }
+}
+
+/// Whether `url` is on `base`'s origin (scheme and authority, ASCII case-insensitive).
+fn same_origin(url: &str, base: &str) -> bool {
+    match (split(url), split(base)) {
+        (Some((a, _)), Some((b, _))) => a.eq_ignore_ascii_case(b),
+        _ => false,
     }
 }
 
