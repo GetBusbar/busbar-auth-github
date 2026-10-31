@@ -589,6 +589,77 @@ fn a_plaintext_public_token_base_is_refused_before_the_secret_leaves() {
     assert!(s.issued.is_empty());
 }
 
+/// G5: the client secret and the bearer are each required to go out on a secured connection when
+/// the operator's base for their hop is `https` (`Cred::secure_for`): the SDK's exchange then
+/// refuses to write either toward a target that is not secured (`cred::NOT_SECURE`), so a
+/// plain-http target never receives them. The flags are read off the hops as they are sent.
+#[test]
+fn the_secret_and_the_bearer_go_out_only_secured_under_https_bases() {
+    let l = login();
+    let mut s = Script::happy();
+    identity(run(&l, &mut s));
+    let token = &s.issued[0];
+    assert!(
+        token
+            .body
+            .encoded()
+            .expect("the form encodes")
+            .secure_required(),
+        "the client secret is pinned to a secured connection"
+    );
+    assert!(token.bearer.is_none());
+    for get in &s.issued[1..] {
+        let bearer = get.bearer.as_ref().expect("an authenticated hop");
+        assert!(bearer.secure_required(), "{}", get.target);
+        assert!(bearer.bearer().secure_required(), "{}", get.target);
+        assert!(!get.body.encoded().expect("an empty form").secure_required());
+    }
+
+    // Each is pinned by its own base: an https token_base pins the secret even when the API is a
+    // private plain-http host, and an https api_base pins the bearer even when the token endpoint
+    // is.
+    let mixed = |token_base: &str, api_base: &str| {
+        let settings = format!(
+            r#"{{"client_id":"Iv1.client","token_base":"{token_base}","api_base":"{api_base}"}}"#
+        );
+        let l = GithubLogin::open(&settings, Some(SECRET)).expect("opens");
+        let mut s = Script::new()
+            .answer(
+                &format!("{token_base}/login/oauth/access_token"),
+                200,
+                &format!(r#"{{"access_token":"{TOKEN}"}}"#),
+            )
+            .answer(
+                &format!("{api_base}/user"),
+                200,
+                r#"{"login":"octocat","id":1}"#,
+            )
+            .answer(&format!("{api_base}/user/orgs?per_page=100"), 200, "[]");
+        identity(run(&l, &mut s));
+        let secret = s.issued[0]
+            .body
+            .encoded()
+            .expect("encodes")
+            .secure_required();
+        let bearer = s.issued[1]
+            .bearer
+            .as_ref()
+            .expect("a bearer")
+            .secure_required();
+        (secret, bearer)
+    };
+    assert_eq!(
+        mixed("https://github.com", "http://10.0.0.7"),
+        (true, false)
+    );
+    assert_eq!(
+        mixed("http://10.0.0.7", "https://api.github.com"),
+        (false, true)
+    );
+    // An operator who writes both bases as plain http to a private host is not overruled.
+    assert_eq!(mixed("http://10.0.0.7", "http://10.0.0.8"), (false, false));
+}
+
 #[test]
 fn a_bearer_with_a_line_break_fails_the_hop_closed() {
     // A token that would split the request: 1.5.5's header sanitiser failed the hop (an outage).
