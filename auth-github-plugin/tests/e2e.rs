@@ -290,6 +290,7 @@ fn github_get_flow_mints_key_via_core_executed_hops() {
     );
 
     let data_port = free_port();
+    let admin_port = free_port();
     let signing_key = work.join("signing.key");
     {
         let out = std::process::Command::new(&busbar_bin)
@@ -315,6 +316,7 @@ fn github_get_flow_mints_key_via_core_executed_hops() {
         &config,
         format!(
             "listen: \"127.0.0.1:{data_port}\"\n\
+             admin_listen: \"127.0.0.1:{admin_port}\"\n\
              public_url: \"https://gate.busbar.e2e\"\n\
              store: {{ module: memory }}\n\
              advanced:\n  allow_destinations: [\"127.0.0.1\", \"localhost\"]\n\
@@ -391,6 +393,28 @@ fn github_get_flow_mints_key_via_core_executed_hops() {
         "group user:github:octotest must appear (role github:org/testorg must have bound)"
     );
     let api_key = issued_key_from_html(&page).expect("the key page carries the issued api_key");
+
+    // The ROLE BINDING applied: `github:org/testorg` (the org group the plugin read off
+    // /user/orgs) bound the sign-in to `eng-team`, so its `user:github:octotest` leaf was
+    // provisioned UNDER eng-team. Read off the admin API, not inferred from the page.
+    let leaf = client
+        .get(format!(
+            "http://127.0.0.1:{admin_port}/api/v1/admin/groups/user:github:octotest"
+        ))
+        .header("x-admin-token", "e2e-admin-token")
+        .send()
+        .expect("GET the provisioned leaf group");
+    assert!(
+        leaf.status().is_success(),
+        "the user:github:octotest leaf group exists, got {}",
+        leaf.status()
+    );
+    let leaf: serde_json::Value = leaf.json().expect("the group view is JSON");
+    assert_eq!(
+        leaf["parent"].as_str(),
+        Some("eng-team"),
+        "role github:org/testorg must bind the sign-in to eng-team: {leaf}"
+    );
 
     // The issued key AUTHENTICATES on the data plane (not 401).
     let chat = client
