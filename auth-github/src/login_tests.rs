@@ -791,17 +791,42 @@ fn an_id_token_bound_to_the_minted_nonce_passes_the_check() {
     }
 }
 
+/// The id_token payload is read strictly as base64url without padding, through the real nonce
+/// check: the unpadded url-safe segment binds; the same claims padded, or in the standard
+/// alphabet, do not.
 #[test]
-fn b64url_decode_is_strict_url_safe_no_pad() {
-    let b64url_decode = |s: &str| URL_SAFE_NO_PAD.decode(s).ok();
-    assert_eq!(b64url_decode("").as_deref(), Some(&b""[..]));
-    assert_eq!(b64url_decode("Zg").as_deref(), Some(&b"f"[..]));
-    assert_eq!(b64url_decode("Zm8").as_deref(), Some(&b"fo"[..]));
-    assert_eq!(b64url_decode("Zm9v").as_deref(), Some(&b"foo"[..]));
-    assert_eq!(b64url_decode("-_8").as_deref(), Some(&[0xfb, 0xff][..]));
-    for bad in ["Zg==", "Z", "Zh", "Zm9", "+/8", "Zm9v!"] {
-        assert_eq!(b64url_decode(bad), None, "{bad}");
+fn the_id_token_payload_is_read_strictly_base64url_no_pad() {
+    let (mut padded_seen, mut alphabet_seen) = (false, false);
+    for nonce in ["n", "no", "non", "a?>~", "??>>", "~~~~", "\u{fb}\u{ff}"] {
+        let token = id_token(&serde_json::json!({ "nonce": nonce }).to_string());
+        let seg = token
+            .split('.')
+            .nth(1)
+            .expect("a payload segment")
+            .to_string();
+        let body = |seg: &str| format!(r#"{{"id_token":"h.{seg}.s"}}"#);
+        assert!(id_token_nonce_binds(&body(&seg), Some(nonce)), "{nonce}");
+        if !seg.len().is_multiple_of(4) {
+            padded_seen = true;
+            let padded = format!("{seg}{}", "=".repeat(4 - seg.len() % 4));
+            assert!(
+                !id_token_nonce_binds(&body(&padded), Some(nonce)),
+                "padded {nonce}"
+            );
+        }
+        if seg.contains(['-', '_']) {
+            alphabet_seen = true;
+            let standard = seg.replace('-', "+").replace('_', "/");
+            assert!(
+                !id_token_nonce_binds(&body(&standard), Some(nonce)),
+                "standard {nonce}"
+            );
+        }
     }
+    assert!(
+        padded_seen && alphabet_seen,
+        "positive controls: a padded and a url-safe case ran"
+    );
 }
 
 /// The hop loop is bounded: a far end that keeps answering token-shaped bodies from `/user` never
