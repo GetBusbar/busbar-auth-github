@@ -500,6 +500,44 @@ fn red_g4_a_next_link_off_the_api_origin_is_never_followed() {
     }
 }
 
+/// RED L11: the far end's strings enter the Principal filtered. A login or an org login holding a
+/// control character, or longer than 64 bytes (GitHub's own limit is 39), is no GitHub reply: an
+/// outage. A display name holding a control character is not taken (the login stands in), and one
+/// longer than 256 characters is cut to 256.
+#[test]
+fn red_l11_far_end_strings_enter_the_principal_filtered() {
+    let l = login();
+    let user = |login: &str, name: &str| {
+        serde_json::json!({"login": login, "id": 1, "name": name}).to_string()
+    };
+    for bad in ["octo\ncat", "octo\u{1b}[31m", "octo\u{7f}", &"a".repeat(65)] {
+        let mut s = Script::happy().answer(USER_URL, 200, &user(bad, "Octo"));
+        assert_eq!(run(&l, &mut s), OUTAGE, "login {bad:?}");
+        let orgs = serde_json::json!([{"login": "acme"}, {"login": bad}]).to_string();
+        let mut s = Script::happy().answer(ORGS_URL, 200, &orgs);
+        assert_eq!(run(&l, &mut s), OUTAGE, "org {bad:?}");
+    }
+    let long = "a".repeat(64);
+    let mut s = Script::happy()
+        .answer(USER_URL, 200, &user(&long, "Octo"))
+        .answer(
+            ORGS_URL,
+            200,
+            &serde_json::json!([{"login": long}]).to_string(),
+        );
+    let p = identity(run(&l, &mut s));
+    assert_eq!(p.id, format!("github:{long}"));
+    assert!(p.roles.contains(&format!("github:org/{long}")));
+
+    let mut s = Script::happy().answer(USER_URL, 200, &user("octocat", "Evil\r\nAdmin"));
+    assert_eq!(identity(run(&l, &mut s)).name.as_deref(), Some("octocat"));
+    let mut s = Script::happy().answer(USER_URL, 200, &user("octocat", &"é".repeat(300)));
+    assert_eq!(
+        identity(run(&l, &mut s)).name.map(|n| n.chars().count()),
+        Some(256)
+    );
+}
+
 #[test]
 fn fetch_orgs_false_identifies_after_user_with_two_hops() {
     let settings = SETTINGS.replace("\"client_id\"", "\"fetch_orgs\": false, \"client_id\"");
