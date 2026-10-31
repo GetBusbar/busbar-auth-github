@@ -151,6 +151,33 @@ fn pack_github(pack_bin: &std::path::Path, so: &std::path::Path, out: &std::path
     assert!(status.success(), "packing the github plugin must succeed");
 }
 
+/// The busbar process, killed and reaped when it drops: a failed assertion never leaks it (or its
+/// ports) past the test.
+struct Busbar(std::process::Child);
+
+impl Drop for Busbar {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+/// The test's scratch directory, removed when it drops.
+struct Scratch(std::path::PathBuf);
+
+impl std::ops::Deref for Scratch {
+    type Target = std::path::Path;
+    fn deref(&self) -> &std::path::Path {
+        &self.0
+    }
+}
+
+impl Drop for Scratch {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
 fn free_port() -> u16 {
     std::net::TcpListener::bind("127.0.0.1:0")
         .unwrap()
@@ -255,6 +282,13 @@ fn wait_for_health(client: &reqwest::blocking::Client, url: &str, child: &mut st
 #[test]
 fn github_get_flow_mints_key_via_core_executed_hops() {
     let Some(wm) = wiremock_url() else {
+        // Under CI the service container is the test's subject: its absence is a failure, never a
+        // green skip.
+        assert!(
+            std::env::var_os("CI").is_none(),
+            "CI is set but BUSBAR_TEST_WIREMOCK_URL is unset: the plugin-ci `service: wiremock` \
+             arm did not run, so the github live e2e cannot (refusing to pass without running)"
+        );
         eprintln!(
             "skip: BUSBAR_TEST_WIREMOCK_URL unset — github live e2e needs the WireMock service \
              container (set by the plugin-ci `service: wiremock` arm). Skipping (local, no docker)."
@@ -273,14 +307,14 @@ fn github_get_flow_mints_key_via_core_executed_hops() {
         .unwrap();
     register_wiremock_stubs(&client, &wm);
 
-    let work = std::env::temp_dir().join(format!(
+    let work = Scratch(std::env::temp_dir().join(format!(
         "busbar-github-e2e-{}-{}",
         std::process::id(),
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_nanos()
-    ));
+    )));
     let plugins_dir = work.join("plugins");
     std::fs::create_dir_all(&plugins_dir).unwrap();
     pack_github(
@@ -338,19 +372,21 @@ fn github_get_flow_mints_key_via_core_executed_hops() {
     )
     .unwrap();
 
-    let mut child = std::process::Command::new(&busbar_bin)
-        .env("BUSBAR_CONFIG", &config)
-        .env("BUSBAR_PROVIDERS", &providers)
-        .env("MOCK_KEY", "unused")
-        .env("BUSBAR_GH_CLIENT_SECRET", "e2e-secret")
-        .env("BUSBAR_ADMIN_TOKEN", "e2e-admin-token")
-        .env("BUSBAR_STATE_FILE", "")
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-        .expect("spawn busbar with identity-providers.github");
+    let mut child = Busbar(
+        std::process::Command::new(&busbar_bin)
+            .env("BUSBAR_CONFIG", &config)
+            .env("BUSBAR_PROVIDERS", &providers)
+            .env("MOCK_KEY", "unused")
+            .env("BUSBAR_GH_CLIENT_SECRET", "e2e-secret")
+            .env("BUSBAR_ADMIN_TOKEN", "e2e-admin-token")
+            .env("BUSBAR_STATE_FILE", "")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("spawn busbar with identity-providers.github"),
+    );
     let base = format!("http://127.0.0.1:{data_port}");
-    wait_for_health(&client, &format!("{base}/healthz"), &mut child);
+    wait_for_health(&client, &format!("{base}/healthz"), &mut child.0);
 
     // begin: GET ?method=github → 302 + login cookie carrying state.
     let begin = client
@@ -431,8 +467,5 @@ fn github_get_flow_mints_key_via_core_executed_hops() {
         401,
         "the self-scoped github key must authenticate on the data plane"
     );
-
-    let _ = child.kill();
-    let _ = child.wait();
-    let _ = std::fs::remove_dir_all(&work);
+    // `child` and `work` are killed and removed when they drop, on a failed assertion too.
 }
