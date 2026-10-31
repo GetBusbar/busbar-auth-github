@@ -199,6 +199,12 @@ impl Life for Github {
     }
 }
 
+/// REFUSED, said once at info with its reason word.
+fn refused(reason: &'static str, why: &'static str) -> Outcome {
+    tracing::info!(module = "github", reason, "github login: refused: {why}");
+    Outcome::Refused
+}
+
 /// A lent string, `None` when absent or not UTF-8.
 fn text(s: Lent<'_, AbiStr>) -> Option<&str> {
     if s.is_absent() {
@@ -230,7 +236,7 @@ impl SafeSlot for Begin {
         mut out: Out<'_, BeginLoginOut>,
     ) -> Outcome {
         let Some(h) = instance.get() else {
-            return Outcome::Refused;
+            return refused("no-instance", "the op arrived on no open instance");
         };
         let (Some(redirect_uri), Some(state), Some(challenge)) = (
             text(input.redirect_uri()),
@@ -368,13 +374,15 @@ impl SafeSlot for Complete {
         mut out: Out<'_, IdentifyOut>,
     ) -> Outcome {
         let Some(h) = instance.get() else {
-            return Outcome::Refused;
+            return refused("no-instance", "the op arrived on no open instance");
         };
         let ticket = instance.ticket();
         if ticket.is_none() {
             // The exchange waits on I/O: the host submits the op on a ticket.
-            tracing::debug!(module = "github", "github login: complete_login arrived without a ticket; the host resubmits it on one");
-            return Outcome::Refused;
+            return refused(
+                "no-ticket",
+                "complete_login arrived without a ticket (it waits on I/O); the host resubmits it on one",
+            );
         }
         let g = h.life();
         let buf = input.out_buf();
