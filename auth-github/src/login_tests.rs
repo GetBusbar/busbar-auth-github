@@ -1358,10 +1358,24 @@ fn a_poisoned_orgs_array_cannot_swap_the_token_mid_flow() {
     assert_eq!(p.id, "github:octocat");
     assert!(p.roles.contains(&"github:org/acme".to_string()));
     assert_eq!(s.targets(), vec![TOKEN_URL, USER_URL, ORGS_URL]);
+    // The bearer is the chip's (sealed, never in `fields`): read every hop as the wire frames it.
+    for r in &s.issued[1..] {
+        let authorization: Vec<String> = plain(r)
+            .into_iter()
+            .filter(|(k, _)| k == "authorization")
+            .map(|(_, v)| v)
+            .collect();
+        assert_eq!(
+            authorization,
+            vec![format!("Bearer {TOKEN}")],
+            "{}",
+            r.target
+        );
+    }
     assert!(s
         .issued
         .iter()
-        .all(|r| !r.fields.iter().any(|(_, v)| v.contains("gho_ATTACKER"))));
+        .all(|r| plain(r).iter().all(|(_, v)| !v.contains("gho_ATTACKER"))));
 }
 
 mod logging {
