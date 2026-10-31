@@ -541,12 +541,13 @@ impl GithubLogin {
     fn step(&self, flow: &mut LoginFlow) -> Turn {
         let req = &flow.req;
         let Some((status, fields, body)) = &req.answer else {
+            // L7: an empty value is as missing, refused before the code is spent.
             let (Some(code), Some(redirect_uri), Some(code_verifier)) = (
-                req.code.as_deref(),
-                req.redirect_uri.as_deref(),
-                req.code_verifier.as_deref(),
+                given(req.code.as_deref().map(String::as_str)),
+                given(req.redirect_uri.as_deref()),
+                given(req.code_verifier.as_deref().map(String::as_str)),
             ) else {
-                tracing::info!(module = "github", "github login: declined, the callback lacks its code, redirect_uri or code_verifier");
+                tracing::info!(module = "github", "github login: declined, the callback lacks its code, redirect_uri or code_verifier (or one is empty)");
                 return Turn::Decline;
             };
             return Turn::Exchange(build_token_exchange(
@@ -556,19 +557,7 @@ impl GithubLogin {
                 code_verifier,
             ));
         };
-        let correlated = req
-            .code_verifier
-            .as_deref()
-            .or(req.code.as_deref())
-            .is_some_and(|s| !s.is_empty());
         let (status, body) = (*status, body.as_str());
-        if !correlated {
-            tracing::info!(
-                module = "github",
-                "github login: declined, the callback has neither a code_verifier nor a code"
-            );
-            return Turn::Decline;
-        }
         // L1: the answer is the answer of the hop that was sent, read as that hop's, never by its
         // shape.
         let hop = flow.state.hop;
@@ -736,6 +725,11 @@ fn text_of(bytes: Vec<u8>) -> Zeroizing<String> {
             text
         }
     }
+}
+
+/// A callback value, `None` when absent or empty.
+fn given(v: Option<&str>) -> Option<&str> {
+    v.filter(|v| !v.is_empty())
 }
 
 /// What one turn of the step machine decided.
