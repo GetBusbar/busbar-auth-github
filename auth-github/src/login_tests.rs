@@ -12,6 +12,8 @@ use std::collections::HashMap;
 const SECRET: &str = "s3cr3t-client-value";
 const TOKEN: &str = "gho_live_bearer";
 const NONCE: &str = "kernel-minted-nonce";
+/// An outage with no retry hint.
+const OUTAGE: LoginStep = LoginStep::Outage { retry_after: None };
 
 /// The operator writes every base out (as a 1.5.5 GitHub method had to, for its hops to pass).
 const SETTINGS: &str = r#"{
@@ -44,6 +46,18 @@ impl Script {
             target.to_string(),
             Fetched::Ready(HopResponse {
                 status,
+                fields: ReplyFields::default(),
+                body: body.as_bytes().to_vec().into(),
+            }),
+        );
+        self
+    }
+    fn answer_with(mut self, target: &str, status: u16, fields: ReplyFields, body: &str) -> Self {
+        self.answers.insert(
+            target.to_string(),
+            Fetched::Ready(HopResponse {
+                status,
+                fields,
                 body: body.as_bytes().to_vec().into(),
             }),
         );
@@ -155,7 +169,8 @@ fn a_member_signs_in_with_org_groups() {
 }
 
 /// The token exchange as 1.5.5's core sent it: the form in the module's order with the secret
-/// injected into its slot, serde_urlencoded bytes, `content-type` then the default `accept`.
+/// injected into its slot, serde_urlencoded bytes, `content-type`; then (RED L3) `accept:
+/// application/json`, so GitHub answers JSON rather than its form-encoded default.
 #[test]
 fn the_token_exchange_carries_the_plugins_own_secret_in_1_5_5_bytes() {
     let l = login();
@@ -178,13 +193,13 @@ fn the_token_exchange_carries_the_plugins_own_secret_in_1_5_5_bytes() {
                 "content-type".to_string(),
                 "application/x-www-form-urlencoded".to_string()
             ),
-            ("accept".to_string(), "*/*".to_string()),
+            ("accept".to_string(), "application/json".to_string()),
         ]
     );
 }
 
-/// The authenticated GETs: an empty form (so `content-type` and an empty body, as reqwest's
-/// `.form(&[])` sent), then the module's headers, lowercase, in order.
+/// The authenticated GETs: no body and (RED L4) no `content-type` (only a hop with a form body
+/// carries one), the bearer, then the module's headers, lowercase, in order.
 #[test]
 fn the_rest_gets_carry_the_bearer_and_user_agent() {
     let l = login();
@@ -196,10 +211,6 @@ fn the_rest_gets_carry_the_bearer_and_user_agent() {
         assert_eq!(
             plain(get),
             vec![
-                (
-                    "content-type".to_string(),
-                    "application/x-www-form-urlencoded".to_string()
-                ),
                 ("authorization".to_string(), format!("Bearer {TOKEN}")),
                 ("user-agent".to_string(), "busbar".to_string()),
                 (
@@ -247,10 +258,10 @@ fn an_idp_5xx_or_429_is_an_outage_not_a_decline() {
     let l = login();
     for status in [500, 502, 503, 429] {
         let mut s = Script::happy().answer(TOKEN_URL, status, r#"{"error":"busy"}"#);
-        assert_eq!(run(&l, &mut s), LoginStep::Outage, "token {status}");
+        assert_eq!(run(&l, &mut s), OUTAGE, "token {status}");
         assert_eq!(s.targets(), vec![TOKEN_URL]);
         let mut s = Script::happy().answer(USER_URL, status, "{}");
-        assert_eq!(run(&l, &mut s), LoginStep::Outage, "user {status}");
+        assert_eq!(run(&l, &mut s), OUTAGE, "user {status}");
         assert_eq!(s.targets(), vec![TOKEN_URL, USER_URL]);
     }
 }
@@ -283,6 +294,49 @@ fn a_bad_code_answered_200_with_an_error_body_is_declined() {
     assert_eq!(s.targets(), vec![TOKEN_URL]);
 }
 
+/// RED G2 (owner-signed 2026-10-30): GitHub answers a token exchange it refuses with HTTP 200 and an
+/// `error`. Only the user's own codes (a bad or expired code, an invalid grant) are a declined
+/// sign-in; the operator's (wrong client credentials, a redirect_uri mismatch, a suspended app),
+/// any other code, and a 2xx with neither a token nor an error are an outage. Both reply shapes.
+#[test]
+fn red_g2_a_200_token_error_is_declined_only_for_the_users_own_code() {
+    let l = login();
+    for code in ["bad_verification_code", "invalid_grant", "expired_token"] {
+        for body in [format!(r#"{{"error":"{code}"}}"#), format!("error={code}")] {
+            let mut s = Script::happy().answer(TOKEN_URL, 200, &body);
+            assert_eq!(run(&l, &mut s), LoginStep::BadCredential, "{body}");
+            assert_eq!(s.targets(), vec![TOKEN_URL]);
+        }
+    }
+    for code in [
+        "incorrect_client_credentials",
+        "redirect_uri_mismatch",
+        "application_suspended",
+        "unverified_user_email",
+        "something_new",
+    ] {
+        for body in [
+            format!(r#"{{"error":"{code}","error_description":"x"}}"#),
+            format!("error={code}&error_description=x"),
+        ] {
+            let mut s = Script::happy().answer(TOKEN_URL, 200, &body);
+            assert_eq!(run(&l, &mut s), OUTAGE, "{body}");
+            assert_eq!(s.targets(), vec![TOKEN_URL]);
+        }
+    }
+    for body in [
+        "",
+        "<html>sign in</html>",
+        "{not json",
+        r#"{"token_type":"bearer"}"#,
+        "scope=read%3Aorg",
+    ] {
+        let mut s = Script::happy().answer(TOKEN_URL, 200, body);
+        assert_eq!(run(&l, &mut s), OUTAGE, "{body:?}");
+        assert_eq!(s.targets(), vec![TOKEN_URL]);
+    }
+}
+
 #[test]
 fn a_form_encoded_token_response_is_accepted() {
     let l = login();
@@ -298,14 +352,190 @@ fn a_form_encoded_token_response_is_accepted() {
 fn an_unreachable_idp_is_an_outage() {
     let l = login();
     let mut s = Script::happy().unreachable(USER_URL);
-    assert_eq!(run(&l, &mut s), LoginStep::Outage);
+    assert_eq!(run(&l, &mut s), OUTAGE);
 }
 
+/// A truncated org list is never a zero-group login; it is no sign-in answer either (G3,
+/// owner-signed 2026-10-30): an outage.
 #[test]
-fn a_malformed_org_list_is_declined_not_a_zero_group_login() {
+fn a_malformed_org_list_is_an_outage_not_a_zero_group_login() {
     let l = login();
     let mut s = Script::happy().answer(ORGS_URL, 200, "[{truncated");
-    assert_eq!(run(&l, &mut s), LoginStep::BadCredential);
+    assert_eq!(run(&l, &mut s), OUTAGE);
+}
+
+/// RED G3 (owner-signed 2026-10-30): a malformed or foreign 2xx from `/user` or `/user/orgs` is
+/// the far end answering something that is no sign-in answer: an outage, never a declined
+/// sign-in, and nothing more is sent.
+#[test]
+fn red_g3_a_malformed_rest_answer_is_an_outage() {
+    let l = login();
+    for body in [
+        "",
+        "<html>maintenance</html>",
+        "{not json",
+        r#"{"id":1}"#,
+        r#"{"login":"octocat"}"#,
+        r#"{"login":"octocat","id":"1"}"#,
+        r#"{"login":"","id":1}"#,
+    ] {
+        let mut s = Script::happy().answer(USER_URL, 200, body);
+        assert_eq!(run(&l, &mut s), OUTAGE, "/user {body:?}");
+        assert_eq!(s.targets(), vec![TOKEN_URL, USER_URL]);
+    }
+    for body in ["", "[{bad", r#"{"message":"x"}"#, "<html></html>"] {
+        let mut s = Script::happy().answer(ORGS_URL, 200, body);
+        assert_eq!(run(&l, &mut s), OUTAGE, "/user/orgs {body:?}");
+        assert_eq!(s.targets(), vec![TOKEN_URL, USER_URL, ORGS_URL]);
+    }
+}
+
+/// The URL of org page `n`.
+fn orgs_page(n: usize) -> String {
+    format!("https://api.github.com/user/orgs?per_page=100&page={n}")
+}
+
+/// An org page's reply fields: a `link` to page `next` (and the last), or none.
+fn link_to(next: Option<&str>) -> ReplyFields {
+    ReplyFields {
+        link: next.map(|n| {
+            format!(r#"<{n}>; rel="next", <https://api.github.com/user/orgs?per_page=100&page=99>; rel="last""#)
+        }),
+        ..ReplyFields::default()
+    }
+}
+
+/// RED G4: a user in more orgs than one page holds keeps every org: `/user/orgs` is followed by
+/// its `Link: rel="next"` to the end.
+#[test]
+fn red_g4_the_org_list_is_followed_past_page_one() {
+    let l = login();
+    let mut s = Script::happy()
+        .answer_with(
+            ORGS_URL,
+            200,
+            link_to(Some(&orgs_page(2))),
+            r#"[{"login":"acme"}]"#,
+        )
+        .answer_with(
+            &orgs_page(2),
+            200,
+            link_to(Some(&orgs_page(3))),
+            r#"[{"login":"widgets"}]"#,
+        )
+        .answer_with(
+            &orgs_page(3),
+            200,
+            link_to(None),
+            r#"[{"login":"gadgets"}]"#,
+        );
+    let p = identity(run(&l, &mut s));
+    assert_eq!(
+        p.roles,
+        vec![
+            "github:id/1".to_string(),
+            "github:org/acme".to_string(),
+            "github:org/widgets".to_string(),
+            "github:org/gadgets".to_string(),
+        ]
+    );
+    let (p2, p3) = (orgs_page(2), orgs_page(3));
+    assert_eq!(
+        s.targets(),
+        vec![TOKEN_URL, USER_URL, ORGS_URL, p2.as_str(), p3.as_str()]
+    );
+    // Every page is authenticated with the same token.
+    for page in &s.issued[2..] {
+        assert!(plain(page)
+            .iter()
+            .any(|(k, v)| k == "authorization" && *v == format!("Bearer {TOKEN}")));
+    }
+}
+
+/// RED G4: the org list is read for at most 10 pages (1000 orgs); a next link left after the
+/// tenth is a WARN that the org groups are truncated, and the login identifies with what it read
+/// (fail-safe: fewer roles, never more).
+#[test]
+fn red_g4_the_org_list_stops_at_ten_pages_with_a_warn() {
+    use busbar_test_kit::warn_capture::WarnCapture;
+    let l = login();
+    let mut s = Script::happy().answer_with(
+        ORGS_URL,
+        200,
+        link_to(Some(&orgs_page(2))),
+        r#"[{"login":"o1"}]"#,
+    );
+    for n in 2..=12 {
+        s = s.answer_with(
+            &orgs_page(n),
+            200,
+            link_to(Some(&orgs_page(n + 1))),
+            &format!(r#"[{{"login":"o{n}"}}]"#),
+        );
+    }
+    let cap = WarnCapture::default();
+    let step = tracing::subscriber::with_default(cap.clone(), || run(&l, &mut s));
+    let p = identity(step);
+    assert_eq!(p.roles.len(), 1 + 10, "{:?}", p.roles);
+    assert_eq!(p.roles.last().map(String::as_str), Some("github:org/o10"));
+    assert_eq!(s.issued.len(), 2 + 10);
+    assert!(cap.contains("truncated"), "{:?}", cap.messages());
+}
+
+/// RED G4: a next link is followed only on the API's own origin (and through the hop guard): one
+/// to another host, or to plain http, is an outage and is never sent.
+#[test]
+fn red_g4_a_next_link_off_the_api_origin_is_never_followed() {
+    let l = login();
+    for next in [
+        "https://evil.example/user/orgs?page=2",
+        "http://api.github.com/user/orgs?page=2",
+        "https://github.com/user/orgs?page=2",
+    ] {
+        let mut s = Script::happy()
+            .answer_with(ORGS_URL, 200, link_to(Some(next)), r#"[{"login":"acme"}]"#)
+            .answer(next, 200, r#"[{"login":"injected"}]"#);
+        assert_eq!(run(&l, &mut s), OUTAGE, "{next}");
+        assert_eq!(s.targets(), vec![TOKEN_URL, USER_URL, ORGS_URL], "{next}");
+    }
+}
+
+/// RED L11: the far end's strings enter the Principal filtered. A login or an org login holding a
+/// control character, or longer than 64 bytes (GitHub's own limit is 39), is no GitHub reply: an
+/// outage. A display name holding a control character is not taken (the login stands in), and one
+/// longer than 256 characters is cut to 256.
+#[test]
+fn red_l11_far_end_strings_enter_the_principal_filtered() {
+    let l = login();
+    let user = |login: &str, name: &str| {
+        serde_json::json!({"login": login, "id": 1, "name": name}).to_string()
+    };
+    for bad in ["octo\ncat", "octo\u{1b}[31m", "octo\u{7f}", &"a".repeat(65)] {
+        let mut s = Script::happy().answer(USER_URL, 200, &user(bad, "Octo"));
+        assert_eq!(run(&l, &mut s), OUTAGE, "login {bad:?}");
+        let orgs = serde_json::json!([{"login": "acme"}, {"login": bad}]).to_string();
+        let mut s = Script::happy().answer(ORGS_URL, 200, &orgs);
+        assert_eq!(run(&l, &mut s), OUTAGE, "org {bad:?}");
+    }
+    let long = "a".repeat(64);
+    let mut s = Script::happy()
+        .answer(USER_URL, 200, &user(&long, "Octo"))
+        .answer(
+            ORGS_URL,
+            200,
+            &serde_json::json!([{"login": long}]).to_string(),
+        );
+    let p = identity(run(&l, &mut s));
+    assert_eq!(p.id, format!("github:{long}"));
+    assert!(p.roles.contains(&format!("github:org/{long}")));
+
+    let mut s = Script::happy().answer(USER_URL, 200, &user("octocat", "Evil\r\nAdmin"));
+    assert_eq!(identity(run(&l, &mut s)).name.as_deref(), Some("octocat"));
+    let mut s = Script::happy().answer(USER_URL, 200, &user("octocat", &"é".repeat(300)));
+    assert_eq!(
+        identity(run(&l, &mut s)).name.map(|n| n.chars().count()),
+        Some(256)
+    );
 }
 
 #[test]
@@ -330,6 +560,31 @@ fn a_callback_missing_the_verifier_is_declined_with_no_exchange() {
     );
     assert_eq!(l.drive(&mut f, &mut s), LoginStep::BadCredential);
     assert!(s.issued.is_empty());
+}
+
+/// RED L7: an empty code, redirect_uri or code_verifier is refused before the exchange: the code
+/// is never spent on a callback that cannot complete.
+#[test]
+fn red_l7_an_empty_callback_value_is_declined_before_the_exchange() {
+    let l = login();
+    for (code, redirect_uri, verifier) in [
+        ("", "https://node.example/cb", "v"),
+        ("c", "https://node.example/cb", ""),
+        ("c", "", "v"),
+        ("", "", ""),
+    ] {
+        let mut s = Script::happy();
+        let mut f = l.start(Some(code), Some(redirect_uri), Some(verifier), Some(NONCE));
+        assert_eq!(
+            l.drive(&mut f, &mut s),
+            LoginStep::BadCredential,
+            "{code:?} {redirect_uri:?} {verifier:?}"
+        );
+        assert!(
+            s.issued.is_empty(),
+            "{code:?} {redirect_uri:?} {verifier:?}"
+        );
+    }
 }
 
 /// Slow I/O pends: each hop answers PENDING once, the flow parks on it, and the next drive re-issues
@@ -390,8 +645,79 @@ fn a_plaintext_public_token_base_is_refused_before_the_secret_leaves() {
     );
     let l = GithubLogin::open(&settings, Some(SECRET)).unwrap();
     let mut s = Script::happy();
-    assert_eq!(run(&l, &mut s), LoginStep::Outage);
+    assert_eq!(run(&l, &mut s), OUTAGE);
     assert!(s.issued.is_empty());
+}
+
+/// G5: the client secret and the bearer are each required to go out on a secured connection when
+/// the operator's base for their hop is `https` (`Cred::secure_for`): the SDK's exchange then
+/// refuses to write either toward a target that is not secured (`cred::NOT_SECURE`), so a
+/// plain-http target never receives them. The flags are read off the hops as they are sent.
+#[test]
+fn the_secret_and_the_bearer_go_out_only_secured_under_https_bases() {
+    let l = login();
+    let mut s = Script::happy();
+    identity(run(&l, &mut s));
+    let token = &s.issued[0];
+    assert!(
+        token
+            .body
+            .encoded()
+            .expect("the form encodes")
+            .secure_required(),
+        "the client secret is pinned to a secured connection"
+    );
+    assert!(token.bearer.is_none());
+    for get in &s.issued[1..] {
+        let bearer = get.bearer.as_ref().expect("an authenticated hop");
+        assert!(bearer.secure_required(), "{}", get.target);
+        assert!(bearer.bearer().secure_required(), "{}", get.target);
+        assert!(!get.body.encoded().expect("an empty form").secure_required());
+    }
+
+    // Each is pinned by its own base: an https token_base pins the secret even when the API is a
+    // private plain-http host, and an https api_base pins the bearer even when the token endpoint
+    // is.
+    let mixed = |token_base: &str, api_base: &str| {
+        let settings = format!(
+            r#"{{"client_id":"Iv1.client","token_base":"{token_base}","api_base":"{api_base}"}}"#
+        );
+        let l = GithubLogin::open(&settings, Some(SECRET)).expect("opens");
+        let mut s = Script::new()
+            .answer(
+                &format!("{token_base}/login/oauth/access_token"),
+                200,
+                &format!(r#"{{"access_token":"{TOKEN}"}}"#),
+            )
+            .answer(
+                &format!("{api_base}/user"),
+                200,
+                r#"{"login":"octocat","id":1}"#,
+            )
+            .answer(&format!("{api_base}/user/orgs?per_page=100"), 200, "[]");
+        identity(run(&l, &mut s));
+        let secret = s.issued[0]
+            .body
+            .encoded()
+            .expect("encodes")
+            .secure_required();
+        let bearer = s.issued[1]
+            .bearer
+            .as_ref()
+            .expect("a bearer")
+            .secure_required();
+        (secret, bearer)
+    };
+    assert_eq!(
+        mixed("https://github.com", "http://10.0.0.7"),
+        (true, false)
+    );
+    assert_eq!(
+        mixed("http://10.0.0.7", "https://api.github.com"),
+        (false, true)
+    );
+    // An operator who writes both bases as plain http to a private host is not overruled.
+    assert_eq!(mixed("http://10.0.0.7", "http://10.0.0.8"), (false, false));
 }
 
 #[test]
@@ -399,7 +725,7 @@ fn a_bearer_with_a_line_break_fails_the_hop_closed() {
     // A token that would split the request: 1.5.5's header sanitiser failed the hop (an outage).
     let l = login();
     let mut s = Script::happy().answer(TOKEN_URL, 200, r#"{"access_token":"gho_x\r\nX-Evil: 1"}"#);
-    assert_eq!(run(&l, &mut s), LoginStep::Outage);
+    assert_eq!(run(&l, &mut s), OUTAGE);
     assert_eq!(s.targets(), vec![TOKEN_URL]);
 }
 
@@ -465,28 +791,105 @@ fn an_id_token_bound_to_the_minted_nonce_passes_the_check() {
     }
 }
 
+/// The id_token payload is read strictly as base64url without padding, through the real nonce
+/// check: the unpadded url-safe segment binds; the same claims padded, or in the standard
+/// alphabet, do not.
 #[test]
-fn b64url_decode_is_strict_url_safe_no_pad() {
-    let b64url_decode = |s: &str| URL_SAFE_NO_PAD.decode(s).ok();
-    assert_eq!(b64url_decode("").as_deref(), Some(&b""[..]));
-    assert_eq!(b64url_decode("Zg").as_deref(), Some(&b"f"[..]));
-    assert_eq!(b64url_decode("Zm8").as_deref(), Some(&b"fo"[..]));
-    assert_eq!(b64url_decode("Zm9v").as_deref(), Some(&b"foo"[..]));
-    assert_eq!(b64url_decode("-_8").as_deref(), Some(&[0xfb, 0xff][..]));
-    for bad in ["Zg==", "Z", "Zh", "Zm9", "+/8", "Zm9v!"] {
-        assert_eq!(b64url_decode(bad), None, "{bad}");
+fn the_id_token_payload_is_read_strictly_base64url_no_pad() {
+    let (mut padded_seen, mut alphabet_seen) = (false, false);
+    for nonce in ["n", "no", "non", "a?>~", "??>>", "~~~~", "\u{fb}\u{ff}"] {
+        let token = id_token(&serde_json::json!({ "nonce": nonce }).to_string());
+        let seg = token
+            .split('.')
+            .nth(1)
+            .expect("a payload segment")
+            .to_string();
+        let body = |seg: &str| format!(r#"{{"id_token":"h.{seg}.s"}}"#);
+        assert!(id_token_nonce_binds(&body(&seg), Some(nonce)), "{nonce}");
+        if !seg.len().is_multiple_of(4) {
+            padded_seen = true;
+            let padded = format!("{seg}{}", "=".repeat(4 - seg.len() % 4));
+            assert!(
+                !id_token_nonce_binds(&body(&padded), Some(nonce)),
+                "padded {nonce}"
+            );
+        }
+        if seg.contains(['-', '_']) {
+            alphabet_seen = true;
+            let standard = seg.replace('-', "+").replace('_', "/");
+            assert!(
+                !id_token_nonce_binds(&body(&standard), Some(nonce)),
+                "standard {nonce}"
+            );
+        }
     }
+    assert!(
+        padded_seen && alphabet_seen,
+        "positive controls: a padded and a url-safe case ran"
+    );
 }
 
-/// The hop loop is bounded as 1.5.5's was: a far end that keeps answering token-shaped bodies never
-/// identifies, and the flow ends after six turns.
+/// The hop loop is bounded: a far end that keeps answering token-shaped bodies from `/user` never
+/// identifies and is never asked again (L1: a hop's answer is read as that hop's answer). The send
+/// bound itself (the org pages) is `red_g4_the_org_list_stops_at_ten_pages_with_a_warn`.
 #[test]
 fn the_hop_loop_is_bounded() {
     let l = login();
     let tok = r#"{"access_token":"gho_again"}"#;
     let mut s = Script::happy().answer(USER_URL, 200, tok);
-    assert_eq!(run(&l, &mut s), LoginStep::Outage);
-    assert_eq!(s.issued.len(), MAX_HOPS);
+    assert_eq!(run(&l, &mut s), OUTAGE);
+    assert_eq!(s.targets(), vec![TOKEN_URL, USER_URL]);
+}
+
+/// RED L1: the step machine reads each answer as the answer of the hop it sent, never by its
+/// shape: a user-shaped token reply is no token (and never an identity with no token held), a
+/// token-shaped `/user` reply never swaps the bearer, an org list from `/user` or a user from
+/// `/user/orgs` is no answer. Each is an outage, and nothing more is sent.
+#[test]
+fn red_l1_an_answer_is_read_as_the_answer_of_the_hop_sent() {
+    let login_only = GithubLogin::open(
+        &SETTINGS.replace("\"client_id\"", "\"fetch_orgs\": false, \"client_id\""),
+        Some(SECRET),
+    )
+    .expect("opens");
+    let mut s = Script::happy().answer(TOKEN_URL, 200, r#"{"login":"octocat","id":1}"#);
+    assert_eq!(
+        run(&login_only, &mut s),
+        OUTAGE,
+        "a user where the token belongs"
+    );
+    assert_eq!(s.targets(), vec![TOKEN_URL]);
+
+    let l = login();
+    let cases: [(&str, &str, Vec<&str>); 4] = [
+        (
+            USER_URL,
+            r#"{"access_token":"gho_swapped"}"#,
+            vec![TOKEN_URL, USER_URL],
+        ),
+        (USER_URL, r#"[{"login":"acme"}]"#, vec![TOKEN_URL, USER_URL]),
+        (
+            ORGS_URL,
+            r#"{"login":"someone-else","id":2}"#,
+            vec![TOKEN_URL, USER_URL, ORGS_URL],
+        ),
+        (
+            ORGS_URL,
+            r#"{"access_token":"gho_swapped"}"#,
+            vec![TOKEN_URL, USER_URL, ORGS_URL],
+        ),
+    ];
+    for (url, body, targets) in cases {
+        let mut s = Script::happy().answer(url, 200, body);
+        assert_eq!(run(&l, &mut s), OUTAGE, "{url} {body}");
+        assert_eq!(s.targets(), targets, "{url} {body}");
+        assert!(
+            s.issued
+                .iter()
+                .all(|r| plain(r).iter().all(|(_, v)| !v.contains("gho_swapped"))),
+            "{url} {body}"
+        );
+    }
 }
 
 /// The answers the 1.5.5 module, driven by the 1.5.5 core, reached for these bodies (pinned while
@@ -521,14 +924,15 @@ fn the_flow_answers_as_the_1_5_5_module_driven_by_the_1_5_5_core() {
             LoginStep::BadCredential,
             vec![TOKEN_URL],
         ),
+        // G3 (owner-signed 2026-10-30): a malformed REST answer is an outage, where 1.5.5 declined.
         (
             Script::happy().answer(ORGS_URL, 200, "[{bad"),
-            LoginStep::BadCredential,
+            OUTAGE,
             vec![TOKEN_URL, USER_URL, ORGS_URL],
         ),
         (
             Script::happy().answer(USER_URL, 200, r#"{"login":"no-id"}"#),
-            LoginStep::BadCredential,
+            OUTAGE,
             vec![TOKEN_URL, USER_URL],
         ),
     ];
@@ -572,16 +976,131 @@ fn a_callback_without_the_full_triple_is_declined_with_no_exchange() {
     }
 }
 
-/// The token endpoint's non-2xx is declined even when its body carries a token.
+/// The token endpoint's non-2xx is never a token, even when its body carries one: a 401 with an
+/// RFC 6749 §5.2 `error` is declined, a 401 without one is an outage (owner-signed 2026-10-30).
 #[test]
-fn a_non_2xx_token_answer_is_declined_even_with_a_token_in_it() {
+fn a_non_2xx_token_answer_is_never_a_token_even_with_one_in_it() {
     let l = login();
-    let mut s = Script::happy().answer(TOKEN_URL, 401, r#"{"access_token":"should-be-ignored"}"#);
+    let mut s = Script::happy().answer(
+        TOKEN_URL,
+        401,
+        r#"{"error":"invalid_grant","access_token":"should-be-ignored"}"#,
+    );
     assert_eq!(run(&l, &mut s), LoginStep::BadCredential);
+    assert_eq!(s.targets(), vec![TOKEN_URL]);
+    let mut s = Script::happy().answer(TOKEN_URL, 401, r#"{"access_token":"should-be-ignored"}"#);
+    assert_eq!(run(&l, &mut s), OUTAGE);
     assert_eq!(s.targets(), vec![TOKEN_URL]);
 }
 
-/// An empty access token (either shape) is declined: never a `Bearer ` with nothing after it.
+/// RED G1 (owner-signed 2026-10-30: only RFC 6749 §5.2 credential errors are a declined sign-in):
+/// at the token endpoint a 400/401 carrying a §5.2 `error` (JSON or form) is declined; every other
+/// non-2xx (a redirect, 403, 404, 408, a 400/401 with no `error`) is an outage, and nothing more is
+/// sent.
+#[test]
+fn red_g1_the_token_endpoint_declines_only_a_5_2_error() {
+    let l = login();
+    for (status, body) in [
+        (400, r#"{"error":"invalid_grant"}"#),
+        (401, r#"{"error":"invalid_client","error_description":"x"}"#),
+        (400, "error=invalid_grant&error_description=gone"),
+    ] {
+        let mut s = Script::happy().answer(TOKEN_URL, status, body);
+        assert_eq!(run(&l, &mut s), LoginStep::BadCredential, "{status} {body}");
+        assert_eq!(s.targets(), vec![TOKEN_URL]);
+    }
+    for (status, body) in [
+        (302, ""),
+        (301, "<html>moved</html>"),
+        (403, r#"{"message":"forbidden"}"#),
+        (404, "Not Found"),
+        (408, ""),
+        (400, "<html>bad request</html>"),
+        (401, r#"{"message":"Bad credentials"}"#),
+        (418, r#"{"error":"invalid_grant"}"#),
+    ] {
+        let mut s = Script::happy().answer(TOKEN_URL, status, body);
+        assert_eq!(run(&l, &mut s), OUTAGE, "{status} {body}");
+        assert_eq!(s.targets(), vec![TOKEN_URL]);
+    }
+}
+
+/// RED G1: on `/user` and `/user/orgs` only a 401 (the token is not accepted) is a declined
+/// sign-in; a redirect, a 404, a 408 or a 403 that is no rate limit is an outage.
+#[test]
+fn red_g1_the_rest_hops_decline_only_a_401() {
+    let l = login();
+    for (url, before) in [
+        (USER_URL, vec![TOKEN_URL, USER_URL]),
+        (ORGS_URL, vec![TOKEN_URL, USER_URL, ORGS_URL]),
+    ] {
+        let mut s = Script::happy().answer(url, 401, r#"{"message":"Bad credentials"}"#);
+        assert_eq!(run(&l, &mut s), LoginStep::BadCredential, "{url} 401");
+        for status in [301, 302, 304, 403, 404, 408, 410, 422] {
+            let mut s = Script::happy().answer(url, status, r#"{"message":"x"}"#);
+            assert_eq!(run(&l, &mut s), OUTAGE, "{url} {status}");
+            assert_eq!(s.targets(), before, "{url} {status}");
+        }
+    }
+}
+
+/// RED G1: a rate limit on any REST hop (a 403 or 429 with `retry-after` or
+/// `x-ratelimit-remaining: 0`), and a 5xx or 429 anywhere, is an outage carrying the IdP's retry
+/// hint: its `retry-after` seconds, else the seconds to its `x-ratelimit-reset`.
+#[test]
+fn red_g1_a_rate_limit_is_an_outage_with_the_idps_retry_hint() {
+    let l = login();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("after the epoch")
+        .as_secs();
+    let after = |secs: &str| ReplyFields {
+        retry_after: Some(secs.to_string()),
+        ..ReplyFields::default()
+    };
+    let spent = ReplyFields {
+        ratelimit_remaining: Some("0".to_string()),
+        ratelimit_reset: Some((now + 100).to_string()),
+        ..ReplyFields::default()
+    };
+    for url in [USER_URL, ORGS_URL] {
+        for status in [403, 429] {
+            let mut s = Script::happy().answer_with(url, status, after("60"), "{}");
+            assert_eq!(
+                run(&l, &mut s),
+                LoginStep::Outage {
+                    retry_after: Some(60)
+                },
+                "{url} {status}"
+            );
+            let mut s = Script::happy().answer_with(url, status, spent.clone(), "{}");
+            match run(&l, &mut s) {
+                LoginStep::Outage {
+                    retry_after: Some(secs),
+                } => assert!((90..=100).contains(&secs), "{url} {status}: {secs}"),
+                other => panic!("{url} {status}: {other:?}"),
+            }
+        }
+    }
+    for url in [TOKEN_URL, USER_URL, ORGS_URL] {
+        for status in [429, 500, 503] {
+            let mut s = Script::happy().answer_with(url, status, after("120"), "{}");
+            assert_eq!(
+                run(&l, &mut s),
+                LoginStep::Outage {
+                    retry_after: Some(120)
+                },
+                "{url} {status}"
+            );
+        }
+    }
+    // A hint that is no number of seconds is none.
+    let mut s = Script::happy().answer_with(USER_URL, 503, after("soon"), "{}");
+    assert_eq!(run(&l, &mut s), OUTAGE);
+}
+
+/// An empty access token (either shape) is no token: never a `Bearer ` with nothing after it. A
+/// 2xx with no token and no error is an outage (G2, owner-signed 2026-10-30).
 #[test]
 fn an_empty_access_token_is_refused() {
     let l = login();
@@ -590,28 +1109,29 @@ fn an_empty_access_token_is_refused() {
         "access_token=&scope=read:org&token_type=bearer",
     ] {
         let mut s = Script::happy().answer(TOKEN_URL, 200, body);
-        assert_eq!(run(&l, &mut s), LoginStep::BadCredential, "{body}");
+        assert_eq!(run(&l, &mut s), OUTAGE, "{body}");
         assert_eq!(s.targets(), vec![TOKEN_URL]);
     }
 }
 
-/// A `/user` without a `login` is declined.
+/// A `/user` without a `login` is no sign-in answer: an outage (G3).
 #[test]
-fn a_user_without_a_login_is_declined() {
+fn a_user_without_a_login_is_an_outage() {
     let l = login();
     let mut s = Script::happy().answer(USER_URL, 200, r#"{"id":42,"name":"No Login"}"#);
-    assert_eq!(run(&l, &mut s), LoginStep::BadCredential);
+    assert_eq!(run(&l, &mut s), OUTAGE);
     assert_eq!(s.targets(), vec![TOKEN_URL, USER_URL]);
 }
 
 /// Out-of-order bodies fail closed: an org list or a `/user` where the token response belongs
-/// (no user held, no token held) never identifies and never sends an empty bearer.
+/// (no user held, no token held) never identifies and never sends an empty bearer: no token and no
+/// error is an outage (G2, L1).
 #[test]
 fn out_of_order_bodies_fail_closed() {
     let l = login();
     for body in [r#"[{"login":"acme"}]"#, r#"{"login":"octocat","id":1}"#] {
         let mut s = Script::happy().answer(TOKEN_URL, 200, body);
-        assert_eq!(run(&l, &mut s), LoginStep::BadCredential, "{body}");
+        assert_eq!(run(&l, &mut s), OUTAGE, "{body}");
         assert_eq!(s.targets(), vec![TOKEN_URL]);
     }
 }
@@ -863,10 +1383,24 @@ fn a_poisoned_orgs_array_cannot_swap_the_token_mid_flow() {
     assert_eq!(p.id, "github:octocat");
     assert!(p.roles.contains(&"github:org/acme".to_string()));
     assert_eq!(s.targets(), vec![TOKEN_URL, USER_URL, ORGS_URL]);
+    // The bearer is the chip's (sealed, never in `fields`): read every hop as the wire frames it.
+    for r in &s.issued[1..] {
+        let authorization: Vec<String> = plain(r)
+            .into_iter()
+            .filter(|(k, _)| k == "authorization")
+            .map(|(_, v)| v)
+            .collect();
+        assert_eq!(
+            authorization,
+            vec![format!("Bearer {TOKEN}")],
+            "{}",
+            r.target
+        );
+    }
     assert!(s
         .issued
         .iter()
-        .all(|r| !r.fields.iter().any(|(_, v)| v.contains("gho_ATTACKER"))));
+        .all(|r| plain(r).iter().all(|(_, v)| !v.contains("gho_ATTACKER"))));
 }
 
 mod logging {
@@ -925,18 +1459,76 @@ mod logging {
         }
     }
 
+    /// RED L8: a hop that could not be made (refused, connect, TLS, timeout, a request that could
+    /// not be framed) ends the login as an outage with one WARN naming the hop, never silently.
+    #[test]
+    fn red_l8_an_unreachable_hop_is_a_warn_naming_the_hop() {
+        let l = login();
+        for (url, path) in [
+            (TOKEN_URL, "/login/oauth/access_token"),
+            (USER_URL, "/user"),
+            (ORGS_URL, "/user/orgs"),
+        ] {
+            let mut s = Script::happy().unreachable(url);
+            let cap = WarnCapture::default();
+            let step = tracing::subscriber::with_default(cap.clone(), || run(&l, &mut s));
+            assert_eq!(step, OUTAGE, "{url}");
+            assert!(
+                cap.contains("could not be made"),
+                "{url}: {:?}",
+                cap.messages()
+            );
+            assert!(cap.contains(path), "{url}: {:?}", cap.messages());
+            assert!(cap.contains("module=github"), "{url}: {:?}", cap.messages());
+        }
+    }
+
+    /// RED G1: a 403 on `/user/orgs` that is no rate limit is the operator's (the token lacks the
+    /// `read:org` scope): an outage, and a WARN naming the scope.
+    #[test]
+    fn red_g1_a_403_on_the_org_list_warns_of_the_scope() {
+        let l = login();
+        let mut s = Script::happy().answer(ORGS_URL, 403, r#"{"message":"forbidden"}"#);
+        let cap = WarnCapture::default();
+        let step = tracing::subscriber::with_default(cap.clone(), || run(&l, &mut s));
+        assert_eq!(step, OUTAGE);
+        assert!(cap.contains("read:org"), "{:?}", cap.messages());
+        assert!(cap.contains("module=github"), "{:?}", cap.messages());
+    }
+
     #[test]
     fn a_misconfigured_client_is_a_warn() {
         let l = login();
         let mut s = Script::new().answer(TOKEN_URL, 200, "error=incorrect_client_credentials");
         let cap = WarnCapture::default();
         let step = tracing::subscriber::with_default(cap.clone(), || run(&l, &mut s));
-        assert_eq!(step, LoginStep::BadCredential);
+        assert_eq!(
+            step, OUTAGE,
+            "the operator's misconfiguration is no declined sign-in"
+        );
         assert!(
             cap.contains("incorrect_client_credentials"),
             "{:?}",
             cap.messages()
         );
+    }
+
+    /// RED G2: an error code is logged only when it is `[a-z0-9_]{1,64}`; any other far-end string
+    /// is `<unrecognised>`, never echoed.
+    #[test]
+    fn red_g2_a_foreign_error_string_is_never_logged() {
+        let l = login();
+        for body in [
+            r#"{"error":"EVIL\u001b[31m forged line"}"#.to_string(),
+            format!("error=EVIL{}", "x".repeat(80)),
+        ] {
+            let mut s = Script::new().answer(TOKEN_URL, 200, &body);
+            let cap = WarnCapture::capturing_debug();
+            let step = tracing::subscriber::with_default(cap.clone(), || run(&l, &mut s));
+            assert_eq!(step, OUTAGE, "{body}");
+            assert!(!cap.contains("EVIL"), "{:?}", cap.messages());
+            assert!(cap.contains("<unrecognised>"), "{:?}", cap.messages());
+        }
     }
 }
 
@@ -946,6 +1538,7 @@ mod logging {
 fn a_hop_response_debug_shows_no_body() {
     let r = HopResponse {
         status: 200,
+        fields: ReplyFields::default(),
         body: b"access_token=SECRETX".to_vec().into(),
     };
     let text = format!("{r:?} {:?}", Fetched::Ready(r.clone()));
@@ -967,7 +1560,7 @@ fn a_hop_reply_over_the_cap_is_an_outage() {
     let mut body = format!(r#"{{"access_token":"{TOKEN}"}}"#);
     body.push_str(&" ".repeat(256 * 1024 + 1 - body.len()));
     let mut s = Script::happy().answer(TOKEN_URL, 200, &body);
-    assert_eq!(run(&l, &mut s), LoginStep::Outage);
+    assert_eq!(run(&l, &mut s), OUTAGE);
     assert_eq!(s.targets(), vec![TOKEN_URL]);
     // At the cap exactly it is read.
     body.pop();
@@ -1007,16 +1600,17 @@ fn the_hop_bodies_are_wiped_on_drop() {
     wipes(&request.body);
     let response = HopResponse {
         status: 200,
+        fields: ReplyFields::default(),
         body: b"access_token=x".to_vec().into(),
     };
     wipes(&response.body);
 }
 
-/// GHO2, REFRESH MID-FLOW: the door swaps the login whole on `refresh` and resumes a parked flow
-/// with the login current at the next entry. The hop parked on a pending exchange is re-issued
-/// exactly as it was sent (its stored answer is read, the code is never redeemed twice), and the
-/// hops after it are rendered by the refreshed login: its client secret is never sent, as no
-/// token exchange is made again.
+/// GHO2, REFRESH MID-FLOW: the door swaps the login whole on `refresh`, but a parked flow is
+/// driven by the login it began under to its end (L2, `door::driving`). Even a flow driven by
+/// another login re-issues the hop parked on a pending exchange exactly as it was sent (its stored
+/// answer is read, the code is never redeemed twice), and that login's client secret is never sent,
+/// as no token exchange is made again.
 #[test]
 fn a_refresh_mid_flow_resumes_the_parked_hop_unchanged() {
     let before = login();

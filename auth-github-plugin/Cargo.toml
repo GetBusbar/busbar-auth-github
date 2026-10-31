@@ -34,3 +34,6 @@ serde_json = { workspace = true }
 busbar-core-connector = { workspace = true }
 busbar-transport-http = { workspace = true }
 busbar-transport-tcp = { workspace = true }
+
+[lints]
+workspace = true

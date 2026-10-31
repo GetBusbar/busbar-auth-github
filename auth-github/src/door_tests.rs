@@ -14,7 +14,10 @@ fn security_check_failed_is_its_own_verdict() {
 #[test]
 fn other_steps_keep_their_verdicts() {
     assert_eq!(verdict(&LoginStep::BadCredential), LOGIN_BAD_CREDENTIAL);
-    assert_eq!(verdict(&LoginStep::Outage), LOGIN_OUTAGE);
+    assert_eq!(
+        verdict(&LoginStep::Outage { retry_after: None }),
+        LOGIN_OUTAGE
+    );
 }
 
 fn who(id: &str) -> Principal {
@@ -60,6 +63,40 @@ fn a_ticket_kept_again_does_not_evict() {
     assert!(map.contains_key(&ticket(1)));
 }
 
+/// RED L10: a short answer kept for its retry is dropped once it is older than 10 minutes, on the
+/// next access: a retry that never comes holds no identity for ever.
+#[test]
+fn red_l10_an_answered_entry_older_than_ten_minutes_is_dropped() {
+    let now = Instant::now();
+    let Some(stale) = now.checked_sub(std::time::Duration::from_secs(10 * 60 + 1)) else {
+        return; // the clock is younger than the bound: nothing can be that old
+    };
+    let fresh = now - std::time::Duration::from_secs(9 * 60);
+    let mut map = Answered::new();
+    keep(&mut map, 1024, stale, ticket(1), who("stale"));
+    keep(&mut map, 1024, fresh, ticket(2), who("fresh"));
+    keep(&mut map, 1024, now, ticket(3), who("now"));
+    assert!(!map.contains_key(&ticket(1)), "the stale entry is dropped");
+    assert!(map.contains_key(&ticket(2)) && map.contains_key(&ticket(3)));
+}
+
+/// A short answer is served once to its retry, and not when it is stale.
+#[test]
+fn a_kept_answer_is_taken_once_and_never_stale() {
+    let now = Instant::now();
+    let mut map = Answered::new();
+    keep(&mut map, 8, now, ticket(1), who("a"));
+    assert_eq!(
+        take(&mut map, now, ticket(1)).map(|p| p.id),
+        Some("a".to_string())
+    );
+    assert_eq!(take(&mut map, now, ticket(1)), None, "served once");
+    keep(&mut map, 8, now, ticket(2), who("b"));
+    let later = now + ANSWERED_TTL + std::time::Duration::from_secs(1);
+    assert_eq!(take(&mut map, later, ticket(2)), None, "stale");
+    assert!(map.is_empty());
+}
+
 /// Every base written out, as a usable config must be.
 const WRITTEN: &str = r#"{
     "client_id": "Iv1.client",
@@ -81,7 +118,7 @@ const PEM: &str = "-----BEGIN CERTIFICATE-----\\nY29uZm9ybWFuY2U=\\n-----END CER
 
 /// RED: a `ca_cert_pem` (a GHES behind an internal CA) anchors every hop: the login goes out on the
 /// need that trusts it (`trust_from` = `settings.ca_cert_pem`), beside the public roots. Without
-/// one (absent, null or empty) it goes out on the public-roots need.
+/// one (absent or null) it goes out on the public-roots need.
 #[test]
 fn a_set_ca_cert_pem_anchors_the_hops() {
     let anchored = WRITTEN.replace(
@@ -96,10 +133,29 @@ fn a_set_ca_cert_pem_anchors_the_hops() {
     for public in [
         WRITTEN.to_string(),
         WRITTEN.replace("\"client_id\"", "\"ca_cert_pem\": null, \"client_id\""),
-        WRITTEN.replace("\"client_id\"", "\"ca_cert_pem\": \"\", \"client_id\""),
     ] {
         let login = GithubLogin::open(&public, None).expect("opens");
         assert_eq!(need_of(&login), NEED_PUBLIC, "{public}");
+    }
+}
+
+/// RED L5: a `ca_cert_pem` written but blank names no certificate: refused at validate and open,
+/// by name, never accepted and ignored (the operator meant to anchor the hops).
+#[test]
+fn red_l5_a_blank_ca_cert_pem_is_refused_by_name() {
+    for blank in ["", "   ", "\\n\\t "] {
+        let settings = WRITTEN.replace(
+            "\"client_id\"",
+            &format!("\"ca_cert_pem\": \"{blank}\", \"client_id\""),
+        );
+        let r = refusal(&settings);
+        assert_eq!(r.outcome(), Outcome::Failed, "{blank:?}");
+        assert_eq!(
+            r.text(),
+            Some("settings.ca_cert_pem: blank: omit it, or give a PEM certificate"),
+            "{blank:?}"
+        );
+        assert!(GithubLogin::open(&settings, None).is_err(), "{blank:?}");
     }
 }
 
@@ -225,5 +281,75 @@ fn an_empty_client_id_or_base_is_refused_by_name() {
         let r = refusal(&settings.to_string());
         assert_eq!(r.outcome(), Outcome::Failed);
         assert_eq!(r.text(), Some(line), "{key}={value:?}");
+    }
+}
+
+/// RED L2: a flow parked before `refresh()` resumes under the login it began with, to its end (its
+/// client secret, its bases, its allowlist), never under the refreshed one.
+#[test]
+fn red_l2_a_parked_flow_resumes_under_the_login_it_began_with() {
+    let g = <Github as Life>::open(WRITTEN.as_bytes(), &[b"secret-before"], 1).expect("opens");
+    let begun = g.login();
+    let parked = Parked {
+        flow: begun.start(
+            Some("the-code"),
+            Some("https://node.example/auth/token"),
+            Some("the-verifier"),
+            None,
+        ),
+        login: begun.clone(),
+        wire: None,
+        base: 0,
+    };
+    let rotated = WRITTEN.replace("https://api.github.com", "https://ghe.example/api/v3");
+    <Github as Life>::refresh(&g, rotated.as_bytes(), &[b"secret-after"], 2).expect("refreshes");
+    assert_eq!(g.login().config().api_base, "https://ghe.example/api/v3");
+    let resumed = driving(&g, &parked);
+    assert!(
+        Arc::ptr_eq(&resumed, &begun),
+        "the flow keeps its own login"
+    );
+    assert_eq!(resumed.config().api_base, "https://api.github.com");
+    // A flow begun after the refresh is the refreshed login's.
+    let after = Parked {
+        flow: g.login().start(None, None, None, None),
+        login: g.login(),
+        wire: None,
+        base: 0,
+    };
+    assert!(Arc::ptr_eq(&driving(&g, &after), &g.login()));
+}
+
+/// RED L6: `fetch_orgs` (the default) reads `/user/orgs`, which needs the `read:org` scope (or a
+/// scope that holds it: `write:org`, `admin:org`, `user`). Scopes without one would have every
+/// login's org hop answered 403: refused at validate and open, by name.
+#[test]
+fn red_l6_fetch_orgs_without_an_org_scope_is_refused_by_name() {
+    let with = |extra: &str| WRITTEN.replace("\"client_id\"", &format!("{extra}, \"client_id\""));
+    for scopes in [r#"["read:user"]"#, "[]", r#"["repo","user:email"]"#] {
+        for fetch in ["", r#", "fetch_orgs": true"#] {
+            let settings = with(&format!(r#""scopes": {scopes}{fetch}"#));
+            let r = refusal(&settings);
+            assert_eq!(r.outcome(), Outcome::Failed, "{settings}");
+            assert_eq!(
+                r.text(),
+                Some("settings.scopes: fetch_orgs reads /user/orgs, which needs the read:org scope (or write:org, admin:org, user): add it, or set fetch_orgs: false"),
+                "{settings}"
+            );
+            assert!(GithubLogin::open(&settings, None).is_err());
+        }
+    }
+    for ok in [
+        r#""scopes": ["read:org"]"#,
+        r#""scopes": ["read:user", "admin:org"]"#,
+        r#""scopes": ["write:org"]"#,
+        r#""scopes": ["user"]"#,
+        r#""scopes": ["read:user"], "fetch_orgs": false"#,
+        r#""scopes": [], "fetch_orgs": false"#,
+    ] {
+        assert!(
+            <Github as Life>::validate(with(ok).as_bytes()).is_ok(),
+            "{ok}"
+        );
     }
 }
