@@ -63,6 +63,23 @@ fn a_ticket_kept_again_does_not_evict() {
     assert!(map.contains_key(&ticket(1)));
 }
 
+/// RED L10: a short answer kept for its retry is dropped once it is older than 10 minutes, on the
+/// next access: a retry that never comes holds no identity for ever.
+#[test]
+fn red_l10_an_answered_entry_older_than_ten_minutes_is_dropped() {
+    let now = Instant::now();
+    let Some(stale) = now.checked_sub(std::time::Duration::from_secs(10 * 60 + 1)) else {
+        return; // the clock is younger than the bound: nothing can be that old
+    };
+    let fresh = now - std::time::Duration::from_secs(9 * 60);
+    let mut map = Answered::new();
+    keep(&mut map, 1024, stale, ticket(1), who("stale"));
+    keep(&mut map, 1024, fresh, ticket(2), who("fresh"));
+    keep(&mut map, 1024, now, ticket(3), who("now"));
+    assert!(!map.contains_key(&ticket(1)), "the stale entry is dropped");
+    assert!(map.contains_key(&ticket(2)) && map.contains_key(&ticket(3)));
+}
+
 /// Every base written out, as a usable config must be.
 const WRITTEN: &str = r#"{
     "client_id": "Iv1.client",
