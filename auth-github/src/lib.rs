@@ -44,8 +44,8 @@ use serde_json::Value;
 use zeroize::Zeroizing;
 
 /// The default OAuth scopes requested: `read:org` (to enumerate the caller's org memberships → groups)
-/// and `read:user` (the profile `/user` read). Operators can override via `scopes`, and `begin_login`
-/// additionally folds in any request-time extra scopes.
+/// and `read:user` (the profile `/user` read). Operators can override via `scopes`; the door asks
+/// for exactly the configured scopes (it passes no request-time extras).
 fn default_scopes() -> Vec<String> {
     vec!["read:org".to_string(), "read:user".to_string()]
 }
@@ -157,8 +157,8 @@ fn pct(s: &str) -> String {
     out
 }
 
-/// The space-delimited `scope` value: the configured scopes plus any request-time extras, order
-/// preserved and de-duplicated.
+/// The space-delimited `scope` value: the configured scopes plus `extra` (the door passes none),
+/// order preserved and de-duplicated.
 fn scope_value(cfg: &GitHubConfig, extra: &[String]) -> String {
     let mut scopes: Vec<String> = Vec::new();
     for s in cfg.scopes.iter().chain(extra.iter()) {
@@ -170,7 +170,7 @@ fn scope_value(cfg: &GitHubConfig, extra: &[String]) -> String {
 }
 
 /// Build the GitHub **authorization-code** authorize URL: `response_type=code`, `client_id`,
-/// `redirect_uri`, `scope` (configured + request-time extras), `state`, and PKCE `code_challenge` +
+/// `redirect_uri`, `scope` (the configured scopes, plus `extra_scopes`: the door passes none), `state`, and PKCE `code_challenge` +
 /// `code_challenge_method=S256`. Structurally cannot contain a `client_secret`: the begin path is
 /// public.
 ///

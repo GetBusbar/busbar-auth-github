@@ -109,8 +109,7 @@ and the REST API at `https://<host>/api/v3`:
 ### Groups
 
 Each org the user belongs to becomes a group string `github:org/<org-login>`, mapped to policy by the
-operator's `auth.role_bindings.github:`. (Team-level groups `github:team/<org>/<team-slug>` are a
-straightforward extension via a `/user/teams` hop; not enabled by default.)
+operator's `auth.role_bindings.github:`.
 
 ## Build
 
@@ -163,8 +162,7 @@ cargo test --workspace --locked
 ```
 
 `auth-github-plugin/tests/conformance.rs` runs busbar's published conformance suite (both doors,
-the far ends in `conformance.json`) and mounts the test kit's host
-(`tests/support/conformance_host.rs`). `tests/e2e.rs` is the live end-to-end against a real busbar
+the far ends in `conformance.json`). `tests/e2e.rs` is the live end-to-end against a real busbar
 and a wiremock GitHub (CI's `wiremock` service).
 
 ## License
