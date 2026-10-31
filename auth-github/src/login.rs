@@ -36,8 +36,8 @@
 use crate::guard::{collect_allowed_hosts, sanitize_hop_header, vet_hop_url, Refused};
 use crate::{
     build_github_authorize_url, build_orgs_get, build_orgs_page_get, build_principal,
-    build_token_exchange, build_userinfo_get, is_json_array, next_link, parse_access_token,
-    parse_org_groups, parse_user, GhUser, GitHubConfig,
+    build_token_exchange, build_userinfo_get, next_link, parse_access_token, parse_org_groups,
+    parse_user, GhUser, GitHubConfig,
 };
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
@@ -271,6 +271,8 @@ struct FlowState {
     orgs: Vec<String>,
     /// The org pages read so far.
     pages: usize,
+    /// The hop the next answer is the answer of (the one sent last).
+    hop: Hop,
 }
 
 /// The callback's inputs and the last hop answer the step machine reads, every credential among
@@ -543,102 +545,95 @@ impl GithubLogin {
             );
             return Turn::Decline;
         }
+        // L1: the answer is the answer of the hop that was sent, read as that hop's, never by its
+        // shape.
+        let hop = flow.state.hop;
         // OWNER-SIGNED 2026-10-30: only a credential error is a declined sign-in; every other
         // answer that is no 2xx is the IdP not answering this hop, an outage (the host answers
         // 503, retryable), carrying the IdP's retry hint when it gave one.
         if !(200..300).contains(&status) {
-            let turn = refused_answer(hop_of(&flow.state), status, fields, body);
+            let turn = refused_answer(hop, status, fields, body);
             flow.state = FlowState::default();
             return turn;
         }
-        if let Some(token) = parse_access_token(body) {
-            let hop = build_userinfo_get(&self.cfg);
-            flow.state = FlowState {
-                access_token: Some(token.secure_for(&self.cfg.api_base)),
-                ..FlowState::default()
-            };
-            return Turn::Exchange(hop);
-        }
-        if is_json_array(body) {
-            let state = std::mem::take(&mut flow.state);
-            let Some(user) = state.user else {
-                tracing::info!(
-                    module = "github",
-                    "github login: declined, an org list arrived before the user"
-                );
-                return Turn::Decline;
-            };
-            let Some(groups) = parse_org_groups(body) else {
-                // G3 (owner-signed 2026-10-30): no sign-in answer, the far end's fault: an outage.
-                tracing::warn!(
-                    module = "github",
-                    "github login: /user/orgs answered a malformed list"
-                );
-                return Turn::Outage { retry_after: None };
-            };
-            let mut orgs = state.orgs;
-            orgs.extend(groups);
-            let pages = state.pages + 1;
-            // G4: the list is paginated; its `Link: rel="next"` is followed on the API's own
-            // origin (and through the hop guard, as every hop), up to MAX_ORG_PAGES pages.
-            match fields.link.as_deref().and_then(next_link) {
-                None => {}
-                Some(_) if pages >= MAX_ORG_PAGES => tracing::warn!(
-                    module = "github",
-                    pages,
-                    "github login: the org list is truncated at {MAX_ORG_PAGES} pages: org groups past it are not granted"
-                ),
-                Some(next) => {
-                    if !same_origin(next, &self.cfg.api_base) {
-                        tracing::warn!(
-                            module = "github",
-                            "github login: /user/orgs answered a next link off the API's origin; not followed"
-                        );
-                        return Turn::Outage { retry_after: None };
-                    }
-                    let hop = build_orgs_page_get(next);
-                    flow.state = FlowState {
-                        access_token: state.access_token,
-                        user: Some(user),
-                        orgs,
-                        pages,
-                    };
-                    return Turn::Exchange(hop);
+        match hop {
+            Hop::Token => {
+                let Some(token) = parse_access_token(body) else {
+                    // GitHub answered no access_token.
+                    flow.state = FlowState::default();
+                    return token_refusal(body);
+                };
+                flow.state = FlowState {
+                    access_token: Some(token.secure_for(&self.cfg.api_base)),
+                    hop: Hop::User,
+                    ..FlowState::default()
+                };
+                Turn::Exchange(build_userinfo_get(&self.cfg))
+            }
+            Hop::User => {
+                let Some(user) = parse_user(body) else {
+                    // G3 (owner-signed 2026-10-30): a malformed or foreign 2xx from the REST API
+                    // is no sign-in answer: an outage.
+                    tracing::warn!(
+                        module = "github",
+                        hop = hop.path(),
+                        "github login: /user answered 2xx with no user (a login and a numeric id)"
+                    );
+                    flow.state = FlowState::default();
+                    return Turn::Outage { retry_after: None };
+                };
+                if !self.cfg.fetch_orgs {
+                    flow.state = FlowState::default();
+                    return Turn::Identify(build_principal(&user, Vec::new()));
                 }
+                flow.state.user = Some(user);
+                flow.state.hop = Hop::Orgs;
+                Turn::Exchange(build_orgs_get(&self.cfg))
             }
-            return Turn::Identify(build_principal(&user, orgs));
-        }
-        let Some(user) = parse_user(body) else {
-            if flow.state.access_token.is_none() {
-                // The token hop: GitHub answered no access_token.
-                let turn = token_refusal(body);
-                flow.state = FlowState::default();
-                return turn;
+            Hop::Orgs => {
+                let state = std::mem::take(&mut flow.state);
+                let (Some(user), Some(groups)) = (state.user, parse_org_groups(body)) else {
+                    // G3 (owner-signed 2026-10-30): no sign-in answer, the far end's fault.
+                    tracing::warn!(
+                        module = "github",
+                        hop = hop.path(),
+                        "github login: /user/orgs answered 2xx with no org list"
+                    );
+                    return Turn::Outage { retry_after: None };
+                };
+                let mut orgs = state.orgs;
+                orgs.extend(groups);
+                let pages = state.pages + 1;
+                // G4: the list is paginated; its `Link: rel="next"` is followed on the API's own
+                // origin (and through the hop guard, as every hop), up to MAX_ORG_PAGES pages.
+                match fields.link.as_deref().and_then(next_link) {
+                    None => {}
+                    Some(_) if pages >= MAX_ORG_PAGES => tracing::warn!(
+                        module = "github",
+                        pages,
+                        "github login: the org list is truncated at {MAX_ORG_PAGES} pages: org groups past it are not granted"
+                    ),
+                    Some(next) => {
+                        if !same_origin(next, &self.cfg.api_base) {
+                            tracing::warn!(
+                                module = "github",
+                                "github login: /user/orgs answered a next link off the API's origin; not followed"
+                            );
+                            return Turn::Outage { retry_after: None };
+                        }
+                        flow.state = FlowState {
+                            access_token: state.access_token,
+                            user: Some(user),
+                            orgs,
+                            pages,
+                            hop: Hop::Orgs,
+                        };
+                        return Turn::Exchange(build_orgs_page_get(next));
+                    }
+                }
+                Turn::Identify(build_principal(&user, orgs))
             }
-            // G3 (owner-signed 2026-10-30): a malformed or foreign 2xx from the REST API is no
-            // sign-in answer: an outage.
-            tracing::warn!(
-                module = "github",
-                hop = hop_of(&flow.state).path(),
-                "github login: the GitHub API answered 2xx with no user (a login and a numeric id) or org list"
-            );
-            flow.state = FlowState::default();
-            return Turn::Outage { retry_after: None };
-        };
-        if !self.cfg.fetch_orgs {
-            flow.state = FlowState::default();
-            return Turn::Identify(build_principal(&user, Vec::new()));
         }
-        if flow.state.access_token.is_none() {
-            tracing::info!(
-                module = "github",
-                "github login: declined, no access token held at /user"
-            );
-            return Turn::Decline;
-        }
-        let hop = build_orgs_get(&self.cfg);
-        flow.state.user = Some(user);
-        Turn::Exchange(hop)
     }
 
     /// Render a hop up to the send: vet the URL, seal the client secret into the named form
@@ -731,9 +726,10 @@ enum Turn {
 }
 
 /// The hops of a GitHub login.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 enum Hop {
     /// The token exchange.
+    #[default]
     Token,
     /// `GET /user`.
     User,
@@ -757,15 +753,6 @@ fn same_origin(url: &str, base: &str) -> bool {
     match (split(url), split(base)) {
         (Some((a, _)), Some((b, _))) => a.eq_ignore_ascii_case(b),
         _ => false,
-    }
-}
-
-/// Which hop a held state means the last answer came from.
-fn hop_of(state: &FlowState) -> Hop {
-    match (&state.access_token, &state.user) {
-        (None, _) => Hop::Token,
-        (Some(_), None) => Hop::User,
-        (Some(_), Some(_)) => Hop::Orgs,
     }
 }
 
@@ -915,6 +902,9 @@ fn github_error(body: &str) -> Option<String> {
     if trimmed.starts_with('{') {
         let v: Value = serde_json::from_str(trimmed).ok()?;
         return v.get("error").and_then(Value::as_str).map(str::to_string);
+    }
+    if trimmed.starts_with('[') {
+        return None;
     }
     trimmed
         .split('&')
