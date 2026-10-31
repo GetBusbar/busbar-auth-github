@@ -80,6 +80,23 @@ fn red_l10_an_answered_entry_older_than_ten_minutes_is_dropped() {
     assert!(map.contains_key(&ticket(2)) && map.contains_key(&ticket(3)));
 }
 
+/// A short answer is served once to its retry, and not when it is stale.
+#[test]
+fn a_kept_answer_is_taken_once_and_never_stale() {
+    let now = Instant::now();
+    let mut map = Answered::new();
+    keep(&mut map, 8, now, ticket(1), who("a"));
+    assert_eq!(
+        take(&mut map, now, ticket(1)).map(|p| p.id),
+        Some("a".to_string())
+    );
+    assert_eq!(take(&mut map, now, ticket(1)), None, "served once");
+    keep(&mut map, 8, now, ticket(2), who("b"));
+    let later = now + ANSWERED_TTL + std::time::Duration::from_secs(1);
+    assert_eq!(take(&mut map, later, ticket(2)), None, "stale");
+    assert!(map.is_empty());
+}
+
 /// Every base written out, as a usable config must be.
 const WRITTEN: &str = r#"{
     "client_id": "Iv1.client",
