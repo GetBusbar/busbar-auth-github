@@ -524,6 +524,31 @@ fn a_callback_missing_the_verifier_is_declined_with_no_exchange() {
     assert!(s.issued.is_empty());
 }
 
+/// RED L7: an empty code, redirect_uri or code_verifier is refused before the exchange: the code
+/// is never spent on a callback that cannot complete.
+#[test]
+fn red_l7_an_empty_callback_value_is_declined_before_the_exchange() {
+    let l = login();
+    for (code, redirect_uri, verifier) in [
+        ("", "https://node.example/cb", "v"),
+        ("c", "https://node.example/cb", ""),
+        ("c", "", "v"),
+        ("", "", ""),
+    ] {
+        let mut s = Script::happy();
+        let mut f = l.start(Some(code), Some(redirect_uri), Some(verifier), Some(NONCE));
+        assert_eq!(
+            l.drive(&mut f, &mut s),
+            LoginStep::BadCredential,
+            "{code:?} {redirect_uri:?} {verifier:?}"
+        );
+        assert!(
+            s.issued.is_empty(),
+            "{code:?} {redirect_uri:?} {verifier:?}"
+        );
+    }
+}
+
 /// Slow I/O pends: each hop answers PENDING once, the flow parks on it, and the next drive re-issues
 /// the SAME request (a one-shot exchange serves its stored result) and carries on.
 #[test]
