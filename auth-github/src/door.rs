@@ -250,12 +250,24 @@ impl SafeSlot for Begin {
     }
 }
 
-/// What a pending `complete_login` parks on its ticket: the flow, the exchange in flight, and how
-/// many connector services the finished hops made (the next hop's handles count on from there).
+/// What a pending `complete_login` parks on its ticket: the login the flow began under, the flow,
+/// the exchange in flight, and how many connector services the finished hops made (the next hop's
+/// handles count on from there).
 struct Parked {
+    login: Arc<GithubLogin>,
     flow: LoginFlow,
     wire: Option<Wire>,
     base: u32,
+}
+
+/// The login a resumed flow is driven by: the instance's current one.
+fn driving(g: &Github, parked: &Parked) -> Arc<GithubLogin> {
+    let current = g.login();
+    if Arc::ptr_eq(&parked.login, &current) {
+        parked.login.clone()
+    } else {
+        current
+    }
 }
 
 /// The hop exchange over the instance's connector: one framed `exchange()` per hop on the one need.
@@ -368,20 +380,24 @@ impl SafeSlot for Complete {
         if let Some((_, p)) = reached {
             return identify(g, ticket, p, buf, &mut out);
         }
-        let login = g.login();
         let mut parked = match instance.resume::<Parked>() {
             Some(p) => *p,
-            None => Parked {
-                flow: login.start(
-                    blob_text(input.code()),
-                    text(input.redirect_uri()),
-                    blob_text(input.code_verifier()),
-                    text(input.nonce()),
-                ),
-                wire: None,
-                base: 0,
-            },
+            None => {
+                let login = g.login();
+                Parked {
+                    flow: login.start(
+                        blob_text(input.code()),
+                        text(input.redirect_uri()),
+                        blob_text(input.code_verifier()),
+                        text(input.nonce()),
+                    ),
+                    login,
+                    wire: None,
+                    base: 0,
+                }
+            }
         };
+        let login = driving(g, &parked);
         let step = match h.host() {
             None => login.drive(&mut parked.flow, &mut Unarmed),
             Some(host) => {
