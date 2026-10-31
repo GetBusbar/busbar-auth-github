@@ -145,13 +145,18 @@ fn orgs_endpoint(cfg: &GitHubConfig) -> String {
 /// else `%`-escaped). Used only for the authorize URL; the token-exchange form is encoded by the
 /// SDK's `FormBody`.
 fn pct(s: &str) -> String {
+    const HEX: &[u8; 16] = b"0123456789ABCDEF";
     let mut out = String::with_capacity(s.len());
     for &b in s.as_bytes() {
         match b {
             b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
                 out.push(b as char)
             }
-            _ => out.push_str(&format!("%{b:02X}")),
+            _ => {
+                out.push('%');
+                out.push(char::from(HEX[usize::from(b >> 4)]));
+                out.push(char::from(HEX[usize::from(b & 0x0f)]));
+            }
         }
     }
     out
