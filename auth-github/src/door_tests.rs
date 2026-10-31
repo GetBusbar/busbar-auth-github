@@ -230,3 +230,39 @@ fn an_empty_client_id_or_base_is_refused_by_name() {
         assert_eq!(r.text(), Some(line), "{key}={value:?}");
     }
 }
+
+/// RED L2: a flow parked before `refresh()` resumes under the login it began with, to its end (its
+/// client secret, its bases, its allowlist), never under the refreshed one.
+#[test]
+fn red_l2_a_parked_flow_resumes_under_the_login_it_began_with() {
+    let g = <Github as Life>::open(WRITTEN.as_bytes(), &[b"secret-before"], 1).expect("opens");
+    let begun = g.login();
+    let parked = Parked {
+        flow: begun.start(
+            Some("the-code"),
+            Some("https://node.example/auth/token"),
+            Some("the-verifier"),
+            None,
+        ),
+        login: begun.clone(),
+        wire: None,
+        base: 0,
+    };
+    let rotated = WRITTEN.replace("https://api.github.com", "https://ghe.example/api/v3");
+    <Github as Life>::refresh(&g, rotated.as_bytes(), &[b"secret-after"], 2).expect("refreshes");
+    assert_eq!(g.login().config().api_base, "https://ghe.example/api/v3");
+    let resumed = driving(&g, &parked);
+    assert!(
+        Arc::ptr_eq(&resumed, &begun),
+        "the flow keeps its own login"
+    );
+    assert_eq!(resumed.config().api_base, "https://api.github.com");
+    // A flow begun after the refresh is the refreshed login's.
+    let after = Parked {
+        flow: g.login().start(None, None, None, None),
+        login: g.login(),
+        wire: None,
+        base: 0,
+    };
+    assert!(Arc::ptr_eq(&driving(&g, &after), &g.login()));
+}
