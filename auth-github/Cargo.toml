@@ -25,3 +25,6 @@ tracing = { workspace = true }
 busbar-contract = { workspace = true, features = ["test-seal"] }
 # The test kit's in-memory log double (`busbar_test_kit::warn_capture::WarnCapture`).
 busbar-test-kit = { workspace = true }
+
+[lints]
+workspace = true
