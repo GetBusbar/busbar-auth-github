@@ -139,7 +139,16 @@ impl HopRequest {
             );
             return None;
         };
-        let body = self.body.encoded().ok()?;
+        let body = match self.body.encoded() {
+            Ok(body) => body,
+            Err(_) => {
+                tracing::warn!(
+                    module = "github",
+                    "github login: the hop's form body could not be encoded"
+                );
+                return None;
+            }
+        };
         let at = self
             .fields
             .iter()
@@ -512,7 +521,12 @@ impl GithubLogin {
                     return LoginStep::Pending;
                 }
                 Fetched::Unreachable => {
-                    return finish(flow, LoginStep::Outage { retry_after: None })
+                    tracing::warn!(
+                        module = "github",
+                        hop = flow.state.hop.path(),
+                        "github login: the hop could not be made (refused, connect, TLS, timeout, or a request that could not be framed)"
+                    );
+                    return finish(flow, LoginStep::Outage { retry_after: None });
                 }
                 Fetched::Ready(mut resp) => {
                     if resp.body.len() > MAX_HOP_REPLY_BYTES {
