@@ -744,15 +744,67 @@ fn b64url_decode_is_strict_url_safe_no_pad() {
     }
 }
 
-/// The hop loop is bounded as 1.5.5's was: a far end that keeps answering token-shaped bodies never
-/// identifies, and the flow ends after six turns.
+/// The hop loop is bounded: a far end that keeps answering token-shaped bodies from `/user` never
+/// identifies and is never asked again (L1: a hop's answer is read as that hop's answer). The send
+/// bound itself (the org pages) is `red_g4_the_org_list_stops_at_ten_pages_with_a_warn`.
 #[test]
 fn the_hop_loop_is_bounded() {
     let l = login();
     let tok = r#"{"access_token":"gho_again"}"#;
     let mut s = Script::happy().answer(USER_URL, 200, tok);
     assert_eq!(run(&l, &mut s), OUTAGE);
-    assert_eq!(s.issued.len(), MAX_HOPS);
+    assert_eq!(s.targets(), vec![TOKEN_URL, USER_URL]);
+}
+
+/// RED L1: the step machine reads each answer as the answer of the hop it sent, never by its
+/// shape: a user-shaped token reply is no token (and never an identity with no token held), a
+/// token-shaped `/user` reply never swaps the bearer, an org list from `/user` or a user from
+/// `/user/orgs` is no answer. Each is an outage, and nothing more is sent.
+#[test]
+fn red_l1_an_answer_is_read_as_the_answer_of_the_hop_sent() {
+    let login_only = GithubLogin::open(
+        &SETTINGS.replace("\"client_id\"", "\"fetch_orgs\": false, \"client_id\""),
+        Some(SECRET),
+    )
+    .expect("opens");
+    let mut s = Script::happy().answer(TOKEN_URL, 200, r#"{"login":"octocat","id":1}"#);
+    assert_eq!(
+        run(&login_only, &mut s),
+        OUTAGE,
+        "a user where the token belongs"
+    );
+    assert_eq!(s.targets(), vec![TOKEN_URL]);
+
+    let l = login();
+    let cases: [(&str, &str, Vec<&str>); 4] = [
+        (
+            USER_URL,
+            r#"{"access_token":"gho_swapped"}"#,
+            vec![TOKEN_URL, USER_URL],
+        ),
+        (USER_URL, r#"[{"login":"acme"}]"#, vec![TOKEN_URL, USER_URL]),
+        (
+            ORGS_URL,
+            r#"{"login":"someone-else","id":2}"#,
+            vec![TOKEN_URL, USER_URL, ORGS_URL],
+        ),
+        (
+            ORGS_URL,
+            r#"{"access_token":"gho_swapped"}"#,
+            vec![TOKEN_URL, USER_URL, ORGS_URL],
+        ),
+    ];
+    for (url, body, targets) in cases {
+        let mut s = Script::happy().answer(url, 200, body);
+        assert_eq!(run(&l, &mut s), OUTAGE, "{url} {body}");
+        assert_eq!(s.targets(), targets, "{url} {body}");
+        assert!(
+            s.issued
+                .iter()
+                .all(|r| plain(r).iter().all(|(_, v)| !v.contains("gho_swapped"))),
+            "{url} {body}"
+        );
+    }
 }
 
 /// The answers the 1.5.5 module, driven by the 1.5.5 core, reached for these bodies (pinned while
@@ -987,13 +1039,14 @@ fn a_user_without_a_login_is_an_outage() {
 }
 
 /// Out-of-order bodies fail closed: an org list or a `/user` where the token response belongs
-/// (no user held, no token held) never identifies and never sends an empty bearer.
+/// (no user held, no token held) never identifies and never sends an empty bearer: no token and no
+/// error is an outage (G2, L1).
 #[test]
 fn out_of_order_bodies_fail_closed() {
     let l = login();
     for body in [r#"[{"login":"acme"}]"#, r#"{"login":"octocat","id":1}"#] {
         let mut s = Script::happy().answer(TOKEN_URL, 200, body);
-        assert_eq!(run(&l, &mut s), LoginStep::BadCredential, "{body}");
+        assert_eq!(run(&l, &mut s), OUTAGE, "{body}");
         assert_eq!(s.targets(), vec![TOKEN_URL]);
     }
 }
