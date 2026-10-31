@@ -169,7 +169,8 @@ fn a_member_signs_in_with_org_groups() {
 }
 
 /// The token exchange as 1.5.5's core sent it: the form in the module's order with the secret
-/// injected into its slot, serde_urlencoded bytes, `content-type` then the default `accept`.
+/// injected into its slot, serde_urlencoded bytes, `content-type`; then (RED L3) `accept:
+/// application/json`, so GitHub answers JSON rather than its form-encoded default.
 #[test]
 fn the_token_exchange_carries_the_plugins_own_secret_in_1_5_5_bytes() {
     let l = login();
@@ -192,7 +193,7 @@ fn the_token_exchange_carries_the_plugins_own_secret_in_1_5_5_bytes() {
                 "content-type".to_string(),
                 "application/x-www-form-urlencoded".to_string()
             ),
-            ("accept".to_string(), "*/*".to_string()),
+            ("accept".to_string(), "application/json".to_string()),
         ]
     );
 }
