@@ -285,3 +285,37 @@ fn red_l2_a_parked_flow_resumes_under_the_login_it_began_with() {
     };
     assert!(Arc::ptr_eq(&driving(&g, &after), &g.login()));
 }
+
+/// RED L6: `fetch_orgs` (the default) reads `/user/orgs`, which needs the `read:org` scope (or a
+/// scope that holds it: `write:org`, `admin:org`, `user`). Scopes without one would have every
+/// login's org hop answered 403: refused at validate and open, by name.
+#[test]
+fn red_l6_fetch_orgs_without_an_org_scope_is_refused_by_name() {
+    let with = |extra: &str| WRITTEN.replace("\"client_id\"", &format!("{extra}, \"client_id\""));
+    for scopes in [r#"["read:user"]"#, "[]", r#"["repo","user:email"]"#] {
+        for fetch in ["", r#", "fetch_orgs": true"#] {
+            let settings = with(&format!(r#""scopes": {scopes}{fetch}"#));
+            let r = refusal(&settings);
+            assert_eq!(r.outcome(), Outcome::Failed, "{settings}");
+            assert_eq!(
+                r.text(),
+                Some("settings.scopes: fetch_orgs reads /user/orgs, which needs the read:org scope (or write:org, admin:org, user): add it, or set fetch_orgs: false"),
+                "{settings}"
+            );
+            assert!(GithubLogin::open(&settings, None).is_err());
+        }
+    }
+    for ok in [
+        r#""scopes": ["read:org"]"#,
+        r#""scopes": ["read:user", "admin:org"]"#,
+        r#""scopes": ["write:org"]"#,
+        r#""scopes": ["user"]"#,
+        r#""scopes": ["read:user"], "fetch_orgs": false"#,
+        r#""scopes": [], "fetch_orgs": false"#,
+    ] {
+        assert!(
+            <Github as Life>::validate(with(ok).as_bytes()).is_ok(),
+            "{ok}"
+        );
+    }
+}
