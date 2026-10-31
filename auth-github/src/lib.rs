@@ -201,10 +201,9 @@ pub fn build_github_authorize_url(
 /// secret (the chip's `Cred`) into that slot of the form body (or drops the field when no secret
 /// was given).
 ///
-/// NOTE: GitHub's token endpoint returns `application/x-www-form-urlencoded` UNLESS the request sends
-/// `Accept: application/json`. This hop sets no `headers` (simpler than relying on an `Accept` header
-/// surviving every GitHub App / GHES configuration), so [`parse_access_token`] accepts BOTH shapes to
-/// stay robust either way.
+/// GitHub's token endpoint answers `application/x-www-form-urlencoded` UNLESS the request sends
+/// `Accept: application/json`, which this hop sends. [`parse_access_token`] still reads BOTH shapes,
+/// for a GitHub App or GHES that answers the form anyway.
 pub fn build_token_exchange(
     cfg: &GitHubConfig,
     code: &str,
@@ -223,7 +222,7 @@ pub fn build_token_exchange(
             ("client_secret".to_string(), String::new()),
         ],
         secret_form_field: Some("client_secret".to_string()),
-        headers: Vec::new(),
+        headers: vec![("Accept".to_string(), "application/json".to_string())],
     }
 }
 
