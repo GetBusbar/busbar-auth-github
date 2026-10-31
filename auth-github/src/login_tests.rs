@@ -198,8 +198,8 @@ fn the_token_exchange_carries_the_plugins_own_secret_in_1_5_5_bytes() {
     );
 }
 
-/// The authenticated GETs: an empty form (so `content-type` and an empty body, as reqwest's
-/// `.form(&[])` sent), then the module's headers, lowercase, in order.
+/// The authenticated GETs: no body and (RED L4) no `content-type` (only a hop with a form body
+/// carries one), the bearer, then the module's headers, lowercase, in order.
 #[test]
 fn the_rest_gets_carry_the_bearer_and_user_agent() {
     let l = login();
@@ -211,10 +211,6 @@ fn the_rest_gets_carry_the_bearer_and_user_agent() {
         assert_eq!(
             plain(get),
             vec![
-                (
-                    "content-type".to_string(),
-                    "application/x-www-form-urlencoded".to_string()
-                ),
                 ("authorization".to_string(), format!("Bearer {TOKEN}")),
                 ("user-agent".to_string(), "busbar".to_string()),
                 (
