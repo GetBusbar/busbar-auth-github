@@ -470,10 +470,5 @@ pub fn build_principal(user: &GhUser, org_groups: Vec<String>) -> Principal {
     p
 }
 
-/// Whether a body's first non-whitespace char is `[` (a JSON array — the `/user/orgs` shape).
-pub(crate) fn is_json_array(body: &str) -> bool {
-    body.trim_start().starts_with('[')
-}
-
 #[cfg(test)]
 mod tests;
