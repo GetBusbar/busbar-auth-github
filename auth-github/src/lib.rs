@@ -44,8 +44,8 @@ use serde_json::Value;
 use zeroize::Zeroizing;
 
 /// The default OAuth scopes requested: `read:org` (to enumerate the caller's org memberships → groups)
-/// and `read:user` (the profile `/user` read). Operators can override via `scopes`, and `begin_login`
-/// additionally folds in any request-time extra scopes.
+/// and `read:user` (the profile `/user` read). Operators can override via `scopes`; the door asks
+/// for exactly the configured scopes (it passes no request-time extras).
 fn default_scopes() -> Vec<String> {
     vec!["read:org".to_string(), "read:user".to_string()]
 }
@@ -107,7 +107,7 @@ pub struct GitHubConfig {
     /// An ADDITIONAL trusted root CA certificate (PEM) for a GHES instance behind an internal CA,
     /// layered on top of the public roots, never a replacement. The host's connector does the TLS:
     /// the hops go out on the need whose `trust_from` is this setting. A value with no PEM
-    /// certificate in it is refused at validate/open, named.
+    /// certificate in it, or a blank one, is refused at validate/open, named.
     #[serde(default)]
     pub ca_cert_pem: Option<String>,
 }
@@ -130,12 +130,10 @@ fn token_endpoint(cfg: &GitHubConfig) -> String {
 fn user_endpoint(cfg: &GitHubConfig) -> String {
     format!("{}/user", cfg.api_base.trim_end_matches('/'))
 }
-/// The `/user/orgs` endpoint URL (`{api_base}/user/orgs?per_page=100`). GitHub paginates this list at
-/// 30 entries/page by default; `per_page=100` raises the cap so a user in up to 100 orgs keeps ALL
-/// their `github:org/<org>` groups. RESIDUAL LIMIT: the hop ABI feeds back only a
-/// single response body and carries no Link-header channel, so this module cannot follow pagination
-/// past page 1 — a user in >100 orgs still loses memberships beyond the first 100. Revisit if the ABI
-/// grows a way to chain paginated hops.
+/// The `/user/orgs` endpoint URL (`{api_base}/user/orgs?per_page=100`): its first page. GitHub
+/// paginates this list (30 entries a page by default; `per_page=100` is its most). The login follows
+/// each page's `Link: rel="next"` ([`next_link`]) on the API's origin, up to
+/// [`login::MAX_ORG_PAGES`] pages (1000 orgs); past that the org list is logged as truncated.
 fn orgs_endpoint(cfg: &GitHubConfig) -> String {
     format!(
         "{}/user/orgs?per_page=100",
@@ -147,20 +145,25 @@ fn orgs_endpoint(cfg: &GitHubConfig) -> String {
 /// else `%`-escaped). Used only for the authorize URL; the token-exchange form is encoded by the
 /// SDK's `FormBody`.
 fn pct(s: &str) -> String {
+    const HEX: &[u8; 16] = b"0123456789ABCDEF";
     let mut out = String::with_capacity(s.len());
     for &b in s.as_bytes() {
         match b {
             b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
                 out.push(b as char)
             }
-            _ => out.push_str(&format!("%{b:02X}")),
+            _ => {
+                out.push('%');
+                out.push(char::from(HEX[usize::from(b >> 4)]));
+                out.push(char::from(HEX[usize::from(b & 0x0f)]));
+            }
         }
     }
     out
 }
 
-/// The space-delimited `scope` value: the configured scopes plus any request-time extras, order
-/// preserved and de-duplicated.
+/// The space-delimited `scope` value: the configured scopes plus `extra` (the door passes none),
+/// order preserved and de-duplicated.
 fn scope_value(cfg: &GitHubConfig, extra: &[String]) -> String {
     let mut scopes: Vec<String> = Vec::new();
     for s in cfg.scopes.iter().chain(extra.iter()) {
@@ -172,7 +175,7 @@ fn scope_value(cfg: &GitHubConfig, extra: &[String]) -> String {
 }
 
 /// Build the GitHub **authorization-code** authorize URL: `response_type=code`, `client_id`,
-/// `redirect_uri`, `scope` (configured + request-time extras), `state`, and PKCE `code_challenge` +
+/// `redirect_uri`, `scope` (the configured scopes, plus `extra_scopes`: the door passes none), `state`, and PKCE `code_challenge` +
 /// `code_challenge_method=S256`. Structurally cannot contain a `client_secret`: the begin path is
 /// public.
 ///
@@ -203,10 +206,9 @@ pub fn build_github_authorize_url(
 /// secret (the chip's `Cred`) into that slot of the form body (or drops the field when no secret
 /// was given).
 ///
-/// NOTE: GitHub's token endpoint returns `application/x-www-form-urlencoded` UNLESS the request sends
-/// `Accept: application/json`. This hop sets no `headers` (simpler than relying on an `Accept` header
-/// surviving every GitHub App / GHES configuration), so [`parse_access_token`] accepts BOTH shapes to
-/// stay robust either way.
+/// GitHub's token endpoint answers `application/x-www-form-urlencoded` UNLESS the request sends
+/// `Accept: application/json`, which this hop sends. [`parse_access_token`] still reads BOTH shapes,
+/// for a GitHub App or GHES that answers the form anyway.
 pub fn build_token_exchange(
     cfg: &GitHubConfig,
     code: &str,
@@ -225,7 +227,7 @@ pub fn build_token_exchange(
             ("client_secret".to_string(), String::new()),
         ],
         secret_form_field: Some("client_secret".to_string()),
-        headers: Vec::new(),
+        headers: vec![("Accept".to_string(), "application/json".to_string())],
     }
 }
 
@@ -263,6 +265,53 @@ pub fn build_orgs_get(cfg: &GitHubConfig) -> LoginHop {
         secret_form_field: None,
         headers: userinfo_headers(),
     }
+}
+
+/// Build the GET hop of a later `/user/orgs` page: `url` is the previous page's `Link: rel="next"`
+/// (the login checks it is on the API's origin; the hop guard vets it as every hop), with the same
+/// headers as [`build_orgs_get`].
+pub fn build_orgs_page_get(url: &str) -> LoginHop {
+    LoginHop {
+        method: "GET".to_string(),
+        url: url.to_string(),
+        form: Vec::new(),
+        secret_form_field: None,
+        headers: userinfo_headers(),
+    }
+}
+
+/// The target of an RFC 8288 `Link` field's `rel="next"` link (`<url>; rel="next", ...`), if any.
+/// A `rel` may list several relation types (`rel="next last"`); its name and value are matched
+/// ASCII case-insensitively.
+pub fn next_link(link: &str) -> Option<&str> {
+    let mut rest = link;
+    while let Some(open) = rest.find('<') {
+        let after = &rest[open + 1..];
+        let close = after.find('>')?;
+        let target = &after[..close];
+        let params_end = after[close + 1..]
+            .find('<')
+            .map_or(after.len(), |i| close + 1 + i);
+        let params = &after[close + 1..params_end];
+        let is_next = params.split(';').any(|p| {
+            let Some((name, value)) = p.split_once('=') else {
+                return false;
+            };
+            name.trim().eq_ignore_ascii_case("rel")
+                && value
+                    .trim()
+                    .trim_end_matches(',')
+                    .trim()
+                    .trim_matches('"')
+                    .split_ascii_whitespace()
+                    .any(|r| r.eq_ignore_ascii_case("next"))
+        });
+        if is_next {
+            return Some(target.trim());
+        }
+        rest = &after[close + 1..];
+    }
+    None
 }
 
 /// A GitHub `/user` profile, reduced to what identity needs.
@@ -349,14 +398,27 @@ fn form_decode(s: &str) -> Zeroizing<Vec<u8>> {
     out
 }
 
-/// Parse a GitHub `/user` response body into a [`GhUser`]. Fail-CLOSED: a missing/empty `login`, a
-/// missing numeric `id`, or non-JSON yields `None` (→ the caller `Reject`s).
+/// The most bytes a GitHub login (a user's or an org's) may hold here; GitHub's own limit is 39.
+pub const MAX_LOGIN_BYTES: usize = 64;
+/// The most characters of a profile `name` kept; a longer one is cut.
+pub const MAX_NAME_CHARS: usize = 256;
+
+/// Whether `login` is one a GitHub reply can carry: non-empty, at most [`MAX_LOGIN_BYTES`], no
+/// control character.
+fn plain_login(login: &str) -> bool {
+    !login.is_empty() && login.len() <= MAX_LOGIN_BYTES && !login.chars().any(char::is_control)
+}
+
+/// Parse a GitHub `/user` response body into a [`GhUser`]. Fail-CLOSED: a missing, empty or
+/// foreign `login` (a control character, over [`MAX_LOGIN_BYTES`]), a missing numeric `id`, or
+/// non-JSON yields `None` (the caller's outage). A `name` holding a control character is not
+/// taken; a longer one than [`MAX_NAME_CHARS`] is cut.
 pub fn parse_user(body: &str) -> Option<GhUser> {
     let v: Value = serde_json::from_str(body.trim()).ok()?;
     let login = v
         .get("login")
         .and_then(Value::as_str)
-        .filter(|s| !s.is_empty())?
+        .filter(|s| plain_login(s))?
         .to_string();
     // Required: a genuine /user body always carries a numeric `id`, so its absence means a
     // malformed/foreign body → fail closed. It is also KEPT: it is the only stable thing GitHub
@@ -365,26 +427,29 @@ pub fn parse_user(body: &str) -> Option<GhUser> {
     let name = v
         .get("name")
         .and_then(Value::as_str)
-        .filter(|s| !s.is_empty())
-        .map(str::to_string);
+        .filter(|s| !s.is_empty() && !s.chars().any(char::is_control))
+        .map(|s| s.chars().take(MAX_NAME_CHARS).collect());
     Some(GhUser { login, id, name })
 }
 
 /// Parse a GitHub `/user/orgs` response (a JSON array of org objects) into `github:org/<org-login>`
-/// group strings. Fail-CLOSED: malformed JSON or a non-array body yields `None` so the caller can
-/// `Reject` — a truncated orgs response must NOT be mistaken for "no orgs" and silently drop the user's
-/// org groups (which would lock them out of org-gated roles). A VALID empty array is `Some(vec![])`
-/// (login succeeds with zero groups). Individual entries lacking a non-empty `login` are skipped.
+/// group strings. Fail-CLOSED: malformed JSON, a non-array body, or an org `login` no GitHub reply
+/// carries (a control character, over [`MAX_LOGIN_BYTES`]) yields `None` (the caller's outage) — a
+/// truncated or foreign orgs response must NOT be mistaken for "no orgs" and silently drop the
+/// user's org groups (which would lock them out of org-gated roles). A VALID empty array is
+/// `Some(vec![])` (login succeeds with zero groups). Individual entries lacking a non-empty `login`
+/// are skipped.
 pub fn parse_org_groups(body: &str) -> Option<Vec<String>> {
     let v: Value = serde_json::from_str(body.trim()).ok()?;
-    let arr = v.as_array()?;
-    Some(
-        arr.iter()
-            .filter_map(|o| o.get("login").and_then(Value::as_str))
-            .filter(|s| !s.is_empty())
-            .map(|org| format!("github:org/{org}"))
-            .collect(),
-    )
+    let mut groups = Vec::new();
+    for org in v.as_array()? {
+        match org.get("login").and_then(Value::as_str) {
+            None | Some("") => {}
+            Some(login) if plain_login(login) => groups.push(format!("github:org/{login}")),
+            Some(_) => return None,
+        }
+    }
+    Some(groups)
 }
 
 /// Assemble the identity [`Principal`] from the parsed `/user` and org groups: id `github:<login>`,
@@ -423,11 +488,6 @@ pub fn build_principal(user: &GhUser, org_groups: Vec<String>) -> Principal {
     p.roles.push(format!("github:id/{}", user.id));
     p.roles.extend(org_groups);
     p
-}
-
-/// Whether a body's first non-whitespace char is `[` (a JSON array — the `/user/orgs` shape).
-pub(crate) fn is_json_array(body: &str) -> bool {
-    body.trim_start().starts_with('[')
 }
 
 #[cfg(test)]

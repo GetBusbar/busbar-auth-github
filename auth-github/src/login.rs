@@ -15,15 +15,20 @@
 //!
 //! | answer | step |
 //! |---|---|
-//! | module `Identify` | [`LoginStep::Identity`] |
-//! | module `Reject` ("Sign-in was declined", 401) | [`LoginStep::BadCredential`] |
-//! | hop refused or unreachable ("Couldn't reach your provider", 502) | [`LoginStep::Outage`] |
-//! | hop limit spent / `Authorize` on the callback (502) | [`LoginStep::Outage`] |
-//! | a hop body's `id_token` nonce mismatch ("Sign-in couldn't be verified", 400) | [`LoginStep::SecurityCheckFailed`] |
+//! | an identity reached | [`LoginStep::Identity`] |
+//! | a credential error, declined (`LOGIN_BAD_CREDENTIAL`) | [`LoginStep::BadCredential`] |
+//! | the IdP not answering, a hop refused or unreachable, the hop limit spent (`LOGIN_OUTAGE`) | [`LoginStep::Outage`] |
+//! | a hop body's `id_token` nonce mismatch (`LOGIN_SECURITY_CHECK_FAILED`) | [`LoginStep::SecurityCheckFailed`] |
 //!
-//! Any HTTP status the IdP answers is fed back to the step machine: a revoked token's `401` from
-//! `/user` is a declined sign-in, not an outage. A `5xx` or `429` is the IdP unable to answer:
-//! [`LoginStep::Outage`], which the host answers 503, retryable.
+//! The HTTP status each verdict is answered with is the host's, not this plugin's.
+//!
+//! Any HTTP status the IdP answers is fed back to the step machine, per hop (OWNER-SIGNED
+//! 2026-10-30: only a credential error is a declined sign-in). The token endpoint's `400`/`401`
+//! carrying an RFC 6749 §5.2 `error`, and a revoked token's `401` from `/user` or `/user/orgs`, are
+//! declined. A `5xx`, a `429`, GitHub's `403` rate limit, a `403` on `/user/orgs` (the token lacks
+//! `read:org`), a redirect, a `404`, a `408` or any other status is the IdP not answering:
+//! [`LoginStep::Outage`], which the host answers 503, retryable, carrying the IdP's retry hint
+//! (`retry-after`, or the seconds to `x-ratelimit-reset`) when it gave one.
 //!
 //! The auth ABI adapter is [`crate::door`]: it calls [`GithubLogin::open`],
 //! [`GithubLogin::begin_login`], [`GithubLogin::start`] and [`GithubLogin::drive`], keeping one
@@ -31,15 +36,15 @@
 
 use crate::guard::{collect_allowed_hosts, sanitize_hop_header, vet_hop_url, Refused};
 use crate::{
-    build_github_authorize_url, build_orgs_get, build_principal, build_token_exchange,
-    build_userinfo_get, is_json_array, parse_access_token, parse_org_groups, parse_user, GhUser,
-    GitHubConfig,
+    build_github_authorize_url, build_orgs_get, build_orgs_page_get, build_principal,
+    build_token_exchange, build_userinfo_get, next_link, parse_access_token, parse_org_groups,
+    parse_user, GhUser, GitHubConfig,
 };
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
 use busbar_contract::abi::sdk::cred::{self, Cred, FormBody, SettingsError};
 use busbar_contract::abi::sdk::exchange::{Exchange as Wire, Request};
-use busbar_contract::auth::{LoginHop, LoginOutcome, Principal};
+use busbar_contract::auth::{LoginHop, Principal};
 use serde_json::Value;
 use std::collections::HashSet;
 use std::fmt;
@@ -59,8 +64,11 @@ fn settings_line(e: &SettingsError) -> String {
 
 /// The per-hop request timeout.
 pub const HOP_TIMEOUT_MS: u64 = 10_000;
-/// The bound on `complete_login` turns per callback.
-pub const MAX_HOPS: usize = 6;
+/// The most `/user/orgs` pages read per login (100 orgs a page: 1000 orgs). A next link left after
+/// the last is logged as a truncated org list, and the login identifies with the orgs read.
+pub const MAX_ORG_PAGES: usize = 10;
+/// The bound on the hops one callback sends: the token exchange, `/user`, and the org pages.
+pub const MAX_HOPS: usize = 2 + MAX_ORG_PAGES;
 /// The most a hop's reply body may carry: 256 KiB, the auth kind's bound on a token or userinfo
 /// endpoint's answer (the exchange refuses past it, `reply_limit`; `drive` checks it again). A
 /// GitHub token response or `/user` is under 2 KiB; a full 100-entry `/user/orgs` page is ~100 KiB.
@@ -76,8 +84,8 @@ pub struct HopRequest {
     pub target: String,
     /// The public header fields, in order.
     pub fields: Vec<(String, String)>,
-    /// The access token an authenticated hop presents: sealed in as `authorization: Bearer` right
-    /// after `content-type`, where 1.5.5's http stack wrote it.
+    /// The access token an authenticated hop presents: sealed in as `authorization: Bearer` first
+    /// (right after `content-type` on a hop that has one, where 1.5.5's http stack wrote it).
     pub bearer: Option<Cred>,
     /// The `application/x-www-form-urlencoded` body (empty for a GET). The token exchange's
     /// carries the client secret sealed; its public values (the code, the verifier) are wiped
@@ -120,8 +128,8 @@ pub(crate) fn split(url: &str) -> Option<(&str, String)> {
 
 impl HopRequest {
     /// The SDK exchange that sends this hop: the public fields framed as they are, the bearer
-    /// sealed in as `authorization` after `content-type`, the form encoded by the SDK into the body
-    /// it sends, the reply bounded by `reply_limit`. `None`: the URL has no scheme and authority,
+    /// sealed in as `authorization` first (after a `content-type`), the form encoded by the SDK
+    /// into the body it sends, the reply bounded by `reply_limit`. `None`: the URL has no scheme and authority,
     /// the form could not be encoded, or the exchange refused the request.
     #[must_use]
     pub fn wire(&self, reply_limit: usize) -> Option<Wire> {
@@ -132,11 +140,25 @@ impl HopRequest {
             );
             return None;
         };
-        let body = self.body.encoded().ok()?;
+        let body = match self.body.encoded() {
+            Ok(body) => body,
+            Err(_) => {
+                tracing::warn!(
+                    module = "github",
+                    "github login: the hop's form body could not be encoded"
+                );
+                return None;
+            }
+        };
+        let at = self
+            .fields
+            .iter()
+            .position(|(n, _)| n == "content-type")
+            .map_or(0, |i| i + 1);
         let sealed = self
             .bearer
             .iter()
-            .map(|b| (1, b"authorization".to_vec(), b.bearer()))
+            .map(|b| (at, b"authorization".to_vec(), b.bearer()))
             .collect();
         let request = Request {
             method: self.method.clone().into_bytes(),
@@ -159,11 +181,51 @@ impl HopRequest {
     }
 }
 
+/// The reply header fields the step machine reads, and no others: GitHub's rate-limit answer
+/// (`retry-after`, `x-ratelimit-remaining`, `x-ratelimit-reset`) and its pagination (`link`). Every
+/// other field the far end sent is dropped where the reply is read.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ReplyFields {
+    /// `retry-after`.
+    pub retry_after: Option<String>,
+    /// `x-ratelimit-remaining`.
+    pub ratelimit_remaining: Option<String>,
+    /// `x-ratelimit-reset` (Unix seconds).
+    pub ratelimit_reset: Option<String>,
+    /// `link` (RFC 8288).
+    pub link: Option<String>,
+}
+
+impl ReplyFields {
+    /// The kept fields of a reply's field block, names matched case-insensitively, the first of a
+    /// repeated name kept; a value that is not UTF-8 is dropped.
+    pub fn kept<'a>(fields: impl IntoIterator<Item = (&'a [u8], &'a [u8])>) -> Self {
+        let mut kept = Self::default();
+        for (name, value) in fields {
+            let slot = match name.to_ascii_lowercase().as_slice() {
+                b"retry-after" => &mut kept.retry_after,
+                b"x-ratelimit-remaining" => &mut kept.ratelimit_remaining,
+                b"x-ratelimit-reset" => &mut kept.ratelimit_reset,
+                b"link" => &mut kept.link,
+                _ => continue,
+            };
+            if slot.is_none() {
+                *slot = std::str::from_utf8(value)
+                    .ok()
+                    .map(|v| v.trim().to_string());
+            }
+        }
+        kept
+    }
+}
+
 /// What the far end answered.
 #[derive(Clone, PartialEq, Eq)]
 pub struct HopResponse {
     /// The HTTP status.
     pub status: u16,
+    /// The header fields the step machine reads ([`ReplyFields`]).
+    pub fields: ReplyFields,
     /// The body bytes, wiped on drop: the token response carries the access token.
     pub body: Zeroizing<Vec<u8>>,
 }
@@ -205,7 +267,11 @@ pub enum LoginStep {
     /// The IdP answered and the sign-in is declined.
     BadCredential,
     /// The IdP could not be reached, or the login could not finish.
-    Outage,
+    Outage {
+        /// The seconds the IdP asked to be left alone for (its `Retry-After`, or its rate-limit
+        /// reset), when it named any.
+        retry_after: Option<u64>,
+    },
     /// A hop body's `id_token` is not bound to the nonce minted at begin (400
     /// "Sign-in couldn't be verified"; the auth ABI's `LOGIN_SECURITY_CHECK_FAILED`).
     SecurityCheckFailed,
@@ -216,6 +282,12 @@ pub enum LoginStep {
 struct FlowState {
     access_token: Option<Cred>,
     user: Option<GhUser>,
+    /// The org groups the pages read so far gave.
+    orgs: Vec<String>,
+    /// The org pages read so far.
+    pages: usize,
+    /// The hop the next answer is the answer of (the one sent last).
+    hop: Hop,
 }
 
 /// The callback's inputs and the last hop answer the step machine reads, every credential among
@@ -225,8 +297,9 @@ struct Callback {
     code: Option<Zeroizing<String>>,
     redirect_uri: Option<String>,
     code_verifier: Option<Zeroizing<String>>,
-    /// The last answer: its status and body (the token response carries the access token).
-    answer: Option<(u16, Zeroizing<String>)>,
+    /// The last answer: its status, its kept fields and its body (the token response carries the
+    /// access token).
+    answer: Option<(u16, ReplyFields, Zeroizing<String>)>,
 }
 
 /// One login in flight: the callback's inputs, the step machine's state, the hop parked on a
@@ -279,7 +352,8 @@ impl GithubLogin {
     ///
     /// # Errors
     /// Empty or invalid settings (a decoder error keeps serde's text only when it
-    /// names a key, never a value); an empty `client_id`; a base that is not an http(s) URL with a
+    /// names a key, never a value); an empty `client_id`; `fetch_orgs` with no scope that reads
+    /// orgs; a base that is not an http(s) URL with a
     /// host; a `ca_cert_pem` that is no PEM certificate; a `token_base` or `api_base` not written out (the hop allowlist is built only from
     /// the URLs written in the settings, so every hop to a defaulted base would be refused).
     pub fn open(settings: &str, client_secret: Option<&str>) -> Result<Self, String> {
@@ -292,6 +366,16 @@ impl GithubLogin {
             .map_err(|_| "settings: not a JSON document".to_string())?;
         if cfg.client_id.is_empty() {
             return Err("settings.client_id: empty".to_string());
+        }
+        // `/user/orgs` needs `read:org` or a scope that holds it; without one every login's org
+        // hop would be answered 403.
+        if cfg.fetch_orgs
+            && !cfg
+                .scopes
+                .iter()
+                .any(|s| matches!(s.as_str(), "read:org" | "write:org" | "admin:org" | "user"))
+        {
+            return Err("settings.scopes: fetch_orgs reads /user/orgs, which needs the read:org scope (or write:org, admin:org, user): add it, or set fetch_orgs: false".to_string());
         }
         for (key, url) in [
             ("api_base", &cfg.api_base),
@@ -306,7 +390,16 @@ impl GithubLogin {
         if cfg
             .ca_cert_pem
             .as_deref()
-            .is_some_and(|p| !p.is_empty() && !p.contains("-----BEGIN CERTIFICATE-----"))
+            .is_some_and(|p| p.trim().is_empty())
+        {
+            return Err(
+                "settings.ca_cert_pem: blank: omit it, or give a PEM certificate".to_string(),
+            );
+        }
+        if cfg
+            .ca_cert_pem
+            .as_deref()
+            .is_some_and(|p| !p.contains("-----BEGIN CERTIFICATE-----"))
         {
             return Err(
                 "settings.ca_cert_pem: not a PEM certificate (no -----BEGIN CERTIFICATE----- line)"
@@ -332,9 +425,8 @@ impl GithubLogin {
         })
     }
 
-    /// Whether the settings name an operator CA (`ca_cert_pem`, non-empty): the hops then go out on
-    /// the need that trusts it beside the public roots. Read as the host reads a `trust_from`
-    /// path: an empty value names nothing.
+    /// Whether the settings name an operator CA (`ca_cert_pem`; `open` refuses a blank one): the
+    /// hops then go out on the need that trusts it beside the public roots.
     #[must_use]
     pub fn anchored(&self) -> bool {
         self.cfg
@@ -394,31 +486,32 @@ impl GithubLogin {
             let request = match flow.inflight.take() {
                 Some(parked) => parked,
                 None => {
-                    if flow.turns >= MAX_HOPS {
-                        tracing::warn!(
-                            module = "github",
-                            "github login: hop limit ({MAX_HOPS}) spent without an identity"
-                        );
-                        return finish(flow, LoginStep::Outage);
-                    }
-                    flow.turns += 1;
                     match self.step(flow) {
-                        LoginOutcome::Identify(p) => return finish(flow, LoginStep::Identity(p)),
-                        LoginOutcome::Reject => return finish(flow, LoginStep::BadCredential),
+                        Turn::Identify(p) => return finish(flow, LoginStep::Identity(p)),
+                        Turn::Decline => return finish(flow, LoginStep::BadCredential),
                         // The step has already said why.
-                        LoginOutcome::Outage => return finish(flow, LoginStep::Outage),
-                        LoginOutcome::Exchange(mut hop) => {
+                        Turn::Outage { retry_after } => {
+                            return finish(flow, LoginStep::Outage { retry_after })
+                        }
+                        Turn::Exchange(mut hop) => {
+                            if flow.turns >= MAX_HOPS {
+                                wipe_hop(&mut hop);
+                                tracing::warn!(
+                                    module = "github",
+                                    "github login: hop limit ({MAX_HOPS}) spent without an identity"
+                                );
+                                return finish(flow, LoginStep::Outage { retry_after: None });
+                            }
+                            flow.turns += 1;
                             let rendered = self.render(&hop, flow.state.access_token.as_ref());
                             wipe_hop(&mut hop);
                             match rendered {
                                 Ok(r) => r,
                                 // The guard has already said why.
-                                Err(Refused) => return finish(flow, LoginStep::Outage),
+                                Err(Refused) => {
+                                    return finish(flow, LoginStep::Outage { retry_after: None })
+                                }
                             }
-                        }
-                        _ => {
-                            tracing::warn!(module = "github", "github login: the step machine asked for an outcome this login cannot serve");
-                            return finish(flow, LoginStep::Outage);
                         }
                     }
                 }
@@ -428,7 +521,14 @@ impl GithubLogin {
                     flow.inflight = Some(request);
                     return LoginStep::Pending;
                 }
-                Fetched::Unreachable => return finish(flow, LoginStep::Outage),
+                Fetched::Unreachable => {
+                    tracing::warn!(
+                        module = "github",
+                        hop = flow.state.hop.path(),
+                        "github login: the hop could not be made (refused, connect, TLS, timeout, or a request that could not be framed)"
+                    );
+                    return finish(flow, LoginStep::Outage { retry_after: None });
+                }
                 Fetched::Ready(mut resp) => {
                     if resp.body.len() > MAX_HOP_REPLY_BYTES {
                         tracing::warn!(
@@ -436,7 +536,7 @@ impl GithubLogin {
                             bytes = resp.body.len(),
                             "github login: a hop reply passed the {MAX_HOP_REPLY_BYTES}-byte cap"
                         );
-                        return finish(flow, LoginStep::Outage);
+                        return finish(flow, LoginStep::Outage { retry_after: None });
                     }
                     let body = text_of(std::mem::take(&mut *resp.body));
                     // NONCE BINDING: a hop body carrying an
@@ -446,151 +546,129 @@ impl GithubLogin {
                         tracing::warn!(module = "github", "github login: a hop body's id_token is not bound to the nonce minted at begin");
                         return finish(flow, LoginStep::SecurityCheckFailed);
                     }
-                    flow.req.answer = Some((resp.status, body));
-                    if flow.turns >= MAX_HOPS {
-                        tracing::warn!(
-                            module = "github",
-                            "github login: hop limit ({MAX_HOPS}) spent without an identity"
-                        );
-                        return finish(flow, LoginStep::Outage);
-                    }
+                    flow.req.answer = Some((resp.status, std::mem::take(&mut resp.fields), body));
                 }
             }
         }
     }
 
     /// The `complete_login` step machine, over the flow's own state.
-    fn step(&self, flow: &mut LoginFlow) -> LoginOutcome {
+    fn step(&self, flow: &mut LoginFlow) -> Turn {
         let req = &flow.req;
-        let Some((status, body)) = &req.answer else {
+        let Some((status, fields, body)) = &req.answer else {
+            // L7: an empty value is as missing, refused before the code is spent.
             let (Some(code), Some(redirect_uri), Some(code_verifier)) = (
-                req.code.as_deref(),
-                req.redirect_uri.as_deref(),
-                req.code_verifier.as_deref(),
+                given(req.code.as_deref().map(String::as_str)),
+                given(req.redirect_uri.as_deref()),
+                given(req.code_verifier.as_deref().map(String::as_str)),
             ) else {
-                tracing::info!(module = "github", "github login: declined, the callback lacks its code, redirect_uri or code_verifier");
-                return LoginOutcome::Reject;
+                tracing::info!(module = "github", "github login: declined, the callback lacks its code, redirect_uri or code_verifier (or one is empty)");
+                return Turn::Decline;
             };
-            return LoginOutcome::Exchange(build_token_exchange(
+            return Turn::Exchange(build_token_exchange(
                 &self.cfg,
                 code,
                 redirect_uri,
                 code_verifier,
             ));
         };
-        let correlated = req
-            .code_verifier
-            .as_deref()
-            .or(req.code.as_deref())
-            .is_some_and(|s| !s.is_empty());
         let (status, body) = (*status, body.as_str());
-        if !correlated {
-            tracing::info!(
-                module = "github",
-                "github login: declined, the callback has neither a code_verifier nor a code"
-            );
-            return LoginOutcome::Reject;
-        }
-        // An identity provider that could not answer (5xx) or asks to be retried later (429) is
-        // an outage, never a declined credential: the host answers 503, retryable, and
-        // the cause is logged here.
-        if status >= 500 || status == 429 {
-            let hop = hop_name(&flow.state);
-            tracing::warn!(
-                module = "github",
-                status = status,
-                hop,
-                "github login: the identity provider is unavailable"
-            );
-            flow.state = FlowState::default();
-            return LoginOutcome::Outage;
-        }
+        // L1: the answer is the answer of the hop that was sent, read as that hop's, never by its
+        // shape.
+        let hop = flow.state.hop;
+        // OWNER-SIGNED 2026-10-30: only a credential error is a declined sign-in; every other
+        // answer that is no 2xx is the IdP not answering this hop, an outage (the host answers
+        // 503, retryable), carrying the IdP's retry hint when it gave one.
         if !(200..300).contains(&status) {
-            let hop = hop_name(&flow.state);
-            tracing::info!(
-                module = "github",
-                status = status,
-                hop,
-                "github login: declined, non-2xx answer"
-            );
+            let turn = refused_answer(hop, status, fields, body);
             flow.state = FlowState::default();
-            return LoginOutcome::Reject;
+            return turn;
         }
-        if let Some(token) = parse_access_token(body) {
-            let hop = build_userinfo_get(&self.cfg);
-            flow.state = FlowState {
-                access_token: Some(token.secure_for(&self.cfg.api_base)),
-                user: None,
-            };
-            return LoginOutcome::Exchange(hop);
-        }
-        if is_json_array(body) {
-            let state = std::mem::take(&mut flow.state);
-            let Some(user) = state.user else {
-                tracing::info!(
-                    module = "github",
-                    "github login: declined, an org list arrived before the user"
-                );
-                return LoginOutcome::Reject;
-            };
-            let Some(groups) = parse_org_groups(body) else {
-                tracing::info!(
-                    module = "github",
-                    "github login: declined, /user/orgs answered a malformed list"
-                );
-                return LoginOutcome::Reject;
-            };
-            return LoginOutcome::Identify(build_principal(&user, groups));
-        }
-        let Some(user) = parse_user(body) else {
-            if flow.state.access_token.is_none() {
-                // The token hop: GitHub answered no access_token.
-                match github_error(body) {
-                    None => tracing::info!(
-                        module = "github",
-                        "github login: declined, the token endpoint answered no access_token"
-                    ),
-                    Some(e) if e == "bad_verification_code" => tracing::info!(
-                        module = "github",
-                        error = ?e,
-                        "github login: declined, the token endpoint refused the code"
-                    ),
-                    Some(e) => tracing::warn!(
-                        module = "github",
-                        error = ?e,
-                        "github login: the token endpoint refused the exchange (check client_id, client_secret and redirect_uri)"
-                    ),
-                }
-            } else {
-                tracing::info!(
-                    module = "github",
-                    "github login: declined, /user answered without a login or id"
-                );
+        match hop {
+            Hop::Token => {
+                let Some(token) = parse_access_token(body) else {
+                    // GitHub answered no access_token.
+                    flow.state = FlowState::default();
+                    return token_refusal(body);
+                };
+                flow.state = FlowState {
+                    access_token: Some(token.secure_for(&self.cfg.api_base)),
+                    hop: Hop::User,
+                    ..FlowState::default()
+                };
+                Turn::Exchange(build_userinfo_get(&self.cfg))
             }
-            flow.state = FlowState::default();
-            return LoginOutcome::Reject;
-        };
-        if !self.cfg.fetch_orgs {
-            flow.state = FlowState::default();
-            return LoginOutcome::Identify(build_principal(&user, Vec::new()));
+            Hop::User => {
+                let Some(user) = parse_user(body) else {
+                    // G3 (owner-signed 2026-10-30): a malformed or foreign 2xx from the REST API
+                    // is no sign-in answer: an outage.
+                    tracing::warn!(
+                        module = "github",
+                        hop = hop.path(),
+                        "github login: /user answered 2xx with no user (a login and a numeric id)"
+                    );
+                    flow.state = FlowState::default();
+                    return Turn::Outage { retry_after: None };
+                };
+                if !self.cfg.fetch_orgs {
+                    flow.state = FlowState::default();
+                    return Turn::Identify(build_principal(&user, Vec::new()));
+                }
+                flow.state.user = Some(user);
+                flow.state.hop = Hop::Orgs;
+                Turn::Exchange(build_orgs_get(&self.cfg))
+            }
+            Hop::Orgs => {
+                let state = std::mem::take(&mut flow.state);
+                let (Some(user), Some(groups)) = (state.user, parse_org_groups(body)) else {
+                    // G3 (owner-signed 2026-10-30): no sign-in answer, the far end's fault.
+                    tracing::warn!(
+                        module = "github",
+                        hop = hop.path(),
+                        "github login: /user/orgs answered 2xx with no org list"
+                    );
+                    return Turn::Outage { retry_after: None };
+                };
+                let mut orgs = state.orgs;
+                orgs.extend(groups);
+                let pages = state.pages + 1;
+                // G4: the list is paginated; its `Link: rel="next"` is followed on the API's own
+                // origin (and through the hop guard, as every hop), up to MAX_ORG_PAGES pages.
+                match fields.link.as_deref().and_then(next_link) {
+                    None => {}
+                    Some(_) if pages >= MAX_ORG_PAGES => tracing::warn!(
+                        module = "github",
+                        pages,
+                        "github login: the org list is truncated at {MAX_ORG_PAGES} pages: org groups past it are not granted"
+                    ),
+                    Some(next) => {
+                        if !same_origin(next, &self.cfg.api_base) {
+                            tracing::warn!(
+                                module = "github",
+                                "github login: /user/orgs answered a next link off the API's origin; not followed"
+                            );
+                            return Turn::Outage { retry_after: None };
+                        }
+                        flow.state = FlowState {
+                            access_token: state.access_token,
+                            user: Some(user),
+                            orgs,
+                            pages,
+                            hop: Hop::Orgs,
+                        };
+                        return Turn::Exchange(build_orgs_page_get(next));
+                    }
+                }
+                Turn::Identify(build_principal(&user, orgs))
+            }
         }
-        if flow.state.access_token.is_none() {
-            tracing::info!(
-                module = "github",
-                "github login: declined, no access token held at /user"
-            );
-            return LoginOutcome::Reject;
-        }
-        let hop = build_orgs_get(&self.cfg);
-        flow.state.user = Some(user);
-        LoginOutcome::Exchange(hop)
     }
 
     /// Render a hop up to the send: vet the URL, seal the client secret into the named form
     /// field (or drop the placeholder when there is none), and lay out the fields as the http
-    /// stack wrote them (`content-type` first, the hop's sanitised headers, then the default
-    /// `accept: */*` when the hop set none). An authenticated hop carries `bearer`, which the chip
-    /// writes as `authorization` after `content-type`.
+    /// stack wrote them (`content-type` first when the hop has a form body, the hop's sanitised
+    /// headers, then the default `accept: */*` when the hop set none). An authenticated hop carries
+    /// `bearer`, which the chip writes as `authorization` first (after `content-type`, if any).
     ///
     /// The plugin never holds the secret's or the bearer's bytes here: the body is a [`FormBody`]
     /// the SDK encodes at the wire.
@@ -625,10 +703,14 @@ impl GithubLogin {
             m if !m.is_empty() && m.bytes().all(|b| b.is_ascii_alphabetic()) => m.to_string(),
             _ => "POST".to_string(),
         };
-        let mut fields = vec![(
-            "content-type".to_string(),
-            "application/x-www-form-urlencoded".to_string(),
-        )];
+        // Only a hop with a form body says what its body is (L4).
+        let mut fields = Vec::new();
+        if !hop.form.is_empty() {
+            fields.push((
+                "content-type".to_string(),
+                "application/x-www-form-urlencoded".to_string(),
+            ));
+        }
         for (name, value) in &hop.headers {
             fields.push(sanitize_hop_header(name, value)?);
         }
@@ -660,12 +742,194 @@ fn text_of(bytes: Vec<u8>) -> Zeroizing<String> {
     }
 }
 
-/// Which hop a held state means the last answer came from (never the URL string).
-fn hop_name(state: &FlowState) -> &'static str {
-    match (&state.access_token, &state.user) {
-        (None, _) => "/login/oauth/access_token",
-        (Some(_), None) => "/user",
-        (Some(_), Some(_)) => "/user/orgs",
+/// A callback value, `None` when absent or empty.
+fn given(v: Option<&str>) -> Option<&str> {
+    v.filter(|v| !v.is_empty())
+}
+
+/// What one turn of the step machine decided.
+enum Turn {
+    /// Send this hop.
+    Exchange(LoginHop),
+    /// Identified.
+    Identify(Principal),
+    /// The IdP declined the sign-in.
+    Decline,
+    /// The IdP could not answer, or answered something that is no sign-in answer.
+    Outage {
+        /// The IdP's retry hint, in seconds.
+        retry_after: Option<u64>,
+    },
+}
+
+/// The hops of a GitHub login.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+enum Hop {
+    /// The token exchange.
+    #[default]
+    Token,
+    /// `GET /user`.
+    User,
+    /// `GET /user/orgs`.
+    Orgs,
+}
+
+impl Hop {
+    /// The hop as a log names it (never the URL string).
+    fn path(self) -> &'static str {
+        match self {
+            Hop::Token => "/login/oauth/access_token",
+            Hop::User => "/user",
+            Hop::Orgs => "/user/orgs",
+        }
+    }
+}
+
+/// Whether `url` is on `base`'s origin (scheme and authority, ASCII case-insensitive).
+fn same_origin(url: &str, base: &str) -> bool {
+    match (split(url), split(base)) {
+        (Some((a, _)), Some((b, _))) => a.eq_ignore_ascii_case(b),
+        _ => false,
+    }
+}
+
+/// The seconds since the Unix epoch, now.
+fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs())
+}
+
+/// Whether a reply is GitHub's rate limit: it names a `retry-after`, or no requests remain.
+fn rate_limited(fields: &ReplyFields) -> bool {
+    fields.retry_after.is_some() || fields.ratelimit_remaining.as_deref() == Some("0")
+}
+
+/// The IdP's retry hint, in seconds at `now`: its `retry-after` (delta seconds), else, when no
+/// requests remain, the seconds to its `x-ratelimit-reset`. An HTTP-date `retry-after` is not read.
+fn retry_hint(fields: &ReplyFields, now: u64) -> Option<u64> {
+    let secs = |v: &str| {
+        (!v.is_empty() && v.bytes().all(|b| b.is_ascii_digit()))
+            .then(|| v.parse::<u64>().ok())
+            .flatten()
+    };
+    if let Some(after) = fields.retry_after.as_deref().and_then(secs) {
+        return Some(after);
+    }
+    if fields.ratelimit_remaining.as_deref() == Some("0") {
+        return fields
+            .ratelimit_reset
+            .as_deref()
+            .and_then(secs)
+            .map(|reset| reset.saturating_sub(now));
+    }
+    None
+}
+
+/// An IdP error code as a log may print it: the code when it is `[a-z0-9_]{1,64}`, else
+/// `<unrecognised>` (a far-end string is never logged raw).
+fn loggable(code: &str) -> &str {
+    let plain = !code.is_empty()
+        && code.len() <= 64
+        && code
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_');
+    if plain {
+        code
+    } else {
+        "<unrecognised>"
+    }
+}
+
+/// The turn a non-2xx answer on `hop` is (OWNER-SIGNED 2026-10-30: only RFC 6749 §5.2 credential
+/// errors are a declined sign-in):
+///
+/// * any hop: a 5xx or 429 is the IdP unavailable, an outage carrying its retry hint;
+/// * the token endpoint: a 400/401 carrying an `error` (JSON or form) is declined; anything else
+///   is an outage;
+/// * `/user`, `/user/orgs`: a 401 (the token is not accepted) is declined; a 403 that is GitHub's
+///   rate limit is an outage carrying its retry hint; any other 403 on `/user/orgs` is the token
+///   lacking `read:org`, the operator's to fix (an outage, at warn); anything else is an outage.
+fn refused_answer(hop: Hop, status: u16, fields: &ReplyFields, body: &str) -> Turn {
+    let path = hop.path();
+    if status >= 500 || status == 429 {
+        let retry_after = retry_hint(fields, unix_now());
+        tracing::warn!(
+            module = "github",
+            status,
+            hop = path,
+            retry_after,
+            "github login: the identity provider is unavailable"
+        );
+        return Turn::Outage { retry_after };
+    }
+    match hop {
+        Hop::Token => {
+            if let (400 | 401, Some(code)) = (status, github_error(body)) {
+                let code = loggable(&code);
+                if matches!(code, "invalid_client" | "unauthorized_client") {
+                    tracing::warn!(
+                        module = "github",
+                        status,
+                        error = code,
+                        "github login: declined, the token endpoint refused this client (check client_id and client_secret)"
+                    );
+                } else {
+                    tracing::info!(
+                        module = "github",
+                        status,
+                        error = code,
+                        "github login: declined, the token endpoint refused the code"
+                    );
+                }
+                return Turn::Decline;
+            }
+            tracing::warn!(
+                module = "github",
+                status,
+                hop = path,
+                "github login: the token endpoint answered a status that is no credential error"
+            );
+            Turn::Outage { retry_after: None }
+        }
+        Hop::User | Hop::Orgs => {
+            if status == 401 {
+                tracing::info!(
+                    module = "github",
+                    status,
+                    hop = path,
+                    "github login: declined, GitHub did not accept the access token"
+                );
+                return Turn::Decline;
+            }
+            if status == 403 && rate_limited(fields) {
+                let retry_after = retry_hint(fields, unix_now());
+                tracing::warn!(
+                    module = "github",
+                    status,
+                    hop = path,
+                    retry_after,
+                    "github login: GitHub's API rate limit is spent"
+                );
+                return Turn::Outage { retry_after };
+            }
+            if status == 403 && hop == Hop::Orgs {
+                tracing::warn!(
+                    module = "github",
+                    status,
+                    hop = path,
+                    "github login: /user/orgs answered 403: the access token lacks the read:org scope (check the OAuth App and the scopes setting)"
+                );
+                return Turn::Outage { retry_after: None };
+            }
+            tracing::warn!(
+                module = "github",
+                status,
+                hop = path,
+                "github login: the GitHub API answered a status that is no sign-in answer"
+            );
+            Turn::Outage { retry_after: None }
+        }
     }
 }
 
@@ -676,10 +940,60 @@ fn github_error(body: &str) -> Option<String> {
         let v: Value = serde_json::from_str(trimmed).ok()?;
         return v.get("error").and_then(Value::as_str).map(str::to_string);
     }
+    if trimmed.starts_with('[') {
+        return None;
+    }
     trimmed
         .split('&')
         .find_map(|p| p.strip_prefix("error="))
         .map(str::to_string)
+}
+
+/// The token endpoint's codes that are the user's own: a bad or expired code, an invalid grant.
+const USER_TOKEN_ERRORS: [&str; 3] = ["bad_verification_code", "invalid_grant", "expired_token"];
+/// The token endpoint's codes that are the operator's: the OAuth App's credentials, its callback
+/// URL, the app itself.
+const OPERATOR_TOKEN_ERRORS: [&str; 3] = [
+    "incorrect_client_credentials",
+    "redirect_uri_mismatch",
+    "application_suspended",
+];
+
+/// The turn a 2xx token reply carrying no access token is (GitHub answers a refused exchange with
+/// HTTP 200 and an `error`), OWNER-SIGNED 2026-10-30: only the user's own code is a declined
+/// sign-in (at info); the operator's misconfiguration is an outage at warn; any other code, and a
+/// reply with neither a token nor an error (empty, HTML, not JSON), is an outage.
+fn token_refusal(body: &str) -> Turn {
+    let Some(code) = github_error(body) else {
+        tracing::warn!(
+            module = "github",
+            "github login: the token endpoint answered 2xx with neither an access_token nor an error"
+        );
+        return Turn::Outage { retry_after: None };
+    };
+    let code = loggable(&code);
+    if USER_TOKEN_ERRORS.contains(&code) {
+        tracing::info!(
+            module = "github",
+            error = code,
+            "github login: declined, the token endpoint refused the code"
+        );
+        return Turn::Decline;
+    }
+    if OPERATOR_TOKEN_ERRORS.contains(&code) {
+        tracing::warn!(
+            module = "github",
+            error = code,
+            "github login: the token endpoint refused this client: the operator's configuration (check client_id, client_secret, the OAuth App's callback URL and that the app is not suspended)"
+        );
+    } else {
+        tracing::warn!(
+            module = "github",
+            error = code,
+            "github login: the token endpoint answered an error that is no declined sign-in"
+        );
+    }
+    Turn::Outage { retry_after: None }
 }
 
 fn finish(flow: &mut LoginFlow, step: LoginStep) -> LoginStep {
@@ -691,9 +1005,9 @@ fn finish(flow: &mut LoginFlow, step: LoginStep) -> LoginStep {
 }
 
 /// Wipe the plugin-owned values of a described hop once it is rendered: `LoginHop.form` carries
-/// the code and the verifier, in the contract's plain `String`s.
+/// the code and the verifier, in the contract's plain `String`s. Its headers are public.
 fn wipe_hop(hop: &mut LoginHop) {
-    for (_, v) in hop.form.iter_mut().chain(hop.headers.iter_mut()) {
+    for (_, v) in &mut hop.form {
         v.zeroize();
     }
 }

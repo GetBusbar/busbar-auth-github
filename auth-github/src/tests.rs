@@ -6,24 +6,22 @@
 
 use super::*;
 use busbar_contract::abi::sdk::test_support::chip;
-use busbar_contract::auth::LoginOutcome;
 
 /// Whether `token` holds exactly `want` (the chip's constant-time equality; it has no getter).
 fn holds(token: Option<Cred>, want: &str) -> bool {
     token.is_some_and(|t| t == chip::cred(want))
 }
 
-/// Both bodies at once: a missing or malformed `/user` or `/user/orgs` body is a fail-closed `Reject`.
-fn identity_from_user_and_orgs(user_body: &str, orgs_body: Option<&str>) -> LoginOutcome {
-    let Some(user) = parse_user(user_body) else {
-        return LoginOutcome::Reject;
-    };
-    let groups = match orgs_body.map(parse_org_groups) {
-        Some(Some(g)) => g,
-        Some(None) => return LoginOutcome::Reject,
+/// The principal the production decoders ([`parse_user`], [`parse_org_groups`]) and
+/// [`build_principal`] assemble from a `/user` body and an optional org page; `None` when a decoder
+/// refuses its body. What the step machine answers for each is driven in `login_tests.rs`.
+fn principal(user_body: &str, orgs_body: Option<&str>) -> Option<Principal> {
+    let user = parse_user(user_body)?;
+    let groups = match orgs_body {
+        Some(body) => parse_org_groups(body)?,
         None => Vec::new(),
     };
-    LoginOutcome::Identify(build_principal(&user, groups))
+    Some(build_principal(&user, groups))
 }
 
 fn cfg() -> GitHubConfig {
@@ -35,13 +33,6 @@ fn cfg() -> GitHubConfig {
         token_base: default_token_base(),
         fetch_orgs: true,
         ca_cert_pem: None,
-    }
-}
-
-fn expect_identify(outcome: LoginOutcome) -> Principal {
-    match outcome {
-        LoginOutcome::Identify(p) => p,
-        other => panic!("expected Identify, got {other:?}"),
     }
 }
 
@@ -151,11 +142,11 @@ fn parse_access_token_reads_both_shapes_and_refuses_an_empty_or_missing_token() 
 
 #[test]
 fn complete_login_after_userinfo_identifies() {
-    // Direct-helper form: good /user JSON → Identify github:<login>; + orgs JSON → github:org groups.
+    // The decoders: good /user JSON → github:<login>; + orgs JSON → github:org groups.
     let user = r#"{"login":"octocat","id":583231,"name":"The Octocat"}"#;
     let orgs = r#"[{"login":"github"},{"login":"octo-org"}]"#;
 
-    let p = expect_identify(identity_from_user_and_orgs(user, Some(orgs)));
+    let p = principal(user, Some(orgs)).expect("identifies");
     assert_eq!(p.id, "github:octocat");
     assert_eq!(p.name.as_deref(), Some("The Octocat"));
     // `github:id/<numeric>` leads: the stable, non-transferable identifier, emitted alongside the
@@ -175,10 +166,7 @@ fn complete_login_after_userinfo_identifies() {
 #[test]
 fn reject_on_malformed_user_json() {
     assert_eq!(parse_user("{ not json"), None);
-    assert_eq!(
-        identity_from_user_and_orgs("{ not json", None),
-        LoginOutcome::Reject
-    );
+    assert_eq!(principal("{ not json", None), None);
 }
 
 // ── GHES base URL overrides ────────────────────────────────────────────────────────────────────────
@@ -239,20 +227,14 @@ fn parse_org_groups_maps_and_skips_bad_entries() {
 #[test]
 fn identity_malformed_orgs_rejects_but_empty_array_identifies() {
     let user = r#"{"login":"octocat","id":1}"#;
-    // Malformed (starts with '[' but truncated) → Reject, not a silent zero-group login.
-    assert_eq!(
-        identity_from_user_and_orgs(user, Some("[{bad")),
-        LoginOutcome::Reject
-    );
-    // A valid empty array → Identify with no roles.
-    let p = expect_identify(identity_from_user_and_orgs(user, Some("[]")));
+    // Malformed (starts with '[' but truncated) → refused, not a silent zero-group login.
+    assert_eq!(principal(user, Some("[{bad")), None);
+    // A valid empty array → identified with no org roles.
+    let p = principal(user, Some("[]")).expect("identifies");
     assert_eq!(p.id, "github:octocat");
     assert_eq!(p.roles, vec!["github:id/1".to_string()]);
     // A valid array → groups parsed.
-    let p = expect_identify(identity_from_user_and_orgs(
-        user,
-        Some(r#"[{"login":"acme"}]"#),
-    ));
+    let p = principal(user, Some(r#"[{"login":"acme"}]"#)).expect("identifies");
     assert_eq!(
         p.roles,
         vec!["github:id/1".to_string(), "github:org/acme".to_string()]
@@ -303,8 +285,8 @@ fn the_stable_numeric_id_distinguishes_two_accounts_sharing_one_handle() {
     let original = r#"{"login":"alice","id":1001,"name":"Alice"}"#;
     let impostor = r#"{"login":"alice","id":90210,"name":"Not Alice"}"#;
 
-    let a = expect_identify(identity_from_user_and_orgs(original, None));
-    let b = expect_identify(identity_from_user_and_orgs(impostor, None));
+    let a = principal(original, None).expect("identifies");
+    let b = principal(impostor, None).expect("identifies");
 
     // The login-based identity CANNOT tell them apart -- this is the hazard, stated as a test.
     assert_eq!(a.id, b.id, "the handle is the same, so the id is the same");
@@ -349,4 +331,29 @@ fn parse_access_token_form_decodes_percent_and_plus() {
         parse_access_token("scope=x&access_token=a%2Bb%3D"),
         "a+b="
     ));
+}
+
+#[test]
+fn next_link_reads_the_next_relation_only() {
+    let link = r#"<https://api.github.com/user/orgs?page=2>; rel="next", <https://api.github.com/user/orgs?page=5>; rel="last""#;
+    assert_eq!(
+        next_link(link),
+        Some("https://api.github.com/user/orgs?page=2")
+    );
+    let last_first =
+        r#"<https://a.example/p?page=1>; rel="prev", <https://a.example/p?page=3>; REL=next"#;
+    assert_eq!(next_link(last_first), Some("https://a.example/p?page=3"));
+    assert_eq!(
+        next_link(r#"<https://a.example/x>; rel="next last""#),
+        Some("https://a.example/x")
+    );
+    for none in [
+        "",
+        r#"<https://a.example/p?page=1>; rel="prev""#,
+        r#"<https://a.example/p?page=1>; rel="nextish""#,
+        "garbage",
+        "<unterminated; rel=\"next\"",
+    ] {
+        assert_eq!(next_link(none), None, "{none}");
+    }
 }

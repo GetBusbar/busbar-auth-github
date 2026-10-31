@@ -39,15 +39,21 @@ one outbound `http` need, and holds its own confidential-client **secret** (the 
 | 1 | `complete_login`: `code` + `redirect_uri` + `code_verifier` | `POST .../login/oauth/access_token` with its own `client_secret` |
 | 2 | the token response | `GET .../user` (bearer) |
 | 3 | the `/user` JSON | `GET .../user/orgs` (or identifies now if `fetch_orgs = false`) |
-| 4 | the `/user/orgs` JSON | identifies `github:<login>` + `github:id/<id>` + `github:org/<org>` groups |
+| 4 | the `/user/orgs` JSON | follows its `Link: rel="next"` page by page (on the API's origin, up to 10 pages), then identifies `github:<login>` + `github:id/<id>` + `github:org/<org>` groups |
 
-Declined (a bad credential, 401) on any other non-2xx, a missing `access_token`, a missing `login`,
-or malformed JSON. An outage (503, retryable) when GitHub answers `5xx` or `429`, when a hop cannot
-be made (refused, connect, TLS, timeout), or when its reply passes 256 KiB. An `id_token` on a hop
-answer (never from github.com) must carry the nonce minted at begin, else the sign-in fails its
-security check (400).
-GitHub answers its token endpoint with **HTTP 200 even on a bad code** (an `{"error":...}` body with
-no `access_token`) — that is treated as a rejection, never a success with an empty token.
+Only a credential error is a declined sign-in (a bad credential, 401): the token endpoint's
+`400`/`401` carrying an RFC 6749 §5.2 `error`, its HTTP 200 answer carrying the user's own code
+(`bad_verification_code`, `invalid_grant`, `expired_token`), and a `401` from `/user` or
+`/user/orgs` (the access token is not accepted). Everything else is an outage (503, retryable):
+GitHub answering `5xx` or `429`, its `403` rate limit (`retry-after` or `x-ratelimit-remaining: 0`),
+a `403` on `/user/orgs` (the token lacks `read:org`: logged at warn as the operator's to fix), a
+redirect, `404`, `408` or any other status; a 200 token error that is the operator's
+(`incorrect_client_credentials`, `redirect_uri_mismatch`, `application_suspended`, logged at warn)
+or unknown; a 2xx with no token, no user or no org list (empty, HTML, malformed JSON); a hop that
+cannot be made (refused, connect, TLS, timeout); a reply past 256 KiB. An outage carries GitHub's
+retry hint (`retry-after` seconds, or the seconds to `x-ratelimit-reset`) for the host. An
+`id_token` on a hop answer (never from github.com) must carry the nonce minted at begin, else the
+sign-in fails its security check (400).
 
 ## Config
 
@@ -77,7 +83,7 @@ a host, is refused too. The `client_secret` is **never** in this config — it i
 | `api_base` | *(required)* | `https://api.github.com`; GHES: `https://<host>/api/v3` |
 | `authorize_base` | `https://github.com` | GHES: `https://<host>` |
 | `token_base` | *(required)* | `https://github.com`; GHES: `https://<host>` |
-| `fetch_orgs` | `true` | `false` = login-only, no org groups, one fewer hop |
+| `fetch_orgs` | `true` | `false` = login-only, no org groups, one fewer hop. `true` needs a scope that reads orgs (`read:org`, `write:org`, `admin:org` or `user`), else `validate`/`open` refuse it |
 | `ca_cert_pem` | *(none)* | An extra trusted root (PEM) for a GHES behind an internal CA (see below) |
 
 The config is `deny_unknown_fields` (a typo fails loudly at boot). Every refusal is the contract's
@@ -103,8 +109,7 @@ and the REST API at `https://<host>/api/v3`:
 ### Groups
 
 Each org the user belongs to becomes a group string `github:org/<org-login>`, mapped to policy by the
-operator's `auth.role_bindings.github:`. (Team-level groups `github:team/<org>/<team-slug>` are a
-straightforward extension via a `/user/teams` hop; not enabled by default.)
+operator's `auth.role_bindings.github:`.
 
 ## Build
 
@@ -137,11 +142,16 @@ The `busbar-auth-github` crate (`auth-github/`) is the reusable logic (staticall
   `settings.ca_cert_pem` beside the public roots, one the public roots only. A config that names a
   `ca_cert_pem` goes out on the first, any other on the second; the host's connector does the TLS,
   and certificate validation is only widened, never disabled. A value with no PEM certificate in it
-  is refused (`settings.ca_cert_pem: not a PEM certificate (no -----BEGIN CERTIFICATE----- line)`).
+  is refused (`settings.ca_cert_pem: not a PEM certificate (no -----BEGIN CERTIFICATE----- line)`),
+  and so is one written blank (`settings.ca_cert_pem: blank: omit it, or give a PEM certificate`).
 - **Multi-hop flow state.** The access token is seen once (the token response) but is needed to
   authenticate both GETs, and the `/user` identity is needed at the `/user/orgs` step. Each flow
   (`LoginFlow`) owns this state, so concurrent logins never share a slot; a finished flow holds
   neither.
+- **Org pages.** `/user/orgs` is read 100 orgs a page, following GitHub's `Link: rel="next"` on the
+  `api_base` origin (a next link anywhere else is an outage, never followed), for at most **10 pages
+  (1000 orgs)**. A user in more orgs than that signs in with the first 1000 org groups, and the
+  plugin logs a WARN that the org list was truncated (fail-safe: fewer roles, never more).
 - **Reply cap.** Every hop's reply is capped at 256 KiB (`MAX_HOP_REPLY_BYTES`, the exchange's
   `reply_limit`); a reply past it ends the login as an outage.
 
@@ -152,8 +162,7 @@ cargo test --workspace --locked
 ```
 
 `auth-github-plugin/tests/conformance.rs` runs busbar's published conformance suite (both doors,
-the far ends in `conformance.json`) and mounts the test kit's host
-(`tests/support/conformance_host.rs`). `tests/e2e.rs` is the live end-to-end against a real busbar
+the far ends in `conformance.json`). `tests/e2e.rs` is the live end-to-end against a real busbar
 and a wiremock GitHub (CI's `wiremock` service).
 
 ## License

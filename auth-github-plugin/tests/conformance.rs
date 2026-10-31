@@ -522,3 +522,43 @@ fn an_auth_door_loaded_as_another_kind_is_refused() {
         "an auth library must not load as secret"
     );
 }
+
+/// The envelope's log records as the host receives them: `(severity, text)`.
+#[derive(Default)]
+struct Logs(std::sync::Mutex<Vec<(u8, String)>>);
+
+impl busbar_plugin_loader::dispatch::EnvelopeSink for Logs {
+    fn metric(&self, _: busbar_plugin_loader::dispatch::Metric<'_>) {}
+    fn diag(&self, d: busbar_plugin_loader::dispatch::Diagnostic<'_>) {
+        if let Ok(mut logs) = self.0.lock() {
+            logs.push((d.severity, String::from_utf8_lossy(d.text).into_owned()));
+        }
+    }
+    fn dropped(&self, _: busbar_plugin_loader::dispatch::Dropped) {}
+}
+
+/// RED L9: a REFUSED complete_login is never near-silent: the ticket-less one (it waits on I/O,
+/// the host resubmits it on a ticket) is one INFO record (severity 0) naming `module=github` and
+/// its `reason` word, as the host's plugin log receives it.
+#[test]
+fn red_l9_a_ticketless_complete_login_is_refused_at_info_with_a_reason() {
+    let d = dispatcher();
+    let logs = Arc::new(Logs::default());
+    let p = load_linked::<Auth>(
+        &row(),
+        Bind {
+            sink: logs.clone(),
+            ..bind(&d)
+        },
+    )
+    .expect("the linked door loads");
+    assert_eq!(open(&p, CFG, Some(SECRET)), "Ready lease=false ");
+    assert!(complete_login(&p).starts_with("complete_login Refused"));
+    let logs = logs.0.lock().expect("the records").clone();
+    assert!(
+        logs.iter().any(|(sev, text)| *sev == 0
+            && text.contains("reason=\"no-ticket\"")
+            && text.contains("module=\"github\"")),
+        "{logs:?}"
+    );
+}

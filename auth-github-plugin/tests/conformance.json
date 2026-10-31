@@ -52,6 +52,13 @@
         "code_verifier": "conformance-verifier"
       },
       "complete_verdict": "identity:github:octo-conformance",
+      "complete_rejected": {
+        "code": "",
+        "state": "conformance-state",
+        "nonce": "conformance-nonce",
+        "redirect_uri": "https://node.example/auth/token",
+        "code_verifier": "conformance-verifier"
+      },
       "complete_crossings": 1
     }
   }
