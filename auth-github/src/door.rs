@@ -21,7 +21,7 @@ use std::collections::HashMap;
 use std::marker::PhantomData;
 use std::sync::{Arc, Mutex, PoisonError, RwLock};
 use std::task::Poll;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use busbar_contract::abi::auth::{
     AuthTail, BeginLoginIn, BeginLoginOut, CompleteLoginIn, IdentifyOut, IdentityBuf,
@@ -122,9 +122,25 @@ const ANSWERED_MAX: usize = 1024;
 /// when it was kept.
 type Answered = HashMap<Ticket, (Instant, Principal)>;
 
-/// Keep `p` for `ticket`'s retry, at most `max` at once: at the cap the OLDEST entry goes, never
-/// the rest (an in-flight short answer awaiting its retry must survive).
+/// How long a short answer waits for its retry: an entry older is dropped on the next access.
+const ANSWERED_TTL: Duration = Duration::from_secs(10 * 60);
+
+/// Drop every entry older than [`ANSWERED_TTL`] at `now`.
+fn sweep(map: &mut Answered, now: Instant) {
+    map.retain(|_, (at, _)| now.saturating_duration_since(*at) <= ANSWERED_TTL);
+}
+
+/// The identity a short answer reached for `ticket`, taken for its retry, if it is not stale.
+fn take(map: &mut Answered, now: Instant, ticket: Ticket) -> Option<Principal> {
+    sweep(map, now);
+    map.remove(&ticket).map(|(_, p)| p)
+}
+
+/// Keep `p` for `ticket`'s retry, at most `max` at once: entries past [`ANSWERED_TTL`] go first;
+/// at the cap the OLDEST entry goes, never the rest (an in-flight short answer awaiting its retry
+/// must survive).
 fn keep(map: &mut Answered, max: usize, at: Instant, ticket: Ticket, p: Principal) {
+    sweep(map, at);
     if map.len() >= max && !map.contains_key(&ticket) {
         let oldest = map.iter().min_by_key(|(_, (at, _))| *at).map(|(t, _)| *t);
         if let Some(oldest) = oldest {
@@ -386,8 +402,8 @@ impl SafeSlot for Complete {
         }
         let g = h.life();
         let buf = input.out_buf();
-        let reached = g.answered().remove(&ticket);
-        if let Some((_, p)) = reached {
+        let reached = take(&mut g.answered(), Instant::now(), ticket);
+        if let Some(p) = reached {
             return identify(g, ticket, p, buf, &mut out);
         }
         let mut parked = match instance.resume::<Parked>() {
