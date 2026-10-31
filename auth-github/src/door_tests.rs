@@ -84,7 +84,7 @@ const PEM: &str = "-----BEGIN CERTIFICATE-----\\nY29uZm9ybWFuY2U=\\n-----END CER
 
 /// RED: a `ca_cert_pem` (a GHES behind an internal CA) anchors every hop: the login goes out on the
 /// need that trusts it (`trust_from` = `settings.ca_cert_pem`), beside the public roots. Without
-/// one (absent, null or empty) it goes out on the public-roots need.
+/// one (absent or null) it goes out on the public-roots need.
 #[test]
 fn a_set_ca_cert_pem_anchors_the_hops() {
     let anchored = WRITTEN.replace(
@@ -99,10 +99,29 @@ fn a_set_ca_cert_pem_anchors_the_hops() {
     for public in [
         WRITTEN.to_string(),
         WRITTEN.replace("\"client_id\"", "\"ca_cert_pem\": null, \"client_id\""),
-        WRITTEN.replace("\"client_id\"", "\"ca_cert_pem\": \"\", \"client_id\""),
     ] {
         let login = GithubLogin::open(&public, None).expect("opens");
         assert_eq!(need_of(&login), NEED_PUBLIC, "{public}");
+    }
+}
+
+/// RED L5: a `ca_cert_pem` written but blank names no certificate: refused at validate and open,
+/// by name, never accepted and ignored (the operator meant to anchor the hops).
+#[test]
+fn red_l5_a_blank_ca_cert_pem_is_refused_by_name() {
+    for blank in ["", "   ", "\\n\\t "] {
+        let settings = WRITTEN.replace(
+            "\"client_id\"",
+            &format!("\"ca_cert_pem\": \"{blank}\", \"client_id\""),
+        );
+        let r = refusal(&settings);
+        assert_eq!(r.outcome(), Outcome::Failed, "{blank:?}");
+        assert_eq!(
+            r.text(),
+            Some("settings.ca_cert_pem: blank: omit it, or give a PEM certificate"),
+            "{blank:?}"
+        );
+        assert!(GithubLogin::open(&settings, None).is_err(), "{blank:?}");
     }
 }
 
