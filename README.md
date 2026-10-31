@@ -39,7 +39,7 @@ one outbound `http` need, and holds its own confidential-client **secret** (the 
 | 1 | `complete_login`: `code` + `redirect_uri` + `code_verifier` | `POST .../login/oauth/access_token` with its own `client_secret` |
 | 2 | the token response | `GET .../user` (bearer) |
 | 3 | the `/user` JSON | `GET .../user/orgs` (or identifies now if `fetch_orgs = false`) |
-| 4 | the `/user/orgs` JSON | identifies `github:<login>` + `github:id/<id>` + `github:org/<org>` groups |
+| 4 | the `/user/orgs` JSON | follows its `Link: rel="next"` page by page (on the API's origin, up to 10 pages), then identifies `github:<login>` + `github:id/<id>` + `github:org/<org>` groups |
 
 Only a credential error is a declined sign-in (a bad credential, 401): the token endpoint's
 `400`/`401` carrying an RFC 6749 §5.2 `error`, its HTTP 200 answer carrying the user's own code
@@ -148,6 +148,10 @@ The `busbar-auth-github` crate (`auth-github/`) is the reusable logic (staticall
   authenticate both GETs, and the `/user` identity is needed at the `/user/orgs` step. Each flow
   (`LoginFlow`) owns this state, so concurrent logins never share a slot; a finished flow holds
   neither.
+- **Org pages.** `/user/orgs` is read 100 orgs a page, following GitHub's `Link: rel="next"` on the
+  `api_base` origin (a next link anywhere else is an outage, never followed), for at most **10 pages
+  (1000 orgs)**. A user in more orgs than that signs in with the first 1000 org groups, and the
+  plugin logs a WARN that the org list was truncated (fail-safe: fewer roles, never more).
 - **Reply cap.** Every hop's reply is capped at 256 KiB (`MAX_HOP_REPLY_BYTES`, the exchange's
   `reply_limit`); a reply past it ends the login as an outage.
 

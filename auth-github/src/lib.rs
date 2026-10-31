@@ -130,12 +130,10 @@ fn token_endpoint(cfg: &GitHubConfig) -> String {
 fn user_endpoint(cfg: &GitHubConfig) -> String {
     format!("{}/user", cfg.api_base.trim_end_matches('/'))
 }
-/// The `/user/orgs` endpoint URL (`{api_base}/user/orgs?per_page=100`). GitHub paginates this list at
-/// 30 entries/page by default; `per_page=100` raises the cap so a user in up to 100 orgs keeps ALL
-/// their `github:org/<org>` groups. RESIDUAL LIMIT: the hop ABI feeds back only a
-/// single response body and carries no Link-header channel, so this module cannot follow pagination
-/// past page 1 — a user in >100 orgs still loses memberships beyond the first 100. Revisit if the ABI
-/// grows a way to chain paginated hops.
+/// The `/user/orgs` endpoint URL (`{api_base}/user/orgs?per_page=100`): its first page. GitHub
+/// paginates this list (30 entries a page by default; `per_page=100` is its most). The login follows
+/// each page's `Link: rel="next"` ([`next_link`]) on the API's origin, up to
+/// [`login::MAX_ORG_PAGES`] pages (1000 orgs); past that the org list is logged as truncated.
 fn orgs_endpoint(cfg: &GitHubConfig) -> String {
     format!(
         "{}/user/orgs?per_page=100",
@@ -263,6 +261,53 @@ pub fn build_orgs_get(cfg: &GitHubConfig) -> LoginHop {
         secret_form_field: None,
         headers: userinfo_headers(),
     }
+}
+
+/// Build the GET hop of a later `/user/orgs` page: `url` is the previous page's `Link: rel="next"`
+/// (the login checks it is on the API's origin; the hop guard vets it as every hop), with the same
+/// headers as [`build_orgs_get`].
+pub fn build_orgs_page_get(url: &str) -> LoginHop {
+    LoginHop {
+        method: "GET".to_string(),
+        url: url.to_string(),
+        form: Vec::new(),
+        secret_form_field: None,
+        headers: userinfo_headers(),
+    }
+}
+
+/// The target of an RFC 8288 `Link` field's `rel="next"` link (`<url>; rel="next", ...`), if any.
+/// A `rel` may list several relation types (`rel="next last"`); its name and value are matched
+/// ASCII case-insensitively.
+pub fn next_link(link: &str) -> Option<&str> {
+    let mut rest = link;
+    while let Some(open) = rest.find('<') {
+        let after = &rest[open + 1..];
+        let close = after.find('>')?;
+        let target = &after[..close];
+        let params_end = after[close + 1..]
+            .find('<')
+            .map_or(after.len(), |i| close + 1 + i);
+        let params = &after[close + 1..params_end];
+        let is_next = params.split(';').any(|p| {
+            let Some((name, value)) = p.split_once('=') else {
+                return false;
+            };
+            name.trim().eq_ignore_ascii_case("rel")
+                && value
+                    .trim()
+                    .trim_end_matches(',')
+                    .trim()
+                    .trim_matches('"')
+                    .split_ascii_whitespace()
+                    .any(|r| r.eq_ignore_ascii_case("next"))
+        });
+        if is_next {
+            return Some(target.trim());
+        }
+        rest = &after[close + 1..];
+    }
+    None
 }
 
 /// A GitHub `/user` profile, reduced to what identity needs.
