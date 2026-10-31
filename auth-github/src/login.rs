@@ -369,7 +369,16 @@ impl GithubLogin {
         if cfg
             .ca_cert_pem
             .as_deref()
-            .is_some_and(|p| !p.is_empty() && !p.contains("-----BEGIN CERTIFICATE-----"))
+            .is_some_and(|p| p.trim().is_empty())
+        {
+            return Err(
+                "settings.ca_cert_pem: blank: omit it, or give a PEM certificate".to_string(),
+            );
+        }
+        if cfg
+            .ca_cert_pem
+            .as_deref()
+            .is_some_and(|p| !p.contains("-----BEGIN CERTIFICATE-----"))
         {
             return Err(
                 "settings.ca_cert_pem: not a PEM certificate (no -----BEGIN CERTIFICATE----- line)"
@@ -395,9 +404,8 @@ impl GithubLogin {
         })
     }
 
-    /// Whether the settings name an operator CA (`ca_cert_pem`, non-empty): the hops then go out on
-    /// the need that trusts it beside the public roots. Read as the host reads a `trust_from`
-    /// path: an empty value names nothing.
+    /// Whether the settings name an operator CA (`ca_cert_pem`; `open` refuses a blank one): the
+    /// hops then go out on the need that trusts it beside the public roots.
     #[must_use]
     pub fn anchored(&self) -> bool {
         self.cfg

@@ -107,7 +107,7 @@ pub struct GitHubConfig {
     /// An ADDITIONAL trusted root CA certificate (PEM) for a GHES instance behind an internal CA,
     /// layered on top of the public roots, never a replacement. The host's connector does the TLS:
     /// the hops go out on the need whose `trust_from` is this setting. A value with no PEM
-    /// certificate in it is refused at validate/open, named.
+    /// certificate in it, or a blank one, is refused at validate/open, named.
     #[serde(default)]
     pub ca_cert_pem: Option<String>,
 }

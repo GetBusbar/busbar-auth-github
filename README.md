@@ -143,7 +143,8 @@ The `busbar-auth-github` crate (`auth-github/`) is the reusable logic (staticall
   `settings.ca_cert_pem` beside the public roots, one the public roots only. A config that names a
   `ca_cert_pem` goes out on the first, any other on the second; the host's connector does the TLS,
   and certificate validation is only widened, never disabled. A value with no PEM certificate in it
-  is refused (`settings.ca_cert_pem: not a PEM certificate (no -----BEGIN CERTIFICATE----- line)`).
+  is refused (`settings.ca_cert_pem: not a PEM certificate (no -----BEGIN CERTIFICATE----- line)`),
+  and so is one written blank (`settings.ca_cert_pem: blank: omit it, or give a PEM certificate`).
 - **Multi-hop flow state.** The access token is seen once (the token response) but is needed to
   authenticate both GETs, and the `/user` identity is needed at the `/user/orgs` step. Each flow
   (`LoginFlow`) owns this state, so concurrent logins never share a slot; a finished flow holds
