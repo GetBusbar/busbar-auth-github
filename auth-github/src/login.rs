@@ -15,11 +15,12 @@
 //!
 //! | answer | step |
 //! |---|---|
-//! | module `Identify` | [`LoginStep::Identity`] |
-//! | module `Reject` ("Sign-in was declined", 401) | [`LoginStep::BadCredential`] |
-//! | hop refused or unreachable ("Couldn't reach your provider", 502) | [`LoginStep::Outage`] |
-//! | hop limit spent / `Authorize` on the callback (502) | [`LoginStep::Outage`] |
-//! | a hop body's `id_token` nonce mismatch ("Sign-in couldn't be verified", 400) | [`LoginStep::SecurityCheckFailed`] |
+//! | an identity reached | [`LoginStep::Identity`] |
+//! | a credential error, declined (`LOGIN_BAD_CREDENTIAL`) | [`LoginStep::BadCredential`] |
+//! | the IdP not answering, a hop refused or unreachable, the hop limit spent (`LOGIN_OUTAGE`) | [`LoginStep::Outage`] |
+//! | a hop body's `id_token` nonce mismatch (`LOGIN_SECURITY_CHECK_FAILED`) | [`LoginStep::SecurityCheckFailed`] |
+//!
+//! The HTTP status each verdict is answered with is the host's, not this plugin's.
 //!
 //! Any HTTP status the IdP answers is fed back to the step machine, per hop (OWNER-SIGNED
 //! 2026-10-30: only a credential error is a declined sign-in). The token endpoint's `400`/`401`
@@ -127,8 +128,8 @@ pub(crate) fn split(url: &str) -> Option<(&str, String)> {
 
 impl HopRequest {
     /// The SDK exchange that sends this hop: the public fields framed as they are, the bearer
-    /// sealed in as `authorization` first (after a `content-type`), the form encoded by the SDK into the body
-    /// it sends, the reply bounded by `reply_limit`. `None`: the URL has no scheme and authority,
+    /// sealed in as `authorization` first (after a `content-type`), the form encoded by the SDK
+    /// into the body it sends, the reply bounded by `reply_limit`. `None`: the URL has no scheme and authority,
     /// the form could not be encoded, or the exchange refused the request.
     #[must_use]
     pub fn wire(&self, reply_limit: usize) -> Option<Wire> {
@@ -1004,9 +1005,9 @@ fn finish(flow: &mut LoginFlow, step: LoginStep) -> LoginStep {
 }
 
 /// Wipe the plugin-owned values of a described hop once it is rendered: `LoginHop.form` carries
-/// the code and the verifier, in the contract's plain `String`s.
+/// the code and the verifier, in the contract's plain `String`s. Its headers are public.
 fn wipe_hop(hop: &mut LoginHop) {
-    for (_, v) in hop.form.iter_mut().chain(hop.headers.iter_mut()) {
+    for (_, v) in &mut hop.form {
         v.zeroize();
     }
 }
