@@ -83,8 +83,8 @@ pub struct HopRequest {
     pub target: String,
     /// The public header fields, in order.
     pub fields: Vec<(String, String)>,
-    /// The access token an authenticated hop presents: sealed in as `authorization: Bearer` right
-    /// after `content-type`, where 1.5.5's http stack wrote it.
+    /// The access token an authenticated hop presents: sealed in as `authorization: Bearer` first
+    /// (right after `content-type` on a hop that has one, where 1.5.5's http stack wrote it).
     pub bearer: Option<Cred>,
     /// The `application/x-www-form-urlencoded` body (empty for a GET). The token exchange's
     /// carries the client secret sealed; its public values (the code, the verifier) are wiped
@@ -127,7 +127,7 @@ pub(crate) fn split(url: &str) -> Option<(&str, String)> {
 
 impl HopRequest {
     /// The SDK exchange that sends this hop: the public fields framed as they are, the bearer
-    /// sealed in as `authorization` after `content-type`, the form encoded by the SDK into the body
+    /// sealed in as `authorization` first (after a `content-type`), the form encoded by the SDK into the body
     /// it sends, the reply bounded by `reply_limit`. `None`: the URL has no scheme and authority,
     /// the form could not be encoded, or the exchange refused the request.
     #[must_use]
@@ -140,10 +140,15 @@ impl HopRequest {
             return None;
         };
         let body = self.body.encoded().ok()?;
+        let at = self
+            .fields
+            .iter()
+            .position(|(n, _)| n == "content-type")
+            .map_or(0, |i| i + 1);
         let sealed = self
             .bearer
             .iter()
-            .map(|b| (1, b"authorization".to_vec(), b.bearer()))
+            .map(|b| (at, b"authorization".to_vec(), b.bearer()))
             .collect();
         let request = Request {
             method: self.method.clone().into_bytes(),
@@ -638,9 +643,9 @@ impl GithubLogin {
 
     /// Render a hop up to the send: vet the URL, seal the client secret into the named form
     /// field (or drop the placeholder when there is none), and lay out the fields as the http
-    /// stack wrote them (`content-type` first, the hop's sanitised headers, then the default
-    /// `accept: */*` when the hop set none). An authenticated hop carries `bearer`, which the chip
-    /// writes as `authorization` after `content-type`.
+    /// stack wrote them (`content-type` first when the hop has a form body, the hop's sanitised
+    /// headers, then the default `accept: */*` when the hop set none). An authenticated hop carries
+    /// `bearer`, which the chip writes as `authorization` first (after `content-type`, if any).
     ///
     /// The plugin never holds the secret's or the bearer's bytes here: the body is a [`FormBody`]
     /// the SDK encodes at the wire.
@@ -675,10 +680,14 @@ impl GithubLogin {
             m if !m.is_empty() && m.bytes().all(|b| b.is_ascii_alphabetic()) => m.to_string(),
             _ => "POST".to_string(),
         };
-        let mut fields = vec![(
-            "content-type".to_string(),
-            "application/x-www-form-urlencoded".to_string(),
-        )];
+        // Only a hop with a form body says what its body is (L4).
+        let mut fields = Vec::new();
+        if !hop.form.is_empty() {
+            fields.push((
+                "content-type".to_string(),
+                "application/x-www-form-urlencoded".to_string(),
+            ));
+        }
         for (name, value) in &hop.headers {
             fields.push(sanitize_hop_header(name, value)?);
         }
