@@ -83,7 +83,7 @@ a host, is refused too. The `client_secret` is **never** in this config — it i
 | `api_base` | *(required)* | `https://api.github.com`; GHES: `https://<host>/api/v3` |
 | `authorize_base` | `https://github.com` | GHES: `https://<host>` |
 | `token_base` | *(required)* | `https://github.com`; GHES: `https://<host>` |
-| `fetch_orgs` | `true` | `false` = login-only, no org groups, one fewer hop |
+| `fetch_orgs` | `true` | `false` = login-only, no org groups, one fewer hop. `true` needs a scope that reads orgs (`read:org`, `write:org`, `admin:org` or `user`), else `validate`/`open` refuse it |
 | `ca_cert_pem` | *(none)* | An extra trusted root (PEM) for a GHES behind an internal CA (see below) |
 
 The config is `deny_unknown_fields` (a typo fails loudly at boot). Every refusal is the contract's
