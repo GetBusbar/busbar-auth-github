@@ -1382,6 +1382,30 @@ mod logging {
         }
     }
 
+    /// RED L8: a hop that could not be made (refused, connect, TLS, timeout, a request that could
+    /// not be framed) ends the login as an outage with one WARN naming the hop, never silently.
+    #[test]
+    fn red_l8_an_unreachable_hop_is_a_warn_naming_the_hop() {
+        let l = login();
+        for (url, path) in [
+            (TOKEN_URL, "/login/oauth/access_token"),
+            (USER_URL, "/user"),
+            (ORGS_URL, "/user/orgs"),
+        ] {
+            let mut s = Script::happy().unreachable(url);
+            let cap = WarnCapture::default();
+            let step = tracing::subscriber::with_default(cap.clone(), || run(&l, &mut s));
+            assert_eq!(step, OUTAGE, "{url}");
+            assert!(
+                cap.contains("could not be made"),
+                "{url}: {:?}",
+                cap.messages()
+            );
+            assert!(cap.contains(path), "{url}: {:?}", cap.messages());
+            assert!(cap.contains("module=github"), "{url}: {:?}", cap.messages());
+        }
+    }
+
     /// RED G1: a 403 on `/user/orgs` that is no rate limit is the operator's (the token lacks the
     /// `read:org` scope): an outage, and a WARN naming the scope.
     #[test]
