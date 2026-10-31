@@ -342,7 +342,8 @@ impl GithubLogin {
     ///
     /// # Errors
     /// Empty or invalid settings (a decoder error keeps serde's text only when it
-    /// names a key, never a value); an empty `client_id`; a base that is not an http(s) URL with a
+    /// names a key, never a value); an empty `client_id`; `fetch_orgs` with no scope that reads
+    /// orgs; a base that is not an http(s) URL with a
     /// host; a `ca_cert_pem` that is no PEM certificate; a `token_base` or `api_base` not written out (the hop allowlist is built only from
     /// the URLs written in the settings, so every hop to a defaulted base would be refused).
     pub fn open(settings: &str, client_secret: Option<&str>) -> Result<Self, String> {
@@ -355,6 +356,16 @@ impl GithubLogin {
             .map_err(|_| "settings: not a JSON document".to_string())?;
         if cfg.client_id.is_empty() {
             return Err("settings.client_id: empty".to_string());
+        }
+        // `/user/orgs` needs `read:org` or a scope that holds it; without one every login's org
+        // hop would be answered 403.
+        if cfg.fetch_orgs
+            && !cfg
+                .scopes
+                .iter()
+                .any(|s| matches!(s.as_str(), "read:org" | "write:org" | "admin:org" | "user"))
+        {
+            return Err("settings.scopes: fetch_orgs reads /user/orgs, which needs the read:org scope (or write:org, admin:org, user): add it, or set fetch_orgs: false".to_string());
         }
         for (key, url) in [
             ("api_base", &cfg.api_base),
