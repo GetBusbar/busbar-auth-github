@@ -279,6 +279,10 @@ struct Over<'c, 'h> {
 impl Exchange for Over<'_, '_> {
     fn exchange(&mut self, request: &HopRequest) -> Fetched {
         let Some((origin, _)) = split(&request.target) else {
+            tracing::warn!(
+                module = "github",
+                "github login: a hop URL has no scheme and authority to send it to"
+            );
             return Fetched::Unreachable;
         };
         if self.wire.is_none() {
