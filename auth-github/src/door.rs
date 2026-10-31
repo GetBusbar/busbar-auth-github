@@ -11,9 +11,10 @@
 //! * `begin_login` answers the GitHub authorize URL under a lease.
 //! * `complete_login` runs the hop chain itself ([`GithubLogin::drive`]) over the Statement's one
 //!   outbound need, each hop one framed `exchange()`; PENDING parks the flow on the ticket. A
-//!   ticket-less call cannot wait on I/O and answers REFUSED. An identity that does not fit the
-//!   host's buffer is the short answer, and the retry is served from the identity reached (an
-//!   authorization code redeems once).
+//!   ticket-less call cannot wait on I/O and answers REFUSED. A parked flow is driven by the login
+//!   it began under, to its end, whatever `refresh` swapped in meanwhile. An identity that does
+//!   not fit the host's buffer is the short answer, and the retry is served from the identity
+//!   reached (an authorization code redeems once).
 //! * `verify` and the outbound ops are not served (the tail states only `CAP_LOGIN`): REFUSED.
 
 use std::collections::HashMap;
@@ -260,14 +261,11 @@ struct Parked {
     base: u32,
 }
 
-/// The login a resumed flow is driven by: the instance's current one.
-fn driving(g: &Github, parked: &Parked) -> Arc<GithubLogin> {
-    let current = g.login();
-    if Arc::ptr_eq(&parked.login, &current) {
-        parked.login.clone()
-    } else {
-        current
-    }
+/// The login a resumed flow is driven by: the one it began under, to its end. A `refresh` swaps
+/// the instance's login for the flows begun after it; a flow parked before it keeps its own client
+/// secret, bases and allowlist (the hop parked on a pending exchange was rendered by it).
+fn driving(_: &Github, parked: &Parked) -> Arc<GithubLogin> {
+    parked.login.clone()
 }
 
 /// The hop exchange over the instance's connector: one framed `exchange()` per hop on the one need.

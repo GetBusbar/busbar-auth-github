@@ -1483,11 +1483,11 @@ fn the_hop_bodies_are_wiped_on_drop() {
     wipes(&response.body);
 }
 
-/// GHO2, REFRESH MID-FLOW: the door swaps the login whole on `refresh` and resumes a parked flow
-/// with the login current at the next entry. The hop parked on a pending exchange is re-issued
-/// exactly as it was sent (its stored answer is read, the code is never redeemed twice), and the
-/// hops after it are rendered by the refreshed login: its client secret is never sent, as no
-/// token exchange is made again.
+/// GHO2, REFRESH MID-FLOW: the door swaps the login whole on `refresh`, but a parked flow is
+/// driven by the login it began under to its end (L2, `door::driving`). Even a flow driven by
+/// another login re-issues the hop parked on a pending exchange exactly as it was sent (its stored
+/// answer is read, the code is never redeemed twice), and that login's client secret is never sent,
+/// as no token exchange is made again.
 #[test]
 fn a_refresh_mid_flow_resumes_the_parked_hop_unchanged() {
     let before = login();
