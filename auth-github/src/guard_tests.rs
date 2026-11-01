@@ -126,6 +126,49 @@ mod logging {
     use busbar_test_kit::warn_capture::WarnCapture;
 
     #[test]
+    fn c0_header_values_are_refused_without_logging_the_value() {
+        for byte in [1, 8, 11, 12, 14, 31] {
+            let value = format!("secret-canary{}", char::from(byte));
+            let cap = WarnCapture::default();
+            tracing::subscriber::with_default(cap.clone(), || {
+                assert_eq!(sanitize_hop_header("x-sensitive", &value), Err(Refused));
+            });
+            assert!(cap.contains("x-sensitive") && cap.contains("control byte"));
+            assert!(!cap.contains("secret-canary"));
+        }
+    }
+
+    #[test]
+    fn guard_refusals_name_the_rule_without_logging_url_credentials() {
+        for (url, hosts, reason) in [
+            (
+                "http://user:secret-canary@github.com/path?code=code-canary",
+                allowed(&["github.com"]),
+                "plaintext http",
+            ),
+            (
+                "https://user:secret-canary@metadata.google.internal/path?code=code-canary",
+                allowed(&["metadata.google.internal"]),
+                "cloud-metadata",
+            ),
+            (
+                "not-a-url secret-canary code-canary",
+                allowed(&[]),
+                "host could not be read",
+            ),
+        ] {
+            let cap = WarnCapture::default();
+            tracing::subscriber::with_default(cap.clone(), || {
+                assert_eq!(vet_hop_url(url, &hosts), Err(Refused));
+            });
+            assert!(cap.contains(reason), "{:?}", cap.messages());
+            for secret in ["secret-canary", "code-canary", "/path"] {
+                assert!(!cap.contains(secret), "{:?}", cap.messages());
+            }
+        }
+    }
+
+    #[test]
     fn a_refused_header_logs_its_name_never_its_value() {
         let cap = WarnCapture::default();
         tracing::subscriber::with_default(cap.clone(), || {

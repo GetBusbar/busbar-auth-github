@@ -178,12 +178,8 @@ impl Drop for Scratch {
     }
 }
 
-fn free_port() -> u16 {
-    std::net::TcpListener::bind("127.0.0.1:0")
-        .unwrap()
-        .local_addr()
-        .unwrap()
-        .port()
+fn reserve_port() -> std::net::TcpListener {
+    std::net::TcpListener::bind("127.0.0.1:0").unwrap()
 }
 
 /// Register the GitHub stub mappings on WireMock over its admin API (equivalent to the JSON files under
@@ -207,19 +203,34 @@ fn register_wiremock_stubs(client: &reqwest::blocking::Client, base: &str) {
     let _ = client.post(format!("{base}/__admin/mappings/reset")).send();
     let mappings = [
         serde_json::json!({
-            "request": { "method": "POST", "urlPath": "/login/oauth/access_token" },
+            "request": { "method": "POST", "urlPath": "/login/oauth/access_token",
+                "headers": { "Accept": {"equalTo":"application/json"},
+                    "Content-Type": {"contains":"application/x-www-form-urlencoded"} },
+                "bodyPatterns": [
+                    {"matches":"(^|.*&)client_id=Iv1.e2eclient(&.*|$)"},
+                    {"matches":"(^|.*&)client_secret=e2e-secret(&.*|$)"},
+                    {"matches":"(^|.*&)code=e2e-code(&.*|$)"},
+                    {"matches":"(^|.*&)code_verifier=[A-Za-z0-9_-]+(&.*|$)"}
+                ] },
             "response": { "status": 200, "headers": { "Content-Type": "application/json" },
                 "jsonBody": { "access_token": "gho_test", "token_type": "bearer", "scope": "" } }
         }),
         serde_json::json!({
-            "request": { "method": "GET", "urlPath": "/user" },
+            "request": { "method": "GET", "urlPath": "/user", "headers": { "Authorization": {"equalTo":"Bearer gho_test"}, "Accept": {"equalTo":"application/vnd.github+json"} } },
             "response": { "status": 200, "headers": { "Content-Type": "application/json" },
                 "jsonBody": { "login": "octotest", "id": 12345, "name": "Octo Test" } }
         }),
         serde_json::json!({
-            "request": { "method": "GET", "urlPath": "/user/orgs" },
+            "request": { "method": "GET", "urlPath": "/user/orgs", "headers": { "Authorization": {"equalTo":"Bearer gho_test"}, "Accept": {"equalTo":"application/vnd.github+json"} }, "queryParameters": {"per_page":{"equalTo":"100"}} },
             "response": { "status": 200, "headers": { "Content-Type": "application/json" },
                 "jsonBody": [ { "login": "testorg" } ] }
+        }),
+        serde_json::json!({
+            "request": {"method":"POST", "urlPath":"/v1/messages"},
+            "response": {"status":200, "headers":{"Content-Type":"application/json"},
+                "jsonBody":{"id":"msg_e2e", "type":"message", "role":"assistant", "model":"test-model",
+                    "content":[{"type":"text","text":"authenticated"}], "stop_reason":"end_turn", "stop_sequence":null,
+                    "usage":{"input_tokens":1,"output_tokens":1}}}
         }),
     ];
     for m in mappings {
@@ -238,16 +249,13 @@ fn register_wiremock_stubs(client: &reqwest::blocking::Client, base: &str) {
 
 /// Decode the busbar login cookie (base64url(JSON)) and read its `state` (the CSRF value the callback
 /// must echo — a real browser round-trips the HttpOnly cookie; the test reads it out of the cookie).
-fn cookie_state(cookie_value: &str) -> String {
+fn cookie_fields(cookie_value: &str) -> serde_json::Value {
     use base64::Engine as _;
     let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
         .decode(cookie_value)
         .expect("cookie is base64url");
     let v: serde_json::Value = serde_json::from_slice(&bytes).expect("cookie is JSON");
-    v["state"]
-        .as_str()
-        .expect("cookie carries state")
-        .to_string()
+    v
 }
 
 /// Pull the issued api_key out of the key-issued HTML (`... id="key">KEY<`).
@@ -278,7 +286,7 @@ fn wait_for_health(client: &reqwest::blocking::Client, url: &str, child: &mut st
 
 /// THE plugin-side proof: a REAL busbar boot drives the github GET flow; the CORE executes the real
 /// token/user/orgs hops against WireMock; a self-scoped key is minted for `github:octotest` bound
-/// through role `github:org/testorg`, and that key is accepted on the data plane (not 401).
+/// through role `github:org/testorg`, and that key receives a successful model response on the data plane.
 #[test]
 fn github_get_flow_mints_key_via_core_executed_hops() {
     let Some(wm) = wiremock_url() else {
@@ -323,8 +331,12 @@ fn github_get_flow_mints_key_via_core_executed_hops() {
         &plugins_dir.join("busbar-auth-github.tar.gz"),
     );
 
-    let data_port = free_port();
-    let admin_port = free_port();
+    // Hold both reservations simultaneously, so the allocator cannot give both roles one port.
+    let data_listener = reserve_port();
+    let admin_listener = reserve_port();
+    let data_port = data_listener.local_addr().unwrap().port();
+    let admin_port = admin_listener.local_addr().unwrap().port();
+    assert_ne!(data_port, admin_port);
     let signing_key = work.join("signing.key");
     {
         let out = std::process::Command::new(&busbar_bin)
@@ -337,11 +349,10 @@ fn github_get_flow_mints_key_via_core_executed_hops() {
     }
 
     let providers = work.join("providers.yaml");
-    // Unreachable upstream (127.0.0.1:9): the data-plane assertion is "the issued key AUTHENTICATES"
-    // (not 401), not "the mock chat returns 200" — mirrors auth-oidc's live e2e.
+    // A successful upstream response proves that the issued identity can use the data plane.
     std::fs::write(
         &providers,
-        "mock:\n  protocol: anthropic\n  base_url: \"http://127.0.0.1:9\"\n",
+        format!("mock:\n  protocol: anthropic\n  base_url: \"{wm}\"\n"),
     )
     .unwrap();
 
@@ -372,6 +383,8 @@ fn github_get_flow_mints_key_via_core_executed_hops() {
     )
     .unwrap();
 
+    // busbar binds these addresses itself; release reservations immediately before spawn.
+    drop((data_listener, admin_listener));
     let mut child = Busbar(
         std::process::Command::new(&busbar_bin)
             .env("BUSBAR_CONFIG", &config)
@@ -403,7 +416,8 @@ fn github_get_flow_mints_key_via_core_executed_hops() {
                 .map(|r| r.split(';').next().unwrap_or("").to_string())
         })
         .expect("begin sets the busbar_login cookie");
-    let state = cookie_state(&cookie_value);
+    let login_cookie = cookie_fields(&cookie_value);
+    let state = login_cookie["state"].as_str().expect("cookie state");
 
     // callback: GET ?code=…&state=… WITH the cookie → the CORE executes the token/user/orgs hops.
     let cb = client
@@ -420,6 +434,38 @@ fn github_get_flow_mints_key_via_core_executed_hops() {
         cb.status()
     );
     let page = cb.text().unwrap();
+    // Inspect the request WireMock actually received, including the exact PKCE verifier.
+    let journal: serde_json::Value = client
+        .get(format!("{wm}/__admin/requests"))
+        .send()
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .unwrap();
+    let token_requests: Vec<_> = journal["requests"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|r| r["request"]["url"] == "/login/oauth/access_token")
+        .collect();
+    assert_eq!(token_requests.len(), 1);
+    let body = token_requests[0]["request"]["body"].as_str().unwrap();
+    let form_url = reqwest::Url::parse(&format!("http://fixture.invalid/?{body}")).unwrap();
+    let form: std::collections::HashMap<_, _> = form_url.query_pairs().into_owned().collect();
+    assert_eq!(
+        form.get("client_id").map(String::as_str),
+        Some("Iv1.e2eclient")
+    );
+    assert_eq!(
+        form.get("client_secret").map(String::as_str),
+        Some("e2e-secret")
+    );
+    assert_eq!(form.get("code").map(String::as_str), Some("e2e-code"));
+    assert_eq!(
+        form.get("code_verifier").map(String::as_str),
+        login_cookie["code_verifier"].as_str()
+    );
     assert!(
         page.contains("github:octotest"),
         "identity github:octotest must appear on the key page: {page}"
@@ -452,7 +498,7 @@ fn github_get_flow_mints_key_via_core_executed_hops() {
         "role github:org/testorg must bind the sign-in to eng-team: {leaf}"
     );
 
-    // The issued key AUTHENTICATES on the data plane (not 401).
+    // The issued key authenticates and reaches the model under its provisioned identity.
     let chat = client
         .post(format!("{base}/v1/chat/completions"))
         .bearer_auth(&api_key)
@@ -462,10 +508,12 @@ fn github_get_flow_mints_key_via_core_executed_hops() {
         }))
         .send()
         .expect("chat with the issued key");
-    assert_ne!(
+    assert_eq!(
         chat.status().as_u16(),
-        401,
-        "the self-scoped github key must authenticate on the data plane"
+        200,
+        "the issued key reaches the configured model"
     );
+    let chat: serde_json::Value = chat.json().expect("chat response JSON");
+    assert_eq!(chat["choices"][0]["message"]["content"], "authenticated");
     // `child` and `work` are killed and removed when they drop, on a failed assertion too.
 }

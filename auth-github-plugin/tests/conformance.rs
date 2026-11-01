@@ -527,6 +527,81 @@ fn an_auth_door_loaded_as_another_kind_is_refused() {
 #[derive(Default)]
 struct Logs(std::sync::Mutex<Vec<(u8, String)>>);
 
+#[test]
+fn begin_login_requires_each_utf8_binding_field_through_both_doors() {
+    let d = dispatcher();
+    for dropped in [false, true] {
+        let p = if dropped {
+            load_dropped::<Auth>(&cdylib(), &rendering(), bind(&d)).expect("dropped door loads")
+        } else {
+            load_linked::<Auth>(&row(), bind(&d)).expect("linked door loads")
+        };
+        assert_eq!(open(&p, CFG, Some(SECRET)), "Ready lease=false ");
+        let invalid = AbiStr {
+            ptr: b"\xff".as_ptr(),
+            len: 1,
+        };
+        for field in 0..3 {
+            for value in [NO_STR, invalid] {
+                let mut input = BeginLoginIn {
+                    head: in_head(),
+                    redirect_uri: s("https://node.example/auth/token"),
+                    state: s("state"),
+                    nonce: NO_STR,
+                    code_challenge: s("challenge"),
+                    scopes: std::ptr::null(),
+                    scopes_len: 0,
+                };
+                match field {
+                    0 => input.redirect_uri = value,
+                    1 => input.state = value,
+                    _ => input.code_challenge = value,
+                }
+                let mut output: BeginLoginOut = z();
+                output.head = out_head();
+                output.authorize_url = NO_STR;
+                let mut frame = Frame::new(input, output);
+                let called = p.call(auth::slot::BEGIN_LOGIN, &mut frame);
+                assert!(spelled(&called).starts_with("Failed"));
+                assert!(frame.out.authorize_url.is_absent());
+                assert_eq!(frame.out.shape, 0);
+            }
+        }
+        assert_eq!(close(&p), "Ready lease=false ");
+    }
+}
+
+#[test]
+fn unsupported_verify_is_explained_through_both_doors_without_echoing_credentials() {
+    let d = dispatcher();
+    for dropped in [false, true] {
+        let logs = Arc::new(Logs::default());
+        let binding = Bind {
+            sink: logs.clone(),
+            ..bind(&d)
+        };
+        let p = if dropped {
+            load_dropped::<Auth>(&cdylib(), &rendering(), binding).expect("dropped door loads")
+        } else {
+            load_linked::<Auth>(&row(), binding).expect("linked door loads")
+        };
+        assert_eq!(open(&p, CFG, Some(SECRET)), "Ready lease=false ");
+        assert_eq!(verify(&p), "Refused lease=false ");
+        let logs = logs.0.lock().expect("records");
+        assert!(
+            logs.iter().any(|(severity, text)| *severity == 0
+                && text.contains("reason=\"unsupported-operation\"")
+                && text.contains("login operations only")),
+            "{logs:?}"
+        );
+        for (_, text) in logs.iter() {
+            assert!(!text.contains("gho_opaque") && !text.contains(SECRET));
+        }
+        drop(logs);
+        assert_eq!(close(&p), "Ready lease=false ");
+    }
+}
+
 impl busbar_plugin_loader::dispatch::EnvelopeSink for Logs {
     fn metric(&self, _: busbar_plugin_loader::dispatch::Metric<'_>) {}
     fn diag(&self, d: busbar_plugin_loader::dispatch::Diagnostic<'_>) {
@@ -562,3 +637,6 @@ fn red_l9_a_ticketless_complete_login_is_refused_at_info_with_a_reason() {
         "{logs:?}"
     );
 }
+
+#[path = "support/remaining.rs"]
+mod remaining;

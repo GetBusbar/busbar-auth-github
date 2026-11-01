@@ -8,6 +8,12 @@
 #[path = "audit_tests.rs"]
 mod audit;
 
+#[path = "remaining_audit_tests.rs"]
+mod remaining_audit;
+
+#[path = "reported_audit_tests.rs"]
+mod reported_audit;
+
 use super::*;
 use busbar_contract::abi::sdk::test_support::chip;
 use std::collections::HashMap;
@@ -124,7 +130,7 @@ impl Exchange for Script {
         self.answers
             .get(&request.target)
             .cloned()
-            .unwrap_or(Fetched::Unreachable)
+            .unwrap_or_else(|| panic!("unscripted GitHub target: {}", request.target))
     }
 }
 
@@ -365,6 +371,7 @@ fn a_malformed_org_list_is_an_outage_not_a_zero_group_login() {
     let l = login();
     let mut s = Script::happy().answer(ORGS_URL, 200, "[{truncated");
     assert_eq!(run(&l, &mut s), OUTAGE);
+    assert_eq!(s.targets(), [TOKEN_URL, USER_URL, ORGS_URL]);
 }
 
 /// RED G3 (owner-signed 2026-10-30): a malformed or foreign 2xx from `/user` or `/user/orgs` is

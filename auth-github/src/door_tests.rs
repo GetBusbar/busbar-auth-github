@@ -67,11 +67,9 @@ fn a_ticket_kept_again_does_not_evict() {
 /// next access: a retry that never comes holds no identity for ever.
 #[test]
 fn red_l10_an_answered_entry_older_than_ten_minutes_is_dropped() {
-    let now = Instant::now();
-    let Some(stale) = now.checked_sub(std::time::Duration::from_secs(10 * 60 + 1)) else {
-        return; // the clock is younger than the bound: nothing can be that old
-    };
-    let fresh = now - std::time::Duration::from_secs(9 * 60);
+    let stale = Instant::now();
+    let fresh = stale + std::time::Duration::from_secs(61);
+    let now = stale + ANSWERED_TTL + std::time::Duration::from_secs(1);
     let mut map = Answered::new();
     keep(&mut map, 1024, stale, ticket(1), who("stale"));
     keep(&mut map, 1024, fresh, ticket(2), who("fresh"));
