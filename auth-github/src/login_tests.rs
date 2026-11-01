@@ -5,6 +5,9 @@
 //! the 1.5.5 answer it keeps (the core hop loop in busbar v1.5.5 `auth/token.rs` over the v1.0.3
 //! step machine).
 
+#[path = "audit_tests.rs"]
+mod audit;
+
 use super::*;
 use busbar_contract::abi::sdk::test_support::chip;
 use std::collections::HashMap;
