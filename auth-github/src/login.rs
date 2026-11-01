@@ -64,7 +64,8 @@ fn settings_line(e: &SettingsError) -> String {
 
 /// The per-hop request timeout.
 pub const HOP_TIMEOUT_MS: u64 = 10_000;
-/// The most `/user/orgs` pages read per login (100 orgs a page: 1000 orgs). A next link left after
+/// The most `/user/orgs` pages read per login (requests ask for 100 entries per page; replies remain
+/// subject to the byte cap, not an entry cap). A next link left after
 /// the last is logged as a truncated org list, and the login identifies with the orgs read.
 pub const MAX_ORG_PAGES: usize = 10;
 /// The bound on the hops one callback sends: the token exchange, `/user`, and the org pages.
@@ -197,16 +198,27 @@ pub struct ReplyFields {
 }
 
 impl ReplyFields {
-    /// The kept fields of a reply's field block, names matched case-insensitively, the first of a
-    /// repeated name kept; a value that is not UTF-8 is dropped.
+    /// The kept fields of a reply's field block, names matched case-insensitively. Repeated Link
+    /// lines are one comma-separated list; other fields keep the first value. Non-UTF8 is dropped.
     pub fn kept<'a>(fields: impl IntoIterator<Item = (&'a [u8], &'a [u8])>) -> Self {
         let mut kept = Self::default();
         for (name, value) in fields {
+            if name.eq_ignore_ascii_case(b"link") {
+                if let Ok(value) = std::str::from_utf8(value) {
+                    match &mut kept.link {
+                        Some(link) => {
+                            link.push_str(", ");
+                            link.push_str(value.trim());
+                        }
+                        None => kept.link = Some(value.trim().to_string()),
+                    }
+                }
+                continue;
+            }
             let slot = match name.to_ascii_lowercase().as_slice() {
                 b"retry-after" => &mut kept.retry_after,
                 b"x-ratelimit-remaining" => &mut kept.ratelimit_remaining,
                 b"x-ratelimit-reset" => &mut kept.ratelimit_reset,
-                b"link" => &mut kept.link,
                 _ => continue,
             };
             if slot.is_none() {
@@ -297,9 +309,9 @@ struct Callback {
     code: Option<Zeroizing<String>>,
     redirect_uri: Option<String>,
     code_verifier: Option<Zeroizing<String>>,
-    /// The last answer: its status, its kept fields and its body (the token response carries the
-    /// access token).
-    answer: Option<(u16, ReplyFields, Zeroizing<String>)>,
+    /// The unconsumed answer: status, kept fields, body and request URL (the base for relative
+    /// pagination). The body is wiped when consumed, before issuing or parking the next hop.
+    answer: Option<(u16, ReplyFields, Zeroizing<String>, String)>,
 }
 
 /// One login in flight: the callback's inputs, the step machine's state, the hop parked on a
@@ -546,7 +558,12 @@ impl GithubLogin {
                         tracing::warn!(module = "github", "github login: a hop body's id_token is not bound to the nonce minted at begin");
                         return finish(flow, LoginStep::SecurityCheckFailed);
                     }
-                    flow.req.answer = Some((resp.status, std::mem::take(&mut resp.fields), body));
+                    flow.req.answer = Some((
+                        resp.status,
+                        std::mem::take(&mut resp.fields),
+                        body,
+                        request.target,
+                    ));
                 }
             }
         }
@@ -554,8 +571,8 @@ impl GithubLogin {
 
     /// The `complete_login` step machine, over the flow's own state.
     fn step(&self, flow: &mut LoginFlow) -> Turn {
-        let req = &flow.req;
-        let Some((status, fields, body)) = &req.answer else {
+        let Some((status, fields, body, request_url)) = flow.req.answer.take() else {
+            let req = &flow.req;
             // L7: an empty value is as missing, refused before the code is spent.
             let (Some(code), Some(redirect_uri), Some(code_verifier)) = (
                 given(req.code.as_deref().map(String::as_str)),
@@ -572,7 +589,7 @@ impl GithubLogin {
                 code_verifier,
             ));
         };
-        let (status, body) = (*status, body.as_str());
+        let body = body.as_str();
         // L1: the answer is the answer of the hop that was sent, read as that hop's, never by its
         // shape.
         let hop = flow.state.hop;
@@ -580,7 +597,7 @@ impl GithubLogin {
         // answer that is no 2xx is the IdP not answering this hop, an outage (the host answers
         // 503, retryable), carrying the IdP's retry hint when it gave one.
         if !(200..300).contains(&status) {
-            let turn = refused_answer(hop, status, fields, body);
+            let turn = refused_answer(hop, status, &fields, body);
             flow.state = FlowState::default();
             return turn;
         }
@@ -642,13 +659,13 @@ impl GithubLogin {
                         "github login: the org list is truncated at {MAX_ORG_PAGES} pages: org groups past it are not granted"
                     ),
                     Some(next) => {
-                        if !same_origin(next, &self.cfg.api_base) {
+                        let Some(next) = next_on_origin(next, &request_url, &self.cfg.api_base) else {
                             tracing::warn!(
                                 module = "github",
-                                "github login: /user/orgs answered a next link off the API's origin; not followed"
+                                "github login: /user/orgs answered an invalid or foreign-origin next link; login cannot finish"
                             );
                             return Turn::Outage { retry_after: None };
-                        }
+                        };
                         flow.state = FlowState {
                             access_token: state.access_token,
                             user: Some(user),
@@ -656,7 +673,7 @@ impl GithubLogin {
                             pages,
                             hop: Hop::Orgs,
                         };
-                        return Turn::Exchange(build_orgs_page_get(next));
+                        return Turn::Exchange(build_orgs_page_get(next.as_str()));
                     }
                 }
                 Turn::Identify(build_principal(&user, orgs))
@@ -698,14 +715,21 @@ impl GithubLogin {
         }
         if let (Some(field), Some(secret), false) = (field, &self.client_secret, sealed) {
             body = body.sealed(field, secret);
+            sealed = true;
         }
         let method = match hop.method.as_str() {
             m if !m.is_empty() && m.bytes().all(|b| b.is_ascii_alphabetic()) => m.to_string(),
-            _ => "POST".to_string(),
+            _ => {
+                tracing::warn!(
+                    module = "github",
+                    "github login: hop refused, method is not a non-empty alphabetic token"
+                );
+                return Err(Refused);
+            }
         };
         // Only a hop with a form body says what its body is (L4).
         let mut fields = Vec::new();
-        if !hop.form.is_empty() {
+        if !hop.form.is_empty() || sealed {
             fields.push((
                 "content-type".to_string(),
                 "application/x-www-form-urlencoded".to_string(),
@@ -785,19 +809,16 @@ impl Hop {
     }
 }
 
-/// Whether `url` is on `base`'s origin (scheme and authority, ASCII case-insensitive).
-fn same_origin(url: &str, base: &str) -> bool {
-    match (split(url), split(base)) {
-        (Some((a, _)), Some((b, _))) => a.eq_ignore_ascii_case(b),
-        _ => false,
+/// Resolve a next-page reference against the page that supplied it, then require the API's
+/// scheme, host and effective port. Userinfo is never accepted from an untrusted next link.
+fn next_on_origin(next: &str, request: &str, base: &str) -> Option<url::Url> {
+    let mut next = url::Url::parse(request).ok()?.join(next).ok()?;
+    let base = url::Url::parse(base).ok()?;
+    if next.origin() != base.origin() || !next.username().is_empty() || next.password().is_some() {
+        return None;
     }
-}
-
-/// The seconds since the Unix epoch, now.
-fn unix_now() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |d| d.as_secs())
+    next.set_fragment(None);
+    Some(next)
 }
 
 /// Whether a reply is GitHub's rate limit: it names a `retry-after`, or no requests remain.
@@ -808,11 +829,6 @@ fn rate_limited(fields: &ReplyFields) -> bool {
 /// The IdP's retry hint, in seconds at `now`: its `retry-after` (delta seconds), else, when no
 /// requests remain, the seconds to its `x-ratelimit-reset`. An HTTP-date `retry-after` is not read.
 fn retry_hint(fields: &ReplyFields, now: u64) -> Option<u64> {
-    let secs = |v: &str| {
-        (!v.is_empty() && v.bytes().all(|b| b.is_ascii_digit()))
-            .then(|| v.parse::<u64>().ok())
-            .flatten()
-    };
     if let Some(after) = fields.retry_after.as_deref().and_then(secs) {
         return Some(after);
     }
@@ -824,6 +840,28 @@ fn retry_hint(fields: &ReplyFields, now: u64) -> Option<u64> {
             .map(|reset| reset.saturating_sub(now));
     }
     None
+}
+
+/// Strict delta seconds; the full accepted u64 is preserved for the host to interpret.
+fn secs(v: &str) -> Option<u64> {
+    (!v.is_empty() && v.bytes().all(|b| b.is_ascii_digit()))
+        .then(|| v.parse::<u64>().ok())
+        .flatten()
+}
+
+/// Absolute resets require a usable wall clock. A delta Retry-After remains meaningful when
+/// the clock is unavailable; never reinterpret an absolute reset as a delay from epoch zero.
+fn retry_hint_at(fields: &ReplyFields, at: std::time::SystemTime) -> Option<u64> {
+    match at.duration_since(std::time::UNIX_EPOCH) {
+        Ok(now) => retry_hint(fields, now.as_secs()),
+        Err(_) => {
+            tracing::warn!(
+                module = "github",
+                "github login: wall clock unavailable; omitting any absolute rate-limit reset hint"
+            );
+            fields.retry_after.as_deref().and_then(secs)
+        }
+    }
 }
 
 /// An IdP error code as a log may print it: the code when it is `[a-z0-9_]{1,64}`, else
@@ -845,7 +883,7 @@ fn loggable(code: &str) -> &str {
 /// errors are a declined sign-in):
 ///
 /// * any hop: a 5xx or 429 is the IdP unavailable, an outage carrying its retry hint;
-/// * the token endpoint: a 400/401 carrying an `error` (JSON or form) is declined; anything else
+/// * the token endpoint: a 400/401 carrying a §5.2 `error` (JSON or form) is declined; anything else
 ///   is an outage;
 /// * `/user`, `/user/orgs`: a 401 (the token is not accepted) is declined; a 403 that is GitHub's
 ///   rate limit is an outage carrying its retry hint; any other 403 on `/user/orgs` is the token
@@ -853,7 +891,7 @@ fn loggable(code: &str) -> &str {
 fn refused_answer(hop: Hop, status: u16, fields: &ReplyFields, body: &str) -> Turn {
     let path = hop.path();
     if status >= 500 || status == 429 {
-        let retry_after = retry_hint(fields, unix_now());
+        let retry_after = retry_hint_at(fields, std::time::SystemTime::now());
         tracing::warn!(
             module = "github",
             status,
@@ -863,9 +901,33 @@ fn refused_answer(hop: Hop, status: u16, fields: &ReplyFields, body: &str) -> Tu
         );
         return Turn::Outage { retry_after };
     }
+    if status == 403 && rate_limited(fields) {
+        let retry_after = retry_hint_at(fields, std::time::SystemTime::now());
+        tracing::warn!(
+            module = "github",
+            status,
+            hop = path,
+            retry_after,
+            "github login: GitHub's API rate limit is spent"
+        );
+        return Turn::Outage { retry_after };
+    }
     match hop {
         Hop::Token => {
-            if let (400 | 401, Some(code)) = (status, github_error(body)) {
+            if let (400 | 401, Some(code)) = (
+                status,
+                github_error(body).filter(|code| {
+                    matches!(
+                        code.as_str(),
+                        "invalid_request"
+                            | "invalid_client"
+                            | "invalid_grant"
+                            | "unauthorized_client"
+                            | "unsupported_grant_type"
+                            | "invalid_scope"
+                    )
+                }),
+            ) {
                 let code = loggable(&code);
                 if matches!(code, "invalid_client" | "unauthorized_client") {
                     tracing::warn!(
@@ -901,17 +963,6 @@ fn refused_answer(hop: Hop, status: u16, fields: &ReplyFields, body: &str) -> Tu
                     "github login: declined, GitHub did not accept the access token"
                 );
                 return Turn::Decline;
-            }
-            if status == 403 && rate_limited(fields) {
-                let retry_after = retry_hint(fields, unix_now());
-                tracing::warn!(
-                    module = "github",
-                    status,
-                    hop = path,
-                    retry_after,
-                    "github login: GitHub's API rate limit is spent"
-                );
-                return Turn::Outage { retry_after };
             }
             if status == 403 && hop == Hop::Orgs {
                 tracing::warn!(
@@ -1016,19 +1067,63 @@ fn wipe_hop(hop: &mut LoginHop) {
 /// with no `id_token` binds trivially; one with an `id_token` binds only when its payload's `nonce`
 /// claim (base64url, no signature check: that is the IdP module's job) equals `minted`.
 fn id_token_nonce_binds(body: &str, minted: Option<&str>) -> bool {
+    // Distinguish an absent field from a present null or another unreadable shape. Only this
+    // field is decoded; the access token alongside it is skipped, never copied by this check.
+    #[derive(Default)]
+    enum TokenField {
+        #[default]
+        Missing,
+        Present(Value),
+    }
+    impl<'de> serde::Deserialize<'de> for TokenField {
+        fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+            serde::Deserialize::deserialize(d).map(Self::Present)
+        }
+    }
     /// Only the `id_token` member is read: the rest of the body (an access token) is skipped,
     /// never copied.
     #[derive(serde::Deserialize)]
     struct IdToken {
-        id_token: Option<String>,
+        #[serde(default)]
+        id_token: TokenField,
     }
-    let Some(id_token) = serde_json::from_str::<IdToken>(body)
-        .ok()
-        .and_then(|t| t.id_token)
-        .map(Zeroizing::new)
-    else {
+    let body = body.trim();
+    if body.starts_with('{') {
+        let parsed = match serde_json::from_str::<IdToken>(body) {
+            Ok(parsed) => parsed,
+            // A duplicate id_token is ambiguous. Syntax failures remain the hop decoder's
+            // malformed-response outage; they cannot yield a valid token/profile/org list.
+            Err(error) => return !error.is_data(),
+        };
+        return match parsed.id_token {
+            TokenField::Missing => true,
+            TokenField::Present(Value::String(token)) => {
+                token_nonce_binds(&Zeroizing::new(token), minted)
+            }
+            TokenField::Present(_) => false,
+        };
+    }
+    // A REST org array is not an id_token envelope (serde structs also accept positional arrays).
+    if body.starts_with('[') {
         return true;
-    };
+    }
+    for pair in body.split('&') {
+        let (name, value) = pair.split_once('=').unwrap_or((pair, ""));
+        if crate::form_decode(name).as_slice() == b"id_token" {
+            let token = crate::form_decode(value);
+            let Ok(token) = std::str::from_utf8(&token) else {
+                return false;
+            };
+            if !token_nonce_binds(token, minted) {
+                return false;
+            }
+        }
+    }
+    true
+}
+
+/// An actually present id_token must carry the expected nonce, whatever the response encoding.
+fn token_nonce_binds(id_token: &str, minted: Option<&str>) -> bool {
     let claimed = id_token
         .split('.')
         .nth(1)
@@ -1050,3 +1145,25 @@ fn id_token_nonce_binds(body: &str, minted: Option<&str>) -> bool {
 #[cfg(test)]
 #[path = "login_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+mod clock_tests {
+    use super::*;
+    #[test]
+    fn unavailable_wall_clock_warns_and_preserves_only_delta_seconds() {
+        let before_epoch = std::time::UNIX_EPOCH - std::time::Duration::from_secs(1);
+        let cap = busbar_test_kit::warn_capture::WarnCapture::default();
+        let mut fields = ReplyFields {
+            ratelimit_remaining: Some("0".into()),
+            ratelimit_reset: Some(u64::MAX.to_string()),
+            ..ReplyFields::default()
+        };
+        assert_eq!(
+            tracing::subscriber::with_default(cap.clone(), || retry_hint_at(&fields, before_epoch)),
+            None
+        );
+        assert!(cap.contains("wall clock unavailable"));
+        fields.retry_after = Some(u64::MAX.to_string());
+        assert_eq!(retry_hint_at(&fields, before_epoch), Some(u64::MAX));
+    }
+}

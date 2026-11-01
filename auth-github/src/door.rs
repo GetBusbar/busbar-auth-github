@@ -9,8 +9,8 @@
 //!   ([`GithubLogin::open`]); the client secret is the Statement's one secret
 //!   reference, resolved by the kernel into `OpenIn.secrets[0]`, never a settings value.
 //! * `begin_login` answers the GitHub authorize URL under a lease.
-//! * `complete_login` runs the hop chain itself ([`GithubLogin::drive`]) over the Statement's one
-//!   outbound need, each hop one framed `exchange()`; PENDING parks the flow on the ticket. A
+//! * `complete_login` runs the hop chain itself ([`GithubLogin::drive`]) over one of the Statement's
+//!   outbound needs, each hop one framed `exchange()`; PENDING parks the flow on the ticket. A
 //!   ticket-less call cannot wait on I/O and answers REFUSED. A parked flow is driven by the login
 //!   it began under, to its end, whatever `refresh` swapped in meanwhile. An identity that does
 //!   not fit the host's buffer is the short answer, and the retry is served from the identity
@@ -35,7 +35,7 @@ use busbar_contract::abi::mechanism::call::{AbiStr, Blob, Outcome};
 use busbar_contract::abi::mechanism::door::{Rewrite, Statement};
 use busbar_contract::abi::mechanism::ticket::Ticket;
 use busbar_contract::abi::sdk::auth_door::with_tail;
-use busbar_contract::abi::sdk::auth_kit::login_identity;
+use busbar_contract::abi::sdk::auth_kit::{login_identity, login_outage};
 use busbar_contract::abi::sdk::conn::Connector;
 use busbar_contract::abi::sdk::door::{abi_str, alias, statement, AbiIn, AbiOut};
 use busbar_contract::abi::sdk::exchange::{exchange, Exchange as Wire};
@@ -126,8 +126,10 @@ type Answered = HashMap<Ticket, (Instant, Principal)>;
 const ANSWERED_TTL: Duration = Duration::from_secs(10 * 60);
 
 /// Drop every entry older than [`ANSWERED_TTL`] at `now`.
-fn sweep(map: &mut Answered, now: Instant) {
+fn sweep(map: &mut Answered, now: Instant) -> usize {
+    let before = map.len();
     map.retain(|_, (at, _)| now.saturating_duration_since(*at) <= ANSWERED_TTL);
+    before - map.len()
 }
 
 /// The identity a short answer reached for `ticket`, taken for its retry, if it is not stale.
@@ -139,15 +141,28 @@ fn take(map: &mut Answered, now: Instant, ticket: Ticket) -> Option<Principal> {
 /// Keep `p` for `ticket`'s retry, at most `max` at once: entries past [`ANSWERED_TTL`] go first;
 /// at the cap the OLDEST entry goes, never the rest (an in-flight short answer awaiting its retry
 /// must survive).
-fn keep(map: &mut Answered, max: usize, at: Instant, ticket: Ticket, p: Principal) {
-    sweep(map, at);
+fn keep(map: &mut Answered, max: usize, at: Instant, ticket: Ticket, p: Principal) -> usize {
+    let mut evicted = sweep(map, at);
     if map.len() >= max && !map.contains_key(&ticket) {
         let oldest = map.iter().min_by_key(|(_, (at, _))| *at).map(|(t, _)| *t);
         if let Some(oldest) = oldest {
             map.remove(&oldest);
+            evicted += 1;
         }
     }
     map.insert(ticket, (at, p));
+    evicted
+}
+
+/// One bounded record per cache access, after its mutex is released; no identity or ticket data.
+fn warn_evicted(evicted: usize) {
+    if evicted != 0 {
+        tracing::warn!(
+            module = "github",
+            evicted,
+            "github login: short-buffer identities expired or were evicted before their retry"
+        );
+    }
 }
 
 /// One instance: the login (swapped whole on `refresh`) and the identities a short answer reached,
@@ -197,10 +212,14 @@ impl Life for Github {
     }
 
     fn open(settings: &[u8], secrets: &[&[u8]], _generation: u64) -> Result<Self, Refusal> {
-        Ok(Self {
+        let instance = Self {
             login: RwLock::new(Arc::new(login_from(settings, secrets)?)),
             answered: Mutex::new(HashMap::new()),
-        })
+        };
+        if secrets.first().is_none_or(|secret| secret.is_empty()) {
+            tracing::warn!(module = "github", "github login: opened without a client_secret; token exchanges omit it (check the OAuth App and secret reference if sign-in fails)");
+        }
+        Ok(instance)
     }
 
     fn refresh(
@@ -286,11 +305,11 @@ struct Parked {
 /// The login a resumed flow is driven by: the one it began under, to its end. A `refresh` swaps
 /// the instance's login for the flows begun after it; a flow parked before it keeps its own client
 /// secret, bases and allowlist (the hop parked on a pending exchange was rendered by it).
-fn driving(_: &Github, parked: &Parked) -> Arc<GithubLogin> {
+fn driving(parked: &Parked) -> Arc<GithubLogin> {
     parked.login.clone()
 }
 
-/// The hop exchange over the instance's connector: one framed `exchange()` per hop on the one need.
+/// The hop exchange over the instance's connector: one framed `exchange()` per hop on its selected need.
 struct Over<'c, 'h> {
     c: &'c mut Connector<'h>,
     need: u32,
@@ -371,7 +390,11 @@ fn identify(
 ) -> Outcome {
     let outcome = login_identity(&p, buf, out);
     if outcome == Outcome::Failed {
-        keep(&mut g.answered(), ANSWERED_MAX, Instant::now(), ticket, p);
+        let evicted = {
+            let mut answered = g.answered();
+            keep(&mut answered, ANSWERED_MAX, Instant::now(), ticket, p)
+        };
+        warn_evicted(evicted);
     }
     outcome
 }
@@ -402,7 +425,14 @@ impl SafeSlot for Complete {
         }
         let g = h.life();
         let buf = input.out_buf();
-        let reached = take(&mut g.answered(), Instant::now(), ticket);
+        let (reached, expired) = {
+            let mut answered = g.answered();
+            let before = answered.len();
+            let reached = take(&mut answered, Instant::now(), ticket);
+            let expired = before - answered.len() - usize::from(reached.is_some());
+            (reached, expired)
+        };
+        warn_evicted(expired);
         if let Some(p) = reached {
             return identify(g, ticket, p, buf, &mut out);
         }
@@ -423,7 +453,7 @@ impl SafeSlot for Complete {
                 }
             }
         };
-        let login = driving(g, &parked);
+        let login = driving(&parked);
         let step = match h.host() {
             None => login.drive(&mut parked.flow, &mut Unarmed),
             Some(host) => {
@@ -443,9 +473,8 @@ impl SafeSlot for Complete {
                 Outcome::Pending
             }
             LoginStep::Identity(p) => identify(g, ticket, p, buf, &mut out),
-            other @ (LoginStep::BadCredential
-            | LoginStep::SecurityCheckFailed
-            | LoginStep::Outage { .. }) => {
+            LoginStep::Outage { retry_after } => login_outage(retry_after, buf, &mut out),
+            other @ (LoginStep::BadCredential | LoginStep::SecurityCheckFailed) => {
                 out.set(|o| &o.verdict, verdict(&other));
                 Outcome::Ready
             }
@@ -458,11 +487,13 @@ fn verdict(step: &LoginStep) -> u32 {
     match step {
         LoginStep::Outage { .. } => LOGIN_OUTAGE,
         LoginStep::SecurityCheckFailed => LOGIN_SECURITY_CHECK_FAILED,
-        _ => LOGIN_BAD_CREDENTIAL,
+        LoginStep::BadCredential | LoginStep::Pending | LoginStep::Identity(_) => {
+            LOGIN_BAD_CREDENTIAL
+        }
     }
 }
 
-/// An auth op this plugin does not serve (`verify`, the outbound family): REFUSED, never called.
+/// An auth op this plugin does not serve (`verify`, the outbound family): explained REFUSED.
 #[derive(Debug)]
 pub struct NotServed<I, O>(PhantomData<(I, O)>);
 
@@ -471,7 +502,10 @@ impl<I: AbiIn, O: AbiOut> SafeSlot for NotServed<I, O> {
     type Out = O;
     type State = Held<Github>;
     fn call(_: Instance<'_, Held<Github>>, _: Lent<'_, I>, _: Out<'_, O>) -> Outcome {
-        Outcome::Refused
+        refused(
+            "unsupported-operation",
+            "this plugin serves GitHub login operations only; verify and outbound auth are not supported",
+        )
     }
 }
 

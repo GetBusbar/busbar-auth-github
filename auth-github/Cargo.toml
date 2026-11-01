@@ -5,19 +5,20 @@ version = "1.6.0"
 publish.workspace = true
 edition.workspace = true
 rust-version.workspace = true
-description = "The GitHub-OAuth login module for busbar: drive GitHub's authorization-code → opaque-access-token → REST /user → /user/orgs flow and map it to a Principal (github:<login> + github:id/<id> + github:org/<org> groups). The plugin holds its own client secret (resolved by the kernel from browser_login.client_secret) and runs the hops itself over its one outbound need."
+description = "The GitHub-OAuth login module for busbar: drive GitHub's authorization-code → opaque-access-token → REST /user → /user/orgs flow and map it to a Principal (github:<login> + github:id/<id> + github:org/<org> groups). The plugin holds its own client secret (resolved by the kernel from browser_login.client_secret) and runs the hops itself over the selected outbound need."
 license.workspace = true
 
 [dependencies]
-# The ONE busbar crate a plugin names (#40: contract only). Pinned by git rev to the busbar commit in
+base64 = { workspace = true }
+# The busbar crate a plugin names is contract only. Pinned by git rev to the busbar commit in
 # `.busbar-ref`; a busbar build that links this crate `[patch]`es the busbar git source to its own
 # tree, so ONE copy of the contract links.
-base64 = { workspace = true }
 busbar-contract = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 zeroize = { workspace = true }
 tracing = { workspace = true }
+url = { workspace = true }
 
 [dev-dependencies]
 # The chip in this crate's own tests (`abi::sdk::test_support::chip`): a request's sealed head and

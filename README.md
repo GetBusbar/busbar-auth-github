@@ -18,7 +18,7 @@ The GitHub-OAuth login module as a droppable busbar plugin: a cdylib exporting t
 
 **GitHub-OAuth login for busbar** — a login-capable auth plugin (the auth kind's door, auth ABI
 v3). A user signs in with GitHub; busbar establishes their identity as
-`github:<login>` with `github:org/<org>` group memberships, then resolves those groups to policy
+`github:<login>` with a stable `github:id/<id>` role and `github:org/<org>` group memberships, then resolves those groups to policy
 through the operator's `auth.role_bindings.github:` bindings.
 
 It is a **separate plugin from `busbar-auth-oidc`**, and independent of the busbar core release.
@@ -28,7 +28,7 @@ It is a **separate plugin from `busbar-auth-oidc`**, and independent of the busb
 GitHub OAuth issues an **opaque** access token and **no `id_token` JWT**, so the OIDC/JWKS
 verify path does not apply — there is nothing to verify offline. Identity instead comes from
 GitHub's REST API (`/user`, `/user/orgs`). On busbar 1.6 the plugin runs those hops itself over its
-one outbound `http` need, and holds its own confidential-client **secret** (the kernel resolves
+selected outbound `http` need, and holds its own confidential-client **secret** (the kernel resolves
 `browser_login.client_secret` into `OpenIn.secrets`).
 
 ### The login flow (hop sequence)
@@ -110,6 +110,7 @@ and the REST API at `https://<host>/api/v3`:
 
 Each org the user belongs to becomes a group string `github:org/<org-login>`, mapped to policy by the
 operator's `auth.role_bindings.github:`.
+The identity also always carries `github:id/<id>`, which stays stable when the GitHub login changes.
 
 ## Build
 
@@ -136,8 +137,9 @@ The `busbar-auth-github` crate (`auth-github/`) is the reusable logic (staticall
 - **Credentials are the SDK chip's.** The client secret and the access token are
   `abi::sdk::cred::Cred`s: the secret goes out only as a sealed `FormBody` value, the token only as
   the sealed `authorization: Bearer` field, both written by the SDK at the wire and required to go
-  out on a secured connection when their base is `https`. The plugin holds neither as text; the
-  code, the verifier and every hop answer are wiped when they go, and nothing formats them.
+  out on a secured connection when their base is `https`. A received token body is wiped as soon
+  as its step consumes it, before the next hop; the code, verifier and every hop answer are also
+  wiped when they go, and nothing formats them.
 - **`ca_cert_pem`.** The Statement declares two outbound `http` needs: one trusting
   `settings.ca_cert_pem` beside the public roots, one the public roots only. A config that names a
   `ca_cert_pem` goes out on the first, any other on the second; the host's connector does the TLS,
@@ -148,10 +150,11 @@ The `busbar-auth-github` crate (`auth-github/`) is the reusable logic (staticall
   authenticate both GETs, and the `/user` identity is needed at the `/user/orgs` step. Each flow
   (`LoginFlow`) owns this state, so concurrent logins never share a slot; a finished flow holds
   neither.
-- **Org pages.** `/user/orgs` is read 100 orgs a page, following GitHub's `Link: rel="next"` on the
-  `api_base` origin (a next link anywhere else is an outage, never followed), for at most **10 pages
-  (1000 orgs)**. A user in more orgs than that signs in with the first 1000 org groups, and the
-  plugin logs a WARN that the org list was truncated (fail-safe: fewer roles, never more).
+- **Org pages.** `/user/orgs` requests 100 orgs a page, following GitHub's `Link: rel="next"` on the
+  `api_base` origin (a next link anywhere else is an outage, never followed), for at most **10 pages**.
+  Replies are bounded by bytes, with no separate org-entry cap. If a next link remains after the
+  tenth page, the user signs in with the groups read and the plugin logs a WARN that the org list
+  was truncated (fail-safe: fewer roles, never more).
 - **Reply cap.** Every hop's reply is capped at 256 KiB (`MAX_HOP_REPLY_BYTES`, the exchange's
   `reply_limit`); a reply past it ends the login as an outage.
 

@@ -284,7 +284,7 @@ fn wait_for_health(client: &reqwest::blocking::Client, url: &str, child: &mut st
     panic!("busbar did not become healthy at {url}");
 }
 
-/// THE plugin-side proof: a REAL busbar boot drives the github GET flow; the CORE executes the real
+/// THE plugin-side proof: a REAL busbar boot drives the github GET flow; the plugin executes the real
 /// token/user/orgs hops against WireMock; a self-scoped key is minted for `github:octotest` bound
 /// through role `github:org/testorg`, and that key receives a successful model response on the data plane.
 #[test]
@@ -419,7 +419,7 @@ fn github_get_flow_mints_key_via_core_executed_hops() {
     let login_cookie = cookie_fields(&cookie_value);
     let state = login_cookie["state"].as_str().expect("cookie state");
 
-    // callback: GET ?code=…&state=… WITH the cookie → the CORE executes the token/user/orgs hops.
+    // callback: GET ?code=…&state=… WITH the cookie → the plugin executes the token/user/orgs hops.
     let cb = client
         .get(format!("{base}/auth/token?code=e2e-code&state={state}"))
         .header(

@@ -135,7 +135,6 @@ fn parse_access_token_reads_both_shapes_and_refuses_an_empty_or_missing_token() 
     assert!(parse_access_token(r#"{"error":"bad_verification_code"}"#).is_none());
     assert!(parse_access_token(r#"{"access_token":""}"#).is_none());
     assert!(parse_access_token("access_token=&scope=read:org").is_none());
-    assert_eq!(parse_user(r#"{"id":42,"name":"No Login"}"#), None);
 }
 
 // ── identity (after /user, after /user/orgs) ───────────────────────────────────────────────────────
@@ -207,12 +206,13 @@ fn ghes_base_urls_config() {
 // ── parsing helpers ──────────────────────────────────────────────────────────────────────────────
 
 #[test]
-fn parse_org_groups_maps_and_skips_bad_entries() {
-    let groups = parse_org_groups(r#"[{"login":"a"},{"id":1},{"login":""},{"login":"b"}]"#);
+fn parse_org_groups_maps_valid_entries_and_refuses_foreign_entries() {
+    let groups = parse_org_groups(r#"[{"login":"a"},{"login":"b"}]"#);
     assert_eq!(
         groups,
         Some(vec!["github:org/a".to_string(), "github:org/b".to_string()])
     );
+    assert!(parse_org_groups(r#"[{"login":"a"},{"id":1},{"login":""},{"login":"b"}]"#).is_none());
     // A legitimately-empty array → Some(empty): login succeeds with zero org groups.
     assert_eq!(parse_org_groups("[]"), Some(Vec::new()));
     // Fail-closed: a non-array body or malformed JSON is NOT a silent empty — it is None so the

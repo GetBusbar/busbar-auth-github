@@ -133,7 +133,8 @@ fn user_endpoint(cfg: &GitHubConfig) -> String {
 /// The `/user/orgs` endpoint URL (`{api_base}/user/orgs?per_page=100`): its first page. GitHub
 /// paginates this list (30 entries a page by default; `per_page=100` is its most). The login follows
 /// each page's `Link: rel="next"` ([`next_link`]) on the API's origin, up to
-/// [`login::MAX_ORG_PAGES`] pages (1000 orgs); past that the org list is logged as truncated.
+/// [`login::MAX_ORG_PAGES`] pages, each subject to the reply byte cap; past that the org list is
+/// logged as truncated. The requested page size is not a separate response entry cap.
 fn orgs_endpoint(cfg: &GitHubConfig) -> String {
     format!(
         "{}/user/orgs?per_page=100",
@@ -330,8 +331,8 @@ pub struct GhUser {
 /// Parse the access token out of a token-endpoint response body, accepting BOTH the JSON shape
 /// (`{"access_token": "..."}`) and the `application/x-www-form-urlencoded` shape
 /// (`access_token=...&scope=...&token_type=bearer`) GitHub returns without an `Accept: application/json`
-/// header. The token is captured into the chip's [`Cred`] as it is read (the plugin never holds it
-/// as text). Returns `None` when absent — which covers GitHub's fail-CLOSED case where the token endpoint
+/// header. The token is captured into the chip's [`Cred`] as it is read; the enclosing response is
+/// wiped when its step consumes it, before the next hop. Returns `None` when absent — which covers GitHub's fail-CLOSED case where the token endpoint
 /// answers `HTTP 200` with an `{"error": "..."}` body (a bad/expired code), so a missing token is
 /// treated as a rejection, never a success with an empty token. A JSON array (the `/user/orgs` shape)
 /// is never a token response, so its text can never reach the form branch.
@@ -342,7 +343,10 @@ pub fn parse_access_token(body: &str) -> Option<Cred> {
         access_token: Option<Cred>,
     }
     let trimmed = body.trim();
-    if trimmed.starts_with('{') || trimmed.starts_with('[') {
+    if trimmed.starts_with('[') {
+        return None;
+    }
+    if trimmed.starts_with('{') {
         return json_reply::<TokenReply>(trimmed.as_bytes())
             .ok()?
             .access_token
@@ -411,8 +415,8 @@ fn plain_login(login: &str) -> bool {
 
 /// Parse a GitHub `/user` response body into a [`GhUser`]. Fail-CLOSED: a missing, empty or
 /// foreign `login` (a control character, over [`MAX_LOGIN_BYTES`]), a missing numeric `id`, or
-/// non-JSON yields `None` (the caller's outage). A `name` holding a control character is not
-/// taken; a longer one than [`MAX_NAME_CHARS`] is cut.
+/// non-JSON yields `None` (the caller's outage). A `name` holding a control, Unicode format
+/// character or line/paragraph separator is not taken; a longer one than [`MAX_NAME_CHARS`] is cut.
 pub fn parse_user(body: &str) -> Option<GhUser> {
     let v: Value = serde_json::from_str(body.trim()).ok()?;
     let login = v
@@ -427,7 +431,37 @@ pub fn parse_user(body: &str) -> Option<GhUser> {
     let name = v
         .get("name")
         .and_then(Value::as_str)
-        .filter(|s| !s.is_empty() && !s.chars().any(char::is_control))
+        .filter(|s| {
+            !s.is_empty()
+                && !s.chars().any(|c| {
+                    c.is_control()
+                        || matches!(
+                            c,
+                            // Unicode 17.0 General_Category=Cf, plus the line/paragraph separators.
+                            '\u{00ad}'
+                                | '\u{0600}'..='\u{0605}'
+                                | '\u{061c}'
+                                | '\u{06dd}'
+                                | '\u{070f}'
+                                | '\u{0890}'..='\u{0891}'
+                                | '\u{08e2}'
+                                | '\u{180e}'
+                                | '\u{200b}'..='\u{200f}'
+                                | '\u{2028}'..='\u{202e}'
+                                | '\u{2060}'..='\u{2064}'
+                                | '\u{2066}'..='\u{206f}'
+                                | '\u{feff}'
+                                | '\u{fff9}'..='\u{fffb}'
+                                | '\u{110bd}'
+                                | '\u{110cd}'
+                                | '\u{13430}'..='\u{1343f}'
+                                | '\u{1bca0}'..='\u{1bca3}'
+                                | '\u{1d173}'..='\u{1d17a}'
+                                | '\u{e0001}'
+                                | '\u{e0020}'..='\u{e007f}'
+                        )
+                })
+        })
         .map(|s| s.chars().take(MAX_NAME_CHARS).collect());
     Some(GhUser { login, id, name })
 }
@@ -437,16 +471,15 @@ pub fn parse_user(body: &str) -> Option<GhUser> {
 /// carries (a control character, over [`MAX_LOGIN_BYTES`]) yields `None` (the caller's outage) — a
 /// truncated or foreign orgs response must NOT be mistaken for "no orgs" and silently drop the
 /// user's org groups (which would lock them out of org-gated roles). A VALID empty array is
-/// `Some(vec![])` (login succeeds with zero groups). Individual entries lacking a non-empty `login`
-/// are skipped.
+/// `Some(vec![])` (login succeeds with zero groups). Every entry must carry a valid non-empty
+/// string `login`; a foreign entry refuses the whole response.
 pub fn parse_org_groups(body: &str) -> Option<Vec<String>> {
     let v: Value = serde_json::from_str(body.trim()).ok()?;
     let mut groups = Vec::new();
     for org in v.as_array()? {
         match org.get("login").and_then(Value::as_str) {
-            None | Some("") => {}
             Some(login) if plain_login(login) => groups.push(format!("github:org/{login}")),
-            Some(_) => return None,
+            _ => return None,
         }
     }
     Some(groups)
