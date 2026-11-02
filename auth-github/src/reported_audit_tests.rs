@@ -104,8 +104,9 @@ fn non_utf8_replies_fail_closed_without_panicking_or_exposing_the_body() {
                 body: b"credential-canary-\xff".to_vec().into(),
             }),
         );
-        let cap = busbar_test_kit::warn_capture::WarnCapture::default();
-        let result = tracing::subscriber::with_default(cap.clone(), || run(&login(), &mut script));
+        let cap = crate::diagnostics::GithubDiagnostics::default();
+        let result =
+            tracing::subscriber::with_default(cap.subscriber(), || run(&login(), &mut script));
         assert_eq!(result, OUTAGE, "{target}");
         assert_eq!(script.targets().last().copied(), Some(target));
         assert!(!cap.contains("credential-canary"), "{:?}", cap.messages());
@@ -212,8 +213,9 @@ fn malformed_hop_methods_are_explained_refusals_without_rendering_secrets() {
             secret_form_field: Some("client_secret".into()),
             headers: Vec::new(),
         };
-        let cap = busbar_test_kit::warn_capture::WarnCapture::default();
-        let result = tracing::subscriber::with_default(cap.clone(), || login().render(&hop, None));
+        let cap = crate::diagnostics::GithubDiagnostics::default();
+        let result =
+            tracing::subscriber::with_default(cap.subscriber(), || login().render(&hop, None));
         assert_eq!(result, Err(Refused));
         assert!(cap.contains("method"), "{:?}", cap.messages());
         assert!(!cap.contains(SECRET) && !cap.contains("injected"));

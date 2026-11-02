@@ -67,32 +67,8 @@ fn build_real_binaries() -> (std::path::PathBuf, std::path::PathBuf) {
     )
 }
 
-/// Locate the built `busbar_auth_github_plugin` cdylib (checks the uplifted profile dir and target/deps,
-fn plugin_path() -> Option<std::path::PathBuf> {
-    let candidate = (|| {
-        let exe = std::env::current_exe().ok()?;
-        let profile_dir = exe.parent()?.parent()?;
-        let name = busbar_plugin_loader::plugin_library_filename("busbar_auth_github_plugin");
-        let uplifted = profile_dir.join(&name);
-        let raw = profile_dir.join("deps").join(&name);
-        [uplifted, raw]
-            .into_iter()
-            .filter_map(|p| {
-                std::fs::metadata(&p)
-                    .and_then(|m| m.modified())
-                    .ok()
-                    .map(|mtime| (p, mtime))
-            })
-            .max_by_key(|(_, mtime)| *mtime)
-            .map(|(p, _)| p)
-    })();
-    if candidate.is_none() && std::env::var_os("CI").is_some() {
-        panic!(
-            "busbar_auth_github_plugin cdylib not built under CI (run `cargo test --workspace`)"
-        );
-    }
-    candidate
-}
+#[path = "support/github_image.rs"]
+mod github_image;
 
 /// Pack the plugin cdylib into a real tarball via the real `busbar-plugin-pack` (alias `github`).
 fn pack_github(pack_bin: &std::path::Path, so: &std::path::Path, out: &std::path::Path) {
@@ -268,10 +244,7 @@ fn github_get_flow_mints_key_via_core_executed_hops() {
         );
         return;
     };
-    let Some(so_path) = plugin_path() else {
-        eprintln!("skip: busbar_auth_github_plugin cdylib not built");
-        return;
-    };
+    let so_path = github_image::cdylib();
     let (busbar_bin, pack_bin) = build_real_binaries();
 
     let client = reqwest::blocking::Client::builder()

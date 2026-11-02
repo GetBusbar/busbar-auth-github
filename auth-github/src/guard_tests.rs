@@ -123,14 +123,14 @@ fn every_provider_metadata_host_is_refused_even_when_allow_listed() {
 
 mod logging {
     use super::*;
-    use busbar_test_kit::warn_capture::WarnCapture;
+    use crate::diagnostics::GithubDiagnostics;
 
     #[test]
     fn c0_header_values_are_refused_without_logging_the_value() {
         for byte in [1, 8, 11, 12, 14, 31] {
             let value = format!("secret-canary{}", char::from(byte));
-            let cap = WarnCapture::default();
-            tracing::subscriber::with_default(cap.clone(), || {
+            let cap = GithubDiagnostics::default();
+            tracing::subscriber::with_default(cap.subscriber(), || {
                 assert_eq!(sanitize_hop_header("x-sensitive", &value), Err(Refused));
             });
             assert!(cap.contains("x-sensitive") && cap.contains("control byte"));
@@ -157,8 +157,8 @@ mod logging {
                 "host could not be read",
             ),
         ] {
-            let cap = WarnCapture::default();
-            tracing::subscriber::with_default(cap.clone(), || {
+            let cap = GithubDiagnostics::default();
+            tracing::subscriber::with_default(cap.subscriber(), || {
                 assert_eq!(vet_hop_url(url, &hosts), Err(Refused));
             });
             assert!(cap.contains(reason), "{:?}", cap.messages());
@@ -170,8 +170,8 @@ mod logging {
 
     #[test]
     fn a_refused_header_logs_its_name_never_its_value() {
-        let cap = WarnCapture::default();
-        tracing::subscriber::with_default(cap.clone(), || {
+        let cap = GithubDiagnostics::default();
+        tracing::subscriber::with_default(cap.subscriber(), || {
             assert_eq!(
                 sanitize_hop_header("x-api-key", "Bearer gho_bearer_value\nInjected: 1"),
                 Err(Refused)
@@ -183,8 +183,8 @@ mod logging {
 
     #[test]
     fn a_host_outside_the_allowlist_logs_the_rule_and_the_host_only() {
-        let cap = WarnCapture::default();
-        tracing::subscriber::with_default(cap.clone(), || {
+        let cap = GithubDiagnostics::default();
+        tracing::subscriber::with_default(cap.subscriber(), || {
             let url = "https://user:hunter2@evil.example/path?code=abc";
             assert_eq!(vet_hop_url(url, &allowed(&["github.com"])), Err(Refused));
         });

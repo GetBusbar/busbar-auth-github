@@ -444,3 +444,6 @@ pub fn build_principal(user: &GhUser, org_groups: Vec<String>) -> Principal {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod diagnostics;

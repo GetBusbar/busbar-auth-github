@@ -436,7 +436,7 @@ fn red_g4_the_org_list_is_followed_past_page_one() {
 
 #[test]
 fn red_g4_the_org_list_stops_at_ten_pages_with_a_warn() {
-    use busbar_test_kit::warn_capture::WarnCapture;
+    use crate::diagnostics::GithubDiagnostics;
     let l = login();
     let mut s = Script::happy().answer_with(
         ORGS_URL,
@@ -452,8 +452,8 @@ fn red_g4_the_org_list_stops_at_ten_pages_with_a_warn() {
             &format!(r#"[{{"login":"o{n}"}}]"#),
         );
     }
-    let cap = WarnCapture::default();
-    let step = tracing::subscriber::with_default(cap.clone(), || run(&l, &mut s));
+    let cap = GithubDiagnostics::default();
+    let step = tracing::subscriber::with_default(cap.subscriber(), || run(&l, &mut s));
     let p = identity(step);
     assert_eq!(p.roles.len(), 1 + 10, "{:?}", p.roles);
     assert_eq!(p.roles.last().map(String::as_str), Some("github:org/o10"));
@@ -1319,7 +1319,7 @@ fn a_poisoned_orgs_array_cannot_swap_the_token_mid_flow() {
 
 mod logging {
     use super::*;
-    use busbar_test_kit::warn_capture::WarnCapture;
+    use crate::diagnostics::GithubDiagnostics;
 
     /// Settings that omit `token_base`: its default host is not operator-written, so not allowed.
     const NO_TOKEN_BASE: &str =
@@ -1335,7 +1335,7 @@ mod logging {
         assert!(!err.contains(SECRET), "{err}");
 
         let l = login();
-        let cap = WarnCapture::default();
+        let cap = GithubDiagnostics::default();
         let hop = LoginHop {
             method: "GET".to_string(),
             url: "https://elsewhere.example/user".to_string(),
@@ -1343,11 +1343,11 @@ mod logging {
             secret_form_field: None,
             headers: Vec::new(),
         };
-        let refused = tracing::subscriber::with_default(cap.clone(), || l.render(&hop, None));
+        let refused = tracing::subscriber::with_default(cap.subscriber(), || l.render(&hop, None));
         assert_eq!(refused, Err(Refused));
         assert!(cap.contains("elsewhere.example"), "{:?}", cap.messages());
         assert!(cap.contains("allow"), "{:?}", cap.messages());
-        assert!(cap.contains("module=github"), "{:?}", cap.messages());
+        assert!(cap.contains("module=\"github\""), "{:?}", cap.messages());
         for secret in [SECRET, "the-code", "the-verifier"] {
             assert!(!cap.contains(secret), "{:?}", cap.messages());
         }
@@ -1357,8 +1357,8 @@ mod logging {
     fn a_declined_code_logs_the_idp_error_and_no_secret() {
         let l = login();
         let mut s = Script::new().answer(TOKEN_URL, 200, r#"{"error":"bad_verification_code"}"#);
-        let cap = WarnCapture::capturing_debug();
-        let step = tracing::subscriber::with_default(cap.clone(), || run(&l, &mut s));
+        let cap = GithubDiagnostics::capturing_debug();
+        let step = tracing::subscriber::with_default(cap.subscriber(), || run(&l, &mut s));
         assert_eq!(step, LoginStep::BadCredential);
         assert!(
             cap.contains("bad_verification_code"),
@@ -1379,8 +1379,8 @@ mod logging {
             (ORGS_URL, "/user/orgs"),
         ] {
             let mut s = Script::happy().unreachable(url);
-            let cap = WarnCapture::default();
-            let step = tracing::subscriber::with_default(cap.clone(), || run(&l, &mut s));
+            let cap = GithubDiagnostics::default();
+            let step = tracing::subscriber::with_default(cap.subscriber(), || run(&l, &mut s));
             assert_eq!(step, OUTAGE, "{url}");
             assert!(
                 cap.contains("could not be made"),
@@ -1388,7 +1388,11 @@ mod logging {
                 cap.messages()
             );
             assert!(cap.contains(path), "{url}: {:?}", cap.messages());
-            assert!(cap.contains("module=github"), "{url}: {:?}", cap.messages());
+            assert!(
+                cap.contains("module=\"github\""),
+                "{url}: {:?}",
+                cap.messages()
+            );
         }
     }
 
@@ -1396,19 +1400,19 @@ mod logging {
     fn red_g1_a_403_on_the_org_list_warns_of_the_scope() {
         let l = login();
         let mut s = Script::happy().answer(ORGS_URL, 403, r#"{"message":"forbidden"}"#);
-        let cap = WarnCapture::default();
-        let step = tracing::subscriber::with_default(cap.clone(), || run(&l, &mut s));
+        let cap = GithubDiagnostics::default();
+        let step = tracing::subscriber::with_default(cap.subscriber(), || run(&l, &mut s));
         assert_eq!(step, OUTAGE);
         assert!(cap.contains("read:org"), "{:?}", cap.messages());
-        assert!(cap.contains("module=github"), "{:?}", cap.messages());
+        assert!(cap.contains("module=\"github\""), "{:?}", cap.messages());
     }
 
     #[test]
     fn a_misconfigured_client_is_a_warn() {
         let l = login();
         let mut s = Script::new().answer(TOKEN_URL, 200, "error=incorrect_client_credentials");
-        let cap = WarnCapture::default();
-        let step = tracing::subscriber::with_default(cap.clone(), || run(&l, &mut s));
+        let cap = GithubDiagnostics::default();
+        let step = tracing::subscriber::with_default(cap.subscriber(), || run(&l, &mut s));
         assert_eq!(
             step, OUTAGE,
             "the operator's misconfiguration is no declined sign-in"
@@ -1428,8 +1432,8 @@ mod logging {
             format!("error=EVIL{}", "x".repeat(80)),
         ] {
             let mut s = Script::new().answer(TOKEN_URL, 200, &body);
-            let cap = WarnCapture::capturing_debug();
-            let step = tracing::subscriber::with_default(cap.clone(), || run(&l, &mut s));
+            let cap = GithubDiagnostics::capturing_debug();
+            let step = tracing::subscriber::with_default(cap.subscriber(), || run(&l, &mut s));
             assert_eq!(step, OUTAGE, "{body}");
             assert!(!cap.contains("EVIL"), "{:?}", cap.messages());
             assert!(cap.contains("<unrecognised>"), "{:?}", cap.messages());
@@ -1471,19 +1475,19 @@ fn a_hop_reply_over_the_cap_is_an_outage() {
 
 mod module_field {
     use super::*;
-    use busbar_test_kit::warn_capture::WarnCapture;
+    use crate::diagnostics::GithubDiagnostics;
 
     #[test]
     fn a_decline_is_logged_with_the_module_field() {
         let l = login();
         let mut s = Script::happy().answer(USER_URL, 401, "{}");
-        let cap = WarnCapture::capturing_debug();
-        let step = tracing::subscriber::with_default(cap.clone(), || run(&l, &mut s));
+        let cap = GithubDiagnostics::capturing_debug();
+        let step = tracing::subscriber::with_default(cap.subscriber(), || run(&l, &mut s));
         assert_eq!(step, LoginStep::BadCredential);
         let messages = cap.messages();
         assert!(!messages.is_empty());
         for m in &messages {
-            assert!(m.contains("module=github"), "{messages:?}");
+            assert!(m.contains("module=\"github\""), "{messages:?}");
         }
     }
 }

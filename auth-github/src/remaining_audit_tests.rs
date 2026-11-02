@@ -53,8 +53,8 @@ fn an_oauth_invalid_client_decline_warns_without_exposing_credentials() {
         for error in ["invalid_client", "unauthorized_client"] {
             let mut s =
                 Script::happy().answer(TOKEN_URL, status, &format!(r#"{{"error":"{error}"}}"#));
-            let cap = busbar_test_kit::warn_capture::WarnCapture::default();
-            let result = tracing::subscriber::with_default(cap.clone(), || run(&l, &mut s));
+            let cap = crate::diagnostics::GithubDiagnostics::default();
+            let result = tracing::subscriber::with_default(cap.subscriber(), || run(&l, &mut s));
             assert_eq!(result, LoginStep::BadCredential);
             assert_eq!(s.targets(), [TOKEN_URL]);
             assert!(cap.contains(error) && cap.contains("check client_id and client_secret"));

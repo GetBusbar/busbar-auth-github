@@ -15,13 +15,20 @@ use std::sync::Mutex;
 
 const LOCAL: &str = r#"{"client_id":"Iv1.conformance","token_base":"http://127.0.0.1:8080","api_base":"http://127.0.0.1:8080"}"#;
 struct RateLimited {
+    stream: bool,
     hint: Option<u64>,
     success: bool,
     reads: Mutex<HashMap<u64, u8>>,
     sent: Mutex<Vec<String>>,
 }
 impl Conns for RateLimited {
-    fn open(&self, _: InstanceId, _: NeedId, desc: &OpenDesc<'_>) -> Result<ConnId, ConnError> {
+    fn open(&self, _: InstanceId, need: NeedId, desc: &OpenDesc<'_>) -> Result<ConnId, ConnError> {
+        if need.0 >= 2 {
+            return Err(ConnError::UndeclaredNeed);
+        }
+        if need.0 == 0 {
+            return Err(ConnError::Refused);
+        }
         let mut sent = self.sent.lock().unwrap();
         sent.push(String::from_utf8_lossy(desc.head_target).into_owned());
         let id = sent.len() as u64;
@@ -32,11 +39,15 @@ impl Conns for RateLimited {
         &self,
         _: InstanceId,
         _: ConnId,
-        _: &[u8],
+        bytes: &[u8],
         _: bool,
         _: bool,
     ) -> Result<usize, ConnError> {
-        Err(ConnError::Closed)
+        if self.stream {
+            Ok(bytes.len())
+        } else {
+            Err(ConnError::Closed)
+        }
     }
     fn read(
         &self,
@@ -125,12 +136,14 @@ impl DeclaredConns for RateLimited {
     fn declared(&self, _: InstanceId, need: NeedId) -> Option<Result<(), ConnError>> {
         Some(if need.0 == 0 {
             Err(ConnError::Refused)
-        } else {
+        } else if need.0 == 1 {
             Ok(())
+        } else {
+            Err(ConnError::UndeclaredNeed)
         })
     }
     fn framed(&self, _: InstanceId, _: NeedId) -> bool {
-        true
+        !self.stream
     }
 }
 fn load(dropped: bool, binding: Bind) -> Plugin<Auth> {
@@ -147,6 +160,7 @@ fn retry_hint_reaches_host_owned_extensions_through_both_doors() {
     for dropped in [false, true] {
         for hint in [None, Some(0), Some(120), Some(u64::MAX)] {
             let conns = Arc::new(RateLimited {
+                stream: false,
                 hint,
                 success: false,
                 reads: Mutex::new(HashMap::new()),
@@ -254,6 +268,7 @@ fn short_answer_capacity_eviction_warns_without_exposing_the_identity() {
     let d = dispatcher();
     for dropped in [false, true] {
         let conns = Arc::new(RateLimited {
+            stream: false,
             hint: None,
             success: true,
             reads: Mutex::new(HashMap::new()),
@@ -328,5 +343,281 @@ fn short_answer_capacity_eviction_warns_without_exposing_the_identity() {
         }
         drop(sent);
         assert_eq!(close(&p), "Ready lease=false ");
+    }
+}
+
+#[test]
+fn a_successful_login_and_an_empty_code_are_compared_through_both_doors() {
+    let d = dispatcher();
+    let mut answers = Vec::new();
+    for dropped in [false, true] {
+        let conns = Arc::new(RateLimited {
+            stream: false,
+            hint: None,
+            success: true,
+            reads: Mutex::new(HashMap::new()),
+            sent: Mutex::new(Vec::new()),
+        });
+        let logs = Arc::new(Logs::default());
+        let p = load(
+            dropped,
+            Bind {
+                conns: ConnTable::Host(conns.clone()),
+                sink: logs.clone(),
+                ..bind(&d)
+            },
+        );
+        for bad in ["{}", r#"{"client_id":5}"#] {
+            assert!(validate(&p, bad).starts_with("Failed"));
+        }
+        assert_eq!(open(&p, LOCAL, Some(SECRET)), "Ready lease=false ");
+        let mut leg = Vec::new();
+        for code in [b"conformance-code".as_slice(), b""] {
+            let (mut bytes, mut groups) = (vec![0u8; 4096], vec![ABSENT; 16]);
+            let mut input: CompleteLoginIn = z();
+            input.head = in_head();
+            input.code = secret_blob(code);
+            input.code_verifier = secret_blob(b"conformance-verifier");
+            input.state = s("conformance-state");
+            input.redirect_uri = s("https://node.example/auth/token");
+            input.out_buf = identity_buf(&mut bytes, &mut groups);
+            let before = conns.sent.lock().unwrap().len();
+            let crossings = p.inner.crossings.load(std::sync::atomic::Ordering::Relaxed)
+                - p.inner.resumes.load(std::sync::atomic::Ordering::Relaxed);
+            let ticket = d.mint(0).unwrap();
+            let done = d
+                .submit(
+                    &p,
+                    ticket,
+                    auth::slot::COMPLETE_LOGIN,
+                    Frame::new(input, identify_out()),
+                    DeadlineClass::Call,
+                    now_ns() + 20_000_000_000,
+                )
+                .wait(Duration::from_secs(30))
+                .expect("login completes");
+            assert_eq!(done.outcome, Outcome::Ready);
+            assert_eq!(done.lease, 0);
+            assert_eq!(
+                p.inner.crossings.load(std::sync::atomic::Ordering::Relaxed)
+                    - p.inner.resumes.load(std::sync::atomic::Ordering::Relaxed)
+                    - crossings,
+                1
+            );
+            let output = &done.frame.as_ref().unwrap().out;
+            if code.is_empty() {
+                assert_eq!(output.verdict, auth::LOGIN_BAD_CREDENTIAL);
+                assert_eq!(
+                    conns.sent.lock().unwrap().len(),
+                    before,
+                    "empty code opens no hop"
+                );
+                leg.push("reject".to_owned());
+            } else {
+                assert_eq!(output.verdict, auth::LOGIN_IDENTITY);
+                let span = output.identity.subject;
+                let subject = std::str::from_utf8(
+                    &bytes[span.offset as usize..(span.offset + span.len) as usize],
+                )
+                .unwrap();
+                assert_eq!(subject, "github:identity-canary");
+                let spans = &groups[..output.identity.groups_len as usize];
+                let roles: Vec<_> = spans
+                    .iter()
+                    .map(|span| {
+                        std::str::from_utf8(
+                            &bytes[span.offset as usize..(span.offset + span.len) as usize],
+                        )
+                        .unwrap()
+                        .to_owned()
+                    })
+                    .collect();
+                assert_eq!(roles, ["github:id/42", "github:org/second-page-canary"]);
+                leg.push(format!("{subject} {roles:?}"));
+                assert_eq!(
+                    &conns.sent.lock().unwrap()[before..],
+                    [
+                        "/login/oauth/access_token",
+                        "/user",
+                        "/user/orgs?per_page=100",
+                        "/user/orgs?page=2"
+                    ]
+                );
+            }
+            d.recycle(ticket);
+            assert!(conns.reads.lock().unwrap().is_empty());
+        }
+        let text = format!("{:?}", logs.0.lock().unwrap());
+        for secret in [
+            SECRET,
+            "fixture-token",
+            "conformance-code",
+            "conformance-verifier",
+        ] {
+            assert!(!text.contains(secret));
+        }
+        assert_eq!(close(&p), "Ready lease=false ");
+        answers.push(leg);
+    }
+    assert_eq!(answers[0], answers[1]);
+}
+
+mod custody {
+    use super::*;
+    use busbar_contract::abi::host::conn::connector::{service, EstablishIn, IoIn, StreamIn};
+    use busbar_contract::abi::host::service::{ServiceHead, ServiceOut};
+    use busbar_contract::abi::mechanism::call::RawOutcome;
+    use busbar_contract::abi::mechanism::ticket::{CompletionHandle, Ticket};
+    use busbar_plugin_loader::dispatch::conn_services::CONN_SLOTS;
+    use std::os::raw::c_void;
+    fn head(op: u32, size: usize) -> ServiceHead {
+        ServiceHead {
+            size: u32::try_from(size).unwrap_or(u32::MAX),
+            op,
+            handle: CompletionHandle {
+                ticket: Ticket::NONE,
+                seq: 0,
+                _reserved: 0,
+            },
+        }
+    }
+
+    fn out() -> ServiceOut {
+        // SAFETY: a plain repr(C) value of integers and a NULL/0 string: all-zero is valid.
+        let mut out: ServiceOut = unsafe { std::mem::zeroed() };
+        out.size = std::mem::size_of::<ServiceOut>() as u32;
+        out
+    }
+
+    fn answered(raw: RawOutcome, o: &ServiceOut) -> (Outcome, u64, String) {
+        let text = if o.error.ptr.is_null() {
+            String::new()
+        } else {
+            // SAFETY: the host's text, `'static` (interned) or held for the call.
+            String::from_utf8_lossy(unsafe { std::slice::from_raw_parts(o.error.ptr, o.error.len) })
+                .into_owned()
+        };
+        (raw.outcome(), o.value, text)
+    }
+
+    fn establish(p: &Plugin<Auth>, need: u32, target: &str) -> (Outcome, u64, String) {
+        let none = AbiStr {
+            ptr: std::ptr::null(),
+            len: 0,
+        };
+        let i = EstablishIn {
+            head: head(service::ESTABLISH, std::mem::size_of::<EstablishIn>()),
+            need,
+            timeout_ms: 5_000,
+            target: AbiStr {
+                ptr: target.as_ptr(),
+                len: target.len(),
+            },
+            within: none,
+            member: none,
+        };
+        let mut o = out();
+        let f = CONN_SLOTS.establish.expect("the host offers ESTABLISH");
+        // SAFETY: the local input, exclusive output, nested buffers and strings live through this crossing.
+        let raw = unsafe {
+            f(
+                p.inner.ctx(),
+                std::ptr::from_ref(&i).cast::<c_void>(),
+                &mut o,
+            )
+        };
+        answered(raw, &o)
+    }
+
+    fn io(p: &Plugin<Auth>, stream: u64, write: bool) -> (Outcome, u64, String) {
+        let mut buf = *b"x";
+        let (op, f) = if write {
+            (service::WRITE, CONN_SLOTS.write)
+        } else {
+            (service::READ, CONN_SLOTS.read)
+        };
+        let i = IoIn {
+            head: head(op, std::mem::size_of::<IoIn>()),
+            stream,
+            buf: buf.as_mut_ptr(),
+            len: buf.len(),
+        };
+        let mut o = out();
+        // SAFETY: the local input, exclusive output, nested buffers and strings live through this crossing.
+        let raw = unsafe {
+            f.expect("the host offers READ and WRITE")(
+                p.inner.ctx(),
+                std::ptr::from_ref(&i).cast::<c_void>(),
+                &mut o,
+            )
+        };
+        answered(raw, &o)
+    }
+
+    fn close_stream(p: &Plugin<Auth>, stream: u64) -> (Outcome, u64, String) {
+        let i = StreamIn {
+            head: head(service::CLOSE, std::mem::size_of::<StreamIn>()),
+            stream,
+        };
+        let mut o = out();
+        // SAFETY: the local input, exclusive output, nested buffers and strings live through this crossing.
+        let raw = unsafe {
+            CONN_SLOTS.close.expect("the host offers CLOSE")(
+                p.inner.ctx(),
+                std::ptr::from_ref(&i).cast::<c_void>(),
+                &mut o,
+            )
+        };
+        answered(raw, &o)
+    }
+
+    #[test]
+    fn github_connections_refuse_undeclared_needs_and_other_instances() {
+        let d = dispatcher();
+        let table = Arc::new(RateLimited {
+            stream: true,
+            hint: None,
+            success: false,
+            reads: Mutex::new(HashMap::new()),
+            sent: Mutex::new(Vec::new()),
+        });
+        for dropped in [false, true] {
+            let owner = load(
+                dropped,
+                Bind {
+                    conns: ConnTable::Host(table.clone()),
+                    ..bind(&d)
+                },
+            );
+            let other = load(
+                dropped,
+                Bind {
+                    conns: ConnTable::Host(table.clone()),
+                    ..bind(&d)
+                },
+            );
+            let (outcome, stream, text) = establish(&owner, 1, "127.0.0.1:8080");
+            assert_eq!(outcome, Outcome::Ready, "{text}");
+            assert_eq!(io(&owner, stream, true).0, Outcome::Ready);
+            for need in [2, u32::MAX] {
+                let (outcome, _, text) = establish(&owner, need, "127.0.0.1:8080");
+                assert_eq!(
+                    (outcome, text.as_str()),
+                    (Outcome::Refused, ConnError::UndeclaredNeed.text())
+                );
+            }
+            for answer in [
+                io(&other, stream, true),
+                io(&other, stream, false),
+                close_stream(&other, stream),
+            ] {
+                assert_eq!(
+                    (answer.0, answer.2.as_str()),
+                    (Outcome::Refused, ConnError::NotOwner.text())
+                );
+            }
+            assert_eq!(io(&owner, stream, true).0, Outcome::Ready);
+            assert_eq!(close_stream(&owner, stream).0, Outcome::Ready);
+        }
     }
 }

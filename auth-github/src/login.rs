@@ -1049,14 +1049,17 @@ mod clock_tests {
     #[test]
     fn unavailable_wall_clock_warns_and_preserves_only_delta_seconds() {
         let before_epoch = std::time::UNIX_EPOCH - std::time::Duration::from_secs(1);
-        let cap = busbar_test_kit::warn_capture::WarnCapture::default();
+        let cap = crate::diagnostics::GithubDiagnostics::default();
         let mut fields = ReplyFields {
             ratelimit_remaining: Some("0".into()),
             ratelimit_reset: Some(u64::MAX.to_string()),
             ..ReplyFields::default()
         };
         assert_eq!(
-            tracing::subscriber::with_default(cap.clone(), || retry_hint_at(&fields, before_epoch)),
+            tracing::subscriber::with_default(cap.subscriber(), || retry_hint_at(
+                &fields,
+                before_epoch
+            )),
             None
         );
         assert!(cap.contains("wall clock unavailable"));
