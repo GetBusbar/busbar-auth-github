@@ -97,26 +97,40 @@ fn headers_are_sanitised_as_1_5_5_did() {
 
 #[test]
 fn every_provider_metadata_host_is_refused_even_when_allow_listed() {
+    // Only the CGNAT address is private to the contract's net rules, so it is sent over http and
+    // reaches the metadata rule; the others go over https so the plaintext-public-host rule cannot
+    // be the one that refuses them. Each refusal must name the cloud-metadata rule.
     for (url, host) in [
         ("http://100.100.100.200/", "100.100.100.200"),
-        ("http://192.0.0.192/", "192.0.0.192"),
-        ("http://metadata.internal/", "metadata.internal"),
-        ("http://metadata.tencentyun.com/", "metadata.tencentyun.com"),
+        ("https://192.0.0.192/", "192.0.0.192"),
+        ("https://metadata.internal/", "metadata.internal"),
         (
-            "http://metadata.platformequinix.com/",
+            "https://metadata.tencentyun.com/",
+            "metadata.tencentyun.com",
+        ),
+        (
+            "https://metadata.platformequinix.com/",
             "metadata.platformequinix.com",
         ),
-        ("http://instance-data/", "instance-data"),
+        ("https://instance-data/", "instance-data"),
         (
-            "http://instance-data.ec2.internal/",
+            "https://instance-data.ec2.internal/",
             "instance-data.ec2.internal",
         ),
         (
-            "http://INSTANCE-DATA.EC2.INTERNAL/",
+            "https://INSTANCE-DATA.EC2.INTERNAL/",
             "instance-data.ec2.internal",
         ),
     ] {
-        assert!(vet_hop_url(url, &allowed(&[host])).is_err(), "{url}");
+        let cap = busbar_test_kit::warn_capture::WarnCapture::default();
+        let verdict =
+            tracing::subscriber::with_default(cap.clone(), || vet_hop_url(url, &allowed(&[host])));
+        assert!(verdict.is_err(), "{url}");
+        assert!(
+            cap.contains("cloud-metadata"),
+            "{url}: {:?}",
+            cap.messages()
+        );
     }
     assert!(vet_hop_url("http://100.100.100.201/", &allowed(&["100.100.100.201"])).is_ok());
 }
