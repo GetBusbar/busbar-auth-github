@@ -14,7 +14,6 @@ fn wiremock_url() -> Option<String> {
 }
 
 /// The busbar checkout the live e2e builds the REAL `busbar` and `busbar-plugin-pack` binaries from:
-
 fn busbar_root() -> std::path::PathBuf {
     let dir = std::env::var_os("BUSBAR_CHECKOUT").expect(
         "BUSBAR_CHECKOUT is unset: the live e2e builds the real busbar binaries from a checkout of \
@@ -69,7 +68,6 @@ fn build_real_binaries() -> (std::path::PathBuf, std::path::PathBuf) {
 }
 
 /// Locate the built `busbar_auth_github_plugin` cdylib (checks the uplifted profile dir and target/deps,
-
 fn plugin_path() -> Option<std::path::PathBuf> {
     let candidate = (|| {
         let exe = std::env::current_exe().ok()?;
@@ -127,7 +125,6 @@ fn pack_github(pack_bin: &std::path::Path, so: &std::path::Path, out: &std::path
 }
 
 /// The busbar process, killed and reaped when it drops: a failed assertion never leaks it (or its
-
 struct Busbar(std::process::Child);
 
 impl Drop for Busbar {
@@ -158,7 +155,6 @@ fn reserve_port() -> std::net::TcpListener {
 }
 
 /// Register the GitHub stub mappings on WireMock over its admin API (equivalent to the JSON files under
-
 fn register_wiremock_stubs(client: &reqwest::blocking::Client, base: &str) {
     let mut ready = false;
     for _ in 0..60 {
@@ -222,7 +218,6 @@ fn register_wiremock_stubs(client: &reqwest::blocking::Client, base: &str) {
 }
 
 /// Decode the busbar login cookie (base64url(JSON)) and read its `state` (the CSRF value the callback
-
 fn cookie_fields(cookie_value: &str) -> serde_json::Value {
     use base64::Engine as _;
     let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
@@ -259,7 +254,6 @@ fn wait_for_health(client: &reqwest::blocking::Client, url: &str, child: &mut st
 }
 
 /// THE plugin-side proof: a REAL busbar boot drives the github GET flow; the plugin executes the real
-
 #[test]
 fn github_get_flow_mints_key_via_core_executed_hops() {
     let Some(wm) = wiremock_url() else {

@@ -12,7 +12,6 @@ fn holds(token: Option<Cred>, want: &str) -> bool {
 }
 
 /// The principal the production decoders ([`parse_user`], [`parse_org_groups`]) and
-
 fn principal(user_body: &str, orgs_body: Option<&str>) -> Option<Principal> {
     let user = parse_user(user_body)?;
     let groups = match orgs_body {
@@ -66,7 +65,6 @@ fn build_github_authorize_url_has_state_scope_no_secret() {
 }
 
 /// The token-exchange hop: POST to the token endpoint, the `client_secret` an EMPTY placeholder
-
 #[test]
 fn the_token_exchange_hop_names_the_secret_field_and_leaves_it_empty() {
     let hop = build_token_exchange(
@@ -96,7 +94,6 @@ fn the_token_exchange_hop_names_the_secret_field_and_leaves_it_empty() {
 }
 
 /// The `/user` hop carries the public User-Agent + Accept headers, no form, no secret field: the
-
 #[test]
 fn the_userinfo_hop_carries_the_public_headers_and_no_bearer() {
     let hop = build_userinfo_get(&cfg());
@@ -223,7 +220,6 @@ fn identity_malformed_orgs_rejects_but_empty_array_identifies() {
 }
 
 /// The `/user` body must carry a numeric `id`. That shape check is the only thing standing between
-
 #[test]
 fn a_user_body_without_a_numeric_id_is_refused() {
     assert!(
@@ -251,7 +247,6 @@ fn orgs_hop_url_requests_per_page_100() {
 }
 
 /// A released GitHub handle must not silently inherit the previous owner's bindings.
-
 #[test]
 fn the_stable_numeric_id_distinguishes_two_accounts_sharing_one_handle() {
     let original = r#"{"login":"alice","id":1001,"name":"Alice"}"#;

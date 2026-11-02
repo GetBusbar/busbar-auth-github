@@ -17,7 +17,6 @@ pub struct Refused;
 const FORBIDDEN_HOP_HEADERS: [&str; 3] = ["host", "content-length", "transfer-encoding"];
 
 /// The hop host-allowlist, derived from the OPERATOR's settings only: the host of every absolute http(s) URL string
-
 pub fn collect_allowed_hosts(settings: &Value) -> HashSet<String> {
     fn walk(v: &Value, hosts: &mut HashSet<String>) {
         match v {
@@ -41,7 +40,6 @@ pub fn collect_allowed_hosts(settings: &Value) -> HashSet<String> {
 }
 
 /// Vet a hop URL: the host must be allow-listed; https for a public host (http only for a
-
 pub fn vet_hop_url(url: &str, allowed: &HashSet<String>) -> Result<(), Refused> {
     let Some(host) = extract_normalized_host(url) else {
         tracing::warn!(
@@ -71,7 +69,6 @@ pub fn vet_hop_url(url: &str, allowed: &HashSet<String>) -> Result<(), Refused> 
 }
 
 /// Sanitize a hop header, answering the header as the http stack would write it: the name
-
 pub fn sanitize_hop_header(name: &str, value: &str) -> Result<(String, String), Refused> {
     let refuse = |why: &str| {
         tracing::warn!(module = "github", header = ?name, "github login: hop refused, {why}");

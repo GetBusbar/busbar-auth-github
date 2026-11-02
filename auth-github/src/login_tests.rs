@@ -91,7 +91,6 @@ impl Script {
 }
 
 /// A request's header fields as the SDK frames them (the chip's sealed bearer included), read
-
 fn plain(r: &HopRequest) -> Vec<(String, String)> {
     let wire = r.wire(MAX_HOP_REPLY_BYTES).expect("the hop frames");
     let head = chip::framed_head(&wire);
@@ -176,7 +175,6 @@ fn a_member_signs_in_with_org_groups() {
 }
 
 /// The token exchange as 1.5.5's core sent it: the form in the module's order with the secret
-
 #[test]
 fn the_token_exchange_carries_the_plugins_own_secret_in_1_5_5_bytes() {
     let l = login();
@@ -345,7 +343,6 @@ fn an_unreachable_idp_is_an_outage() {
 }
 
 /// A truncated org list is never a zero-group login; it is no sign-in answer either (G3,
-
 #[test]
 fn a_malformed_org_list_is_an_outage_not_a_zero_group_login() {
     let l = login();
@@ -562,7 +559,6 @@ fn red_l7_an_empty_callback_value_is_declined_before_the_exchange() {
 }
 
 /// Slow I/O pends: each hop answers PENDING once, the flow parks on it, and the next drive re-issues
-
 #[test]
 fn a_pending_exchange_parks_and_resumes_on_the_same_request() {
     let l = login();
@@ -587,7 +583,6 @@ fn a_pending_exchange_parks_and_resumes_on_the_same_request() {
 }
 
 /// The answer is kept: a re-call (the host's short-buffer re-issue) is served from it and never
-
 #[test]
 fn a_finished_flow_answers_again_without_new_exchanges() {
     let l = login();
@@ -600,7 +595,6 @@ fn a_finished_flow_answers_again_without_new_exchanges() {
 }
 
 /// 1.5.5's allowlist is the hosts the OPERATOR wrote: with the bases left at their defaults, 1.5.5
-
 #[test]
 fn defaulted_bases_are_refused_at_open_explained() {
     assert_eq!(
@@ -708,7 +702,6 @@ fn id_token(claims: &str) -> String {
 }
 
 /// 1.5.5's core nonce binding, now the plugin's (WIRE-AUTH: `CompleteLoginIn.nonce`): an id_token
-
 #[test]
 fn an_id_token_with_a_foreign_nonce_is_refused() {
     let l = login();
@@ -756,7 +749,6 @@ fn an_id_token_bound_to_the_minted_nonce_passes_the_check() {
 }
 
 /// The id_token payload is read strictly as base64url without padding, through the real nonce
-
 #[test]
 fn the_id_token_payload_is_read_strictly_base64url_no_pad() {
     let (mut padded_seen, mut alphabet_seen) = (false, false);
@@ -793,7 +785,6 @@ fn the_id_token_payload_is_read_strictly_base64url_no_pad() {
 }
 
 /// The hop loop is bounded: a far end that keeps answering token-shaped bodies from `/user` never
-
 #[test]
 fn the_hop_loop_is_bounded() {
     let l = login();
@@ -851,7 +842,6 @@ fn red_l1_an_answer_is_read_as_the_answer_of_the_hop_sent() {
 }
 
 /// The answers the 1.5.5 module, driven by the 1.5.5 core, reached for these bodies (pinned while
-
 #[test]
 fn the_flow_answers_as_the_1_5_5_module_driven_by_the_1_5_5_core() {
     let id = |roles: &[&str]| {
@@ -914,7 +904,6 @@ fn begin_login_folds_in_request_time_extra_scopes_deduped() {
 }
 
 /// A callback without the full code + redirect_uri + verifier triple, or with no correlator at
-
 #[test]
 fn a_callback_without_the_full_triple_is_declined_with_no_exchange() {
     let l = login();
@@ -931,7 +920,6 @@ fn a_callback_without_the_full_triple_is_declined_with_no_exchange() {
 }
 
 /// The token endpoint's non-2xx is never a token, even when its body carries one: a 401 with an
-
 #[test]
 fn a_non_2xx_token_answer_is_never_a_token_even_with_one_in_it() {
     let l = login();
@@ -1045,7 +1033,6 @@ fn red_g1_a_rate_limit_is_an_outage_with_the_idps_retry_hint() {
 }
 
 /// An empty access token (either shape) is no token: never a `Bearer ` with nothing after it. A
-
 #[test]
 fn an_empty_access_token_is_refused() {
     let l = login();
@@ -1069,7 +1056,6 @@ fn a_user_without_a_login_is_an_outage() {
 }
 
 /// Out-of-order bodies fail closed: an org list or a `/user` where the token response belongs
-
 #[test]
 fn out_of_order_bodies_fail_closed() {
     let l = login();
@@ -1093,7 +1079,6 @@ fn the_orgs_hop_carries_the_token_from_the_token_step() {
 }
 
 /// Each flow owns its state (the legacy module's shared pending map, its correlation key, cap and
-
 #[test]
 fn each_flow_owns_its_state_and_a_finished_one_holds_nothing() {
     let l = login();
@@ -1207,7 +1192,6 @@ fn the_v1_5_5_example_provider_loads_and_logs_in_with_the_secret_beside_the_sett
 }
 
 /// A headless-only provider (no `browser_login`, so no secret) loaded in 1.5.5 and still does; a
-
 #[test]
 fn no_secret_loads_and_drops_the_secret_field_as_1_5_5_did() {
     for secret in [None, Some("")] {

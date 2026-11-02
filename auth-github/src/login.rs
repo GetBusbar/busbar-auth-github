@@ -20,7 +20,6 @@ use std::fmt;
 use zeroize::{Zeroize, Zeroizing};
 
 /// A settings decoder error as the contract's instance-relative line: `settings.<path>: <reason>`
-
 fn settings_line(e: &SettingsError) -> String {
     let text = e.to_string();
     let reason = text.strip_prefix("settings: ").unwrap_or(&text);
@@ -34,12 +33,10 @@ fn settings_line(e: &SettingsError) -> String {
 /// The per-hop request timeout.
 pub const HOP_TIMEOUT_MS: u64 = 10_000;
 /// The most `/user/orgs` pages read per login (requests ask for 100 entries per page; replies remain
-
 pub const MAX_ORG_PAGES: usize = 10;
 /// The bound on the hops one callback sends: the token exchange, `/user`, and the org pages.
 pub const MAX_HOPS: usize = 2 + MAX_ORG_PAGES;
 /// The most a hop's reply body may carry: 256 KiB, the auth kind's bound on a token or userinfo
-
 pub const MAX_HOP_REPLY_BYTES: usize = 256 * 1024;
 
 /// One hop, rendered as it goes on the wire: method, target, the public header fields in order
@@ -95,7 +92,6 @@ pub(crate) fn split(url: &str) -> Option<(&str, String)> {
 
 impl HopRequest {
     /// The SDK exchange that sends this hop: the public fields framed as they are, the bearer
-
     #[must_use]
     pub fn wire(&self, reply_limit: usize) -> Option<Wire> {
         let Some((_, target)) = split(&self.target) else {
@@ -163,7 +159,6 @@ pub struct ReplyFields {
 
 impl ReplyFields {
     /// The kept fields of a reply's field block, names matched case-insensitively. Repeated Link
-
     pub fn kept<'a>(fields: impl IntoIterator<Item = (&'a [u8], &'a [u8])>) -> Self {
         let mut kept = Self::default();
         for (name, value) in fields {
@@ -278,7 +273,6 @@ struct Callback {
 }
 
 /// One login in flight: the callback's inputs, the step machine's state, the hop parked on a
-
 pub struct LoginFlow {
     req: Callback,
     state: FlowState,
@@ -316,7 +310,6 @@ impl fmt::Debug for GithubLogin {
 
 impl GithubLogin {
     /// Build the login from its settings and the client secret the kernel resolved from
-
     pub fn open(settings: &str, client_secret: Option<&str>) -> Result<Self, String> {
         if settings.trim().is_empty() {
             return Err("settings: empty: the github plugin requires client_id".to_string());
@@ -386,7 +379,6 @@ impl GithubLogin {
     }
 
     /// Whether the settings name an operator CA (`ca_cert_pem`; `open` refuses a blank one): the
-
     #[must_use]
     pub fn anchored(&self) -> bool {
         self.cfg
@@ -618,7 +610,6 @@ impl GithubLogin {
     }
 
     /// Render a hop up to the send: vet the URL, seal the client secret into the named form
-
     fn render(&self, hop: &LoginHop, bearer: Option<&Cred>) -> Result<HopRequest, Refused> {
         vet_hop_url(&hop.url, &self.allowed_hosts)?;
 
@@ -683,7 +674,6 @@ impl GithubLogin {
 }
 
 /// A reply body as text, moved, never copied: valid UTF-8 is the buffer itself; otherwise the
-
 fn text_of(bytes: Vec<u8>) -> Zeroizing<String> {
     match String::from_utf8(bytes) {
         Ok(text) => Zeroizing::new(text),
@@ -740,7 +730,6 @@ impl Hop {
 }
 
 /// Resolve a next-page reference against the page that supplied it, then require the API's
-
 fn next_on_origin(next: &str, request: &str, base: &str) -> Option<url::Url> {
     let mut next = url::Url::parse(request).ok()?.join(next).ok()?;
     let base = url::Url::parse(base).ok()?;
@@ -757,7 +746,6 @@ fn rate_limited(fields: &ReplyFields) -> bool {
 }
 
 /// The IdP's retry hint, in seconds at `now`: its `retry-after` (delta seconds), else, when no
-
 fn retry_hint(fields: &ReplyFields, now: u64) -> Option<u64> {
     if let Some(after) = fields.retry_after.as_deref().and_then(secs) {
         return Some(after);
@@ -780,7 +768,6 @@ fn secs(v: &str) -> Option<u64> {
 }
 
 /// Absolute resets require a usable wall clock. A delta Retry-After remains meaningful when
-
 fn retry_hint_at(fields: &ReplyFields, at: std::time::SystemTime) -> Option<u64> {
     match at.duration_since(std::time::UNIX_EPOCH) {
         Ok(now) => retry_hint(fields, now.as_secs()),
@@ -795,7 +782,6 @@ fn retry_hint_at(fields: &ReplyFields, at: std::time::SystemTime) -> Option<u64>
 }
 
 /// An IdP error code as a log may print it: the code when it is `[a-z0-9_]{1,64}`, else
-
 fn loggable(code: &str) -> &str {
     let plain = !code.is_empty()
         && code.len() <= 64
@@ -924,7 +910,6 @@ fn github_error(body: &str) -> Option<String> {
 /// The token endpoint's codes that are the user's own: a bad or expired code, an invalid grant.
 const USER_TOKEN_ERRORS: [&str; 3] = ["bad_verification_code", "invalid_grant", "expired_token"];
 /// The token endpoint's codes that are the operator's: the OAuth App's credentials, its callback
-
 const OPERATOR_TOKEN_ERRORS: [&str; 3] = [
     "incorrect_client_credentials",
     "redirect_uri_mismatch",
@@ -932,7 +917,6 @@ const OPERATOR_TOKEN_ERRORS: [&str; 3] = [
 ];
 
 /// The turn a 2xx token reply carrying no access token is (GitHub answers a refused exchange with
-
 fn token_refusal(body: &str) -> Turn {
     let Some(code) = github_error(body) else {
         tracing::warn!(
@@ -975,7 +959,6 @@ fn finish(flow: &mut LoginFlow, step: LoginStep) -> LoginStep {
 }
 
 /// Wipe the plugin-owned values of a described hop once it is rendered: `LoginHop.form` carries
-
 fn wipe_hop(hop: &mut LoginHop) {
     for (_, v) in &mut hop.form {
         v.zeroize();
@@ -983,7 +966,6 @@ fn wipe_hop(hop: &mut LoginHop) {
 }
 
 /// The nonce binding (a constant-time compare): a body
-
 fn id_token_nonce_binds(body: &str, minted: Option<&str>) -> bool {
     #[derive(Default)]
     enum TokenField {

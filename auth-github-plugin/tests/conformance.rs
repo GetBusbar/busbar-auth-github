@@ -48,7 +48,6 @@ fn release() -> SigningKey {
 }
 
 /// This crate's built cdylib (uplifted or under `deps`, newest wins). A missing artifact is a
-
 fn cdylib() -> PathBuf {
     let exe = std::env::current_exe().expect("the test binary has a path");
     let profile = exe
@@ -101,7 +100,6 @@ fn rendering() -> Vec<u8> {
 }
 
 /// THE DROPPED-IN DOOR: the cdylib signed first-party with its Statement in the manifest, packed
-
 fn dropped(d: &Dispatcher) -> Plugin<Auth> {
     let lib = std::fs::read(cdylib()).expect("read the cdylib");
     let hex: String = rendering().iter().map(|b| format!("{b:02x}")).collect();
@@ -283,7 +281,6 @@ const ABSENT: Span = Span {
 };
 
 /// An all-zero `T`: every `in`/`out` here is plain C data, all-zero a valid value of each (the
-
 fn z<T>() -> T {
     // SAFETY: plain C data; all-zero is a valid value of each type this file zeroes.
     unsafe { std::mem::zeroed() }
@@ -337,7 +334,6 @@ fn verify(p: &Plugin<Auth>) -> String {
 }
 
 /// `begin_login`: the answer, the authorize URL it leased, and the release of that lease (READY
-
 fn begin_login(p: &Plugin<Auth>) -> Vec<String> {
     let mut f = Frame::new(
         BeginLoginIn {

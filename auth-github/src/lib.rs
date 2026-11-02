@@ -44,17 +44,14 @@ use serde_json::Value;
 use zeroize::Zeroizing;
 
 /// The default OAuth scopes requested: `read:org` (to enumerate the caller's org memberships → groups)
-
 fn default_scopes() -> Vec<String> {
     vec!["read:org".to_string(), "read:user".to_string()]
 }
 /// Default REST API base (`api.github.com`). Overridden for GitHub Enterprise Server (GHES), whose
-
 fn default_api_base() -> String {
     "https://api.github.com".to_string()
 }
 /// The public GitHub web base shared by the authorize and token endpoint defaults (both `github.com`;
-
 const GITHUB_WEB_BASE: &str = "https://github.com";
 /// Default web base for the authorize endpoint (`github.com`). Overridden to `https://<host>` for GHES.
 fn default_authorize_base() -> String {
@@ -130,7 +127,6 @@ fn user_endpoint(cfg: &GitHubConfig) -> String {
     format!("{}/user", cfg.api_base.trim_end_matches('/'))
 }
 /// The `/user/orgs` endpoint URL (`{api_base}/user/orgs?per_page=100`): its first page. GitHub
-
 fn orgs_endpoint(cfg: &GitHubConfig) -> String {
     format!(
         "{}/user/orgs?per_page=100",
@@ -139,7 +135,6 @@ fn orgs_endpoint(cfg: &GitHubConfig) -> String {
 }
 
 /// Percent-encode `s` for a URL QUERY-component value (RFC 3986 unreserved kept literal, everything
-
 fn pct(s: &str) -> String {
     const HEX: &[u8; 16] = b"0123456789ABCDEF";
     let mut out = String::with_capacity(s.len());
@@ -159,7 +154,6 @@ fn pct(s: &str) -> String {
 }
 
 /// The space-delimited `scope` value: the configured scopes plus `extra` (the door passes none),
-
 fn scope_value(cfg: &GitHubConfig, extra: &[String]) -> String {
     let mut scopes: Vec<String> = Vec::new();
     for s in cfg.scopes.iter().chain(extra.iter()) {
@@ -171,7 +165,6 @@ fn scope_value(cfg: &GitHubConfig, extra: &[String]) -> String {
 }
 
 /// Build the GitHub **authorization-code** authorize URL: `response_type=code`, `client_id`,
-
 pub fn build_github_authorize_url(
     cfg: &GitHubConfig,
     redirect_uri: &str,
@@ -191,7 +184,6 @@ pub fn build_github_authorize_url(
 }
 
 /// Build the token-exchange hop: `POST` to the token endpoint with `client_id`, `code`,
-
 pub fn build_token_exchange(
     cfg: &GitHubConfig,
     code: &str,
@@ -215,7 +207,6 @@ pub fn build_token_exchange(
 }
 
 /// The public request headers of an authenticated GitHub REST hop: the mandatory `User-Agent`
-
 pub fn userinfo_headers() -> Vec<(String, String)> {
     vec![
         ("User-Agent".to_string(), "busbar".to_string()),
@@ -227,7 +218,6 @@ pub fn userinfo_headers() -> Vec<(String, String)> {
 }
 
 /// Build the `/user` profile GET hop, with the `User-Agent` + `Accept` headers
-
 pub fn build_userinfo_get(cfg: &GitHubConfig) -> LoginHop {
     LoginHop {
         method: "GET".to_string(),
@@ -250,7 +240,6 @@ pub fn build_orgs_get(cfg: &GitHubConfig) -> LoginHop {
 }
 
 /// Build the GET hop of a later `/user/orgs` page: `url` is the previous page's `Link: rel="next"`
-
 pub fn build_orgs_page_get(url: &str) -> LoginHop {
     LoginHop {
         method: "GET".to_string(),
@@ -262,7 +251,6 @@ pub fn build_orgs_page_get(url: &str) -> LoginHop {
 }
 
 /// The target of an RFC 8288 `Link` field's `rel="next"` link (`<url>; rel="next", ...`), if any.
-
 pub fn next_link(link: &str) -> Option<&str> {
     let mut rest = link;
     while let Some(open) = rest.find('<') {
@@ -308,7 +296,6 @@ pub struct GhUser {
 }
 
 /// Parse the access token out of a token-endpoint response body, accepting BOTH the JSON shape
-
 pub fn parse_access_token(body: &str) -> Option<Cred> {
     /// Only `access_token` is read, captured as the parser meets it.
     #[derive(Deserialize)]
@@ -340,7 +327,6 @@ pub fn parse_access_token(body: &str) -> Option<Cred> {
 }
 
 /// Minimal `application/x-www-form-urlencoded` value decode (`+` → space, `%XX` → byte), into a
-
 fn form_decode(s: &str) -> Zeroizing<Vec<u8>> {
     let bytes = s.as_bytes();
     let mut out = Zeroizing::new(Vec::with_capacity(bytes.len()));
@@ -380,13 +366,11 @@ pub const MAX_LOGIN_BYTES: usize = 64;
 pub const MAX_NAME_CHARS: usize = 256;
 
 /// Whether `login` is one a GitHub reply can carry: non-empty, at most [`MAX_LOGIN_BYTES`], no
-
 fn plain_login(login: &str) -> bool {
     !login.is_empty() && login.len() <= MAX_LOGIN_BYTES && !login.chars().any(char::is_control)
 }
 
 /// Parse a GitHub `/user` response body into a [`GhUser`]. Fail-CLOSED: a missing, empty or
-
 pub fn parse_user(body: &str) -> Option<GhUser> {
     let v: Value = serde_json::from_str(body.trim()).ok()?;
     let login = v
@@ -435,7 +419,6 @@ pub fn parse_user(body: &str) -> Option<GhUser> {
 }
 
 /// Parse a GitHub `/user/orgs` response (a JSON array of org objects) into `github:org/<org-login>`
-
 pub fn parse_org_groups(body: &str) -> Option<Vec<String>> {
     let v: Value = serde_json::from_str(body.trim()).ok()?;
     let mut groups = Vec::new();
@@ -449,7 +432,6 @@ pub fn parse_org_groups(body: &str) -> Option<Vec<String>> {
 }
 
 /// Assemble the identity [`Principal`] from the parsed `/user` and org groups: id `github:<login>`,
-
 pub fn build_principal(user: &GhUser, org_groups: Vec<String>) -> Principal {
     let mut p = Principal::from_id(format!("github:{}", user.login));
     p.name = Some(user.name.clone().unwrap_or_else(|| user.login.clone()));

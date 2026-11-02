@@ -40,22 +40,18 @@ pub const NAME: &str = "busbar-auth-github";
 /// The name config gives it (`auth.chain`, `identity-providers.<name>.module`).
 pub const ALIAS: &str = "github";
 /// The settings key whose value is the client secret's reference; the kernel resolves it into
-
 pub const CLIENT_SECRET_KEY: &str = "client_secret";
 
 const SECRET_REFS: &[AbiStr] = &[abi_str(CLIENT_SECRET_KEY)];
 const REWRITES: &[Rewrite] = &[alias(ALIAS)];
 /// The need a login whose settings name a `ca_cert_pem` goes out on (it trusts that root beside
-
 const NEED_ANCHORED: u32 = 0;
 /// The need every other login goes out on (the public roots only). The host refuses a need whose
-
 const NEED_PUBLIC: u32 = 1;
 /// The setting the anchored need's extra trusted root comes from (a config path the host reads).
 const CA_CERT_PATH: &str = "settings.ca_cert_pem";
 
 /// One outbound need to the IdP over the `http` transport (the scheme the http framer claims; an
-
 const fn need(trust_from: AbiStr) -> Need {
     let mut n = Need::EMPTY;
     n.direction = DIRECTION_OUTBOUND;
@@ -102,7 +98,6 @@ pub const STATEMENT: Statement = with_tail(
 const ANSWERED_MAX: usize = 1024;
 
 /// The identities short answers reached, by the ticket whose retry they wait for, each stamped with
-
 type Answered = HashMap<Ticket, (Instant, Principal)>;
 
 /// How long a short answer waits for its retry: an entry older is dropped on the next access.
@@ -122,7 +117,6 @@ fn take(map: &mut Answered, now: Instant, ticket: Ticket) -> Option<Principal> {
 }
 
 /// Keep `p` for `ticket`'s retry, at most `max` at once: entries past [`ANSWERED_TTL`] go first;
-
 fn keep(map: &mut Answered, max: usize, at: Instant, ticket: Ticket, p: Principal) -> usize {
     let mut evicted = sweep(map, at);
     if map.len() >= max && !map.contains_key(&ticket) {
@@ -148,7 +142,6 @@ fn warn_evicted(evicted: usize) {
 }
 
 /// One instance: the login (swapped whole on `refresh`) and the identities a short answer reached,
-
 pub struct Github {
     login: RwLock<Arc<GithubLogin>>,
     answered: Mutex<Answered>,
@@ -275,7 +268,6 @@ impl SafeSlot for Begin {
 }
 
 /// What a pending `complete_login` parks on its ticket: the login the flow began under, the flow,
-
 struct Parked {
     login: Arc<GithubLogin>,
     flow: LoginFlow,
@@ -284,7 +276,6 @@ struct Parked {
 }
 
 /// The login a resumed flow is driven by: the one it began under, to its end. A `refresh` swaps
-
 fn driving(parked: &Parked) -> Arc<GithubLogin> {
     parked.login.clone()
 }
@@ -359,7 +350,6 @@ impl Exchange for Unarmed {
 }
 
 /// Write `p` into the host's identity buffer and answer READY, or answer the short FAILED (every
-
 fn identify(
     g: &Github,
     ticket: Ticket,
