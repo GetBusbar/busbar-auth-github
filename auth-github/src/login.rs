@@ -1103,12 +1103,12 @@ fn id_token_nonce_binds(body: &str, minted: Option<&str>) -> bool {
             return true;
         }
         // Only the `id_token` member is deserialized; serde skips the rest unread. A repeated
-        // `id_token` or a malformed object fails the parse, which never binds.
-        let Ok(IdTokenMember {
-            id_token: member, ..
-        }) = serde_json::from_str::<IdTokenMember>(trimmed)
-        else {
-            return false;
+        // `id_token` fails the parse and never binds.
+        let member = match serde_json::from_str::<IdTokenMember>(trimmed) {
+            Ok(m) => m.id_token,
+            // A repeated `id_token` never binds; any other parse failure carries no readable
+            // `id_token` (the shape check rules it an outage), so it binds trivially.
+            Err(e) => return !e.to_string().starts_with("duplicate field"),
         };
         match member {
             Member::Absent => return true,

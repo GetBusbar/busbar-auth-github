@@ -1702,7 +1702,7 @@ fn the_id_token_is_found_by_the_shape_of_the_answer() {
         r#"{"access_token":"x","id_token":123}"#,
         Some("minted")
     ));
-    // A null member, a repeated member and a malformed object never bind.
+    // A null member and a repeated member never bind.
     assert!(!id_token_nonce_binds(
         r#"{"id_token":null}"#,
         Some("minted")
@@ -1712,7 +1712,9 @@ fn the_id_token_is_found_by_the_shape_of_the_answer() {
         &format!(r#"{{"id_token":"{bound_once}","id_token":"{bound_once}"}}"#),
         Some("minted")
     ));
-    assert!(!id_token_nonce_binds(r#"{"id_token":"#, Some("minted")));
+    // A malformed object carries no readable id_token; the shape check rules it an outage.
+    assert!(id_token_nonce_binds(r#"{"id_token":"#, Some("minted")));
+    assert!(id_token_nonce_binds("{not json", Some("minted")));
     // A form-shaped answer carrying a foreign nonce does not bind.
     assert!(!id_token_nonce_binds(
         &format!("access_token=x&id_token={foreign}"),
