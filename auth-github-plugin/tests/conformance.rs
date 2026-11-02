@@ -539,7 +539,11 @@ fn an_auth_door_loaded_as_another_kind_is_refused() {
 
 /// The envelope's log records as the host receives them: `(severity, text)`.
 #[derive(Default)]
-struct Logs(std::sync::Mutex<Vec<(u8, String)>>);
+struct Logs(
+    std::sync::Mutex<Vec<(u8, String)>>,
+    std::sync::Mutex<Vec<Vec<u8>>>,
+    std::sync::atomic::AtomicBool,
+);
 
 #[test]
 fn begin_login_requires_each_utf8_binding_field_through_both_doors() {
@@ -617,13 +621,24 @@ fn unsupported_verify_is_explained_through_both_doors_without_echoing_credential
 }
 
 impl busbar_plugin_loader::dispatch::EnvelopeSink for Logs {
-    fn metric(&self, _: busbar_plugin_loader::dispatch::Metric<'_>) {}
+    fn metric(&self, m: busbar_plugin_loader::dispatch::Metric<'_>) {
+        self.1
+            .lock()
+            .unwrap()
+            .extend(m.labels.iter().map(|label| label.to_vec()));
+    }
     fn diag(&self, d: busbar_plugin_loader::dispatch::Diagnostic<'_>) {
+        self.1
+            .lock()
+            .unwrap()
+            .extend([d.name.to_vec(), d.text.to_vec()]);
         if let Ok(mut logs) = self.0.lock() {
             logs.push((d.severity, String::from_utf8_lossy(d.text).into_owned()));
         }
     }
-    fn dropped(&self, _: busbar_plugin_loader::dispatch::Dropped) {}
+    fn dropped(&self, _: busbar_plugin_loader::dispatch::Dropped) {
+        self.2.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
 }
 
 #[test]

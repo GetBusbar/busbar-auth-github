@@ -59,7 +59,7 @@ impl Conns for RateLimited {
         let successful_body = self.success.then(|| {
             let sent = self.sent.lock().unwrap();
             match sent[(conn.0 - 1) as usize].as_str() {
-                "/login/oauth/access_token" => r#"{"access_token":"fixture-token"}"#,
+                "/login/oauth/access_token" => r#"{"access_token":"gho_conformance_token"}"#,
                 "/user" => r#"{"login":"identity-canary","id":42}"#,
                 "/user/orgs?per_page=100" => "[]",
                 "/user/orgs?page=2" => r#"[{"login":"second-page-canary"}]"#,
@@ -319,6 +319,7 @@ fn short_answer_capacity_eviction_warns_without_exposing_the_identity() {
             for secret in [
                 "identity-canary",
                 "fixture-token",
+                "gho_conformance_token",
                 "code-canary",
                 "verifier-canary",
                 SECRET,
@@ -404,6 +405,12 @@ fn a_successful_login_and_an_empty_code_are_compared_through_both_doors() {
                     - crossings,
                 1
             );
+            leg.push(format!(
+                "{:?} lease={} {}",
+                done.outcome,
+                done.lease != 0,
+                String::from_utf8_lossy(done.error.as_deref().unwrap_or_default())
+            ));
             let output = &done.frame.as_ref().unwrap().out;
             if code.is_empty() {
                 assert_eq!(output.verdict, auth::LOGIN_BAD_CREDENTIAL);
@@ -457,6 +464,16 @@ fn a_successful_login_and_an_empty_code_are_compared_through_both_doors() {
             assert!(!text.contains(secret));
         }
         assert_eq!(close(&p), "Ready lease=false ");
+        let lifecycle = load(
+            dropped,
+            Bind {
+                sink: logs.clone(),
+                ..bind(&d)
+            },
+        );
+        let mut emitted = transcript(&lifecycle, CFG);
+        emitted.extend(leg.iter().cloned());
+        assert_github_credentials_stay_private(&logs, &emitted);
         answers.push(leg);
     }
     assert_eq!(answers[0], answers[1]);
@@ -618,6 +635,62 @@ mod custody {
             }
             assert_eq!(io(&owner, stream, true).0, Outcome::Ready);
             assert_eq!(close_stream(&owner, stream).0, Outcome::Ready);
+        }
+    }
+}
+
+// The GitHub credential test scans raw envelope fields and every spelling the old suite checked.
+fn assert_github_credentials_stay_private(logs: &Logs, answers: &[String]) {
+    use base64::Engine as _;
+    assert!(
+        !logs.2.load(std::sync::atomic::Ordering::Relaxed),
+        "credential capture lost an envelope"
+    );
+    let inputs: serde_json::Value =
+        serde_json::from_str(include_str!("../conformance.json")).unwrap();
+    let mut secrets: Vec<_> = inputs["credentials"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap())
+        .collect();
+    secrets.extend([SECRET, "conformance-code", "conformance-verifier"]);
+    let mut emitted = logs.1.lock().unwrap().clone();
+    emitted.extend(answers.iter().map(|answer| answer.as_bytes().to_vec()));
+    for secret in secrets {
+        let mut upper = String::new();
+        let mut lower = String::new();
+        for byte in secret.bytes() {
+            if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~') {
+                upper.push(byte as char);
+                lower.push(byte as char);
+            } else {
+                upper.push_str(&format!("%{byte:02X}"));
+                lower.push_str(&format!("%{byte:02x}"));
+            }
+        }
+        let spellings = [
+            secret.to_owned(),
+            upper,
+            lower,
+            base64::engine::general_purpose::STANDARD
+                .encode(secret)
+                .trim_end_matches('=')
+                .to_owned(),
+            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(secret),
+            secret.bytes().map(|b| format!("{b:02x}")).collect(),
+            secret.bytes().map(|b| format!("{b:02X}")).collect(),
+        ];
+        for bytes in &emitted {
+            for spelling in &spellings {
+                assert!(!spelling.is_empty());
+                assert!(
+                    !bytes
+                        .windows(spelling.len())
+                        .any(|window| window == spelling.as_bytes()),
+                    "GitHub credential escaped into answer/envelope"
+                );
+            }
         }
     }
 }
