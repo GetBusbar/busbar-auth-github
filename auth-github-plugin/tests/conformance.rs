@@ -862,6 +862,7 @@ fn github_serving_requires_its_connection_table_through_both_doors() {
         plugin: NAME.to_owned(),
         needs: 2,
     };
+    assert!(expected.to_string().contains(&format!("plugin '{NAME}'")));
     assert_eq!(
         load_linked::<Auth>(
             &row(),
