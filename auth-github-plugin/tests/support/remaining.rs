@@ -16,13 +16,19 @@ use std::sync::Mutex;
 const LOCAL: &str = r#"{"client_id":"Iv1.conformance","token_base":"http://127.0.0.1:8080","api_base":"http://127.0.0.1:8080"}"#;
 struct RateLimited {
     stream: bool,
+    streams: busbar_contract::conn::ConnSlab<()>,
     hint: Option<u64>,
     success: bool,
     reads: Mutex<HashMap<u64, u8>>,
     sent: Mutex<Vec<String>>,
 }
 impl Conns for RateLimited {
-    fn open(&self, _: InstanceId, need: NeedId, desc: &OpenDesc<'_>) -> Result<ConnId, ConnError> {
+    fn open(
+        &self,
+        caller: InstanceId,
+        need: NeedId,
+        desc: &OpenDesc<'_>,
+    ) -> Result<ConnId, ConnError> {
         if need.0 >= 2 {
             return Err(ConnError::UndeclaredNeed);
         }
@@ -31,19 +37,24 @@ impl Conns for RateLimited {
         }
         let mut sent = self.sent.lock().unwrap();
         sent.push(String::from_utf8_lossy(desc.head_target).into_owned());
-        let id = sent.len() as u64;
-        self.reads.lock().unwrap().insert(id, 0);
-        Ok(ConnId(id))
+        let id = if self.stream {
+            self.streams.insert(caller, need, ())?
+        } else {
+            ConnId(sent.len() as u64)
+        };
+        self.reads.lock().unwrap().insert(id.0, 0);
+        Ok(id)
     }
     fn write(
         &self,
-        _: InstanceId,
-        _: ConnId,
+        caller: InstanceId,
+        conn: ConnId,
         bytes: &[u8],
         _: bool,
         _: bool,
     ) -> Result<usize, ConnError> {
         if self.stream {
+            self.streams.get(caller, conn)?;
             Ok(bytes.len())
         } else {
             Err(ConnError::Closed)
@@ -51,11 +62,14 @@ impl Conns for RateLimited {
     }
     fn read(
         &self,
-        _: InstanceId,
+        caller: InstanceId,
         conn: ConnId,
         _: u64,
         buf: &mut [u8],
     ) -> Result<Piece, ConnError> {
+        if self.stream {
+            self.streams.get(caller, conn)?;
+        }
         let successful_body = self.success.then(|| {
             let sent = self.sent.lock().unwrap();
             match sent[(conn.0 - 1) as usize].as_str() {
@@ -110,7 +124,10 @@ impl Conns for RateLimited {
     fn facts(&self, _: InstanceId, _: ConnId) -> Result<ConnFacts, ConnError> {
         Err(ConnError::Closed)
     }
-    fn close(&self, _: InstanceId, conn: ConnId) -> Result<(), ConnError> {
+    fn close(&self, caller: InstanceId, conn: ConnId) -> Result<(), ConnError> {
+        if self.stream {
+            self.streams.remove(caller, conn)?;
+        }
         self.reads.lock().unwrap().remove(&conn.0);
         Ok(())
     }
@@ -173,6 +190,7 @@ fn retry_hint_reaches_host_owned_extensions_through_both_doors() {
         for hint in [None, Some(0), Some(120), Some(u64::MAX)] {
             let conns = Arc::new(RateLimited {
                 stream: false,
+                streams: Default::default(),
                 hint,
                 success: false,
                 reads: Mutex::new(HashMap::new()),
@@ -281,6 +299,7 @@ fn short_answer_capacity_eviction_warns_without_exposing_the_identity() {
     for dropped in [false, true] {
         let conns = Arc::new(RateLimited {
             stream: false,
+            streams: Default::default(),
             hint: None,
             success: true,
             reads: Mutex::new(HashMap::new()),
@@ -366,6 +385,7 @@ fn a_successful_login_and_an_empty_code_are_compared_through_both_doors() {
     for dropped in [false, true] {
         let conns = Arc::new(RateLimited {
             stream: false,
+            streams: Default::default(),
             hint: None,
             success: true,
             reads: Mutex::new(HashMap::new()),
@@ -605,6 +625,7 @@ mod custody {
         let d = dispatcher();
         let table = Arc::new(RateLimited {
             stream: true,
+            streams: Default::default(),
             hint: None,
             success: false,
             reads: Mutex::new(HashMap::new()),
@@ -614,6 +635,7 @@ mod custody {
             let owner = load(
                 dropped,
                 Bind {
+                    instance: Arc::from("github-custody-owner"),
                     conns: ConnTable::Host(table.clone()),
                     ..bind(&d)
                 },
@@ -621,10 +643,12 @@ mod custody {
             let other = load(
                 dropped,
                 Bind {
+                    instance: Arc::from("github-custody-other"),
                     conns: ConnTable::Host(table.clone()),
                     ..bind(&d)
                 },
             );
+            assert_ne!(owner.instance(), other.instance());
             assert_eq!(open(&owner, LOCAL, Some(SECRET)), "Ready lease=false ");
             assert_eq!(open(&other, LOCAL, Some(SECRET)), "Ready lease=false ");
             let (outcome, stream, text) = establish(&owner, 1, "127.0.0.1:8080");
