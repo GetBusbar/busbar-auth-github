@@ -185,8 +185,12 @@ fn retry_hint_reaches_host_owned_extensions_through_both_doors() {
                 .wait(Duration::from_secs(30))
                 .expect("login completed");
             assert_eq!(done.outcome, Outcome::Ready);
-            assert_eq!(done.frame.out.verdict, auth::LOGIN_OUTAGE);
-            let ext = done.frame.out.head.extensions;
+            let frame = done
+                .frame
+                .as_ref()
+                .expect("Ready returns the completed frame");
+            assert_eq!(frame.out.verdict, auth::LOGIN_OUTAGE);
+            let ext = frame.out.head.extensions;
             match hint {
                 None => assert_eq!(ext.len, 0),
                 Some(hint) => {

@@ -13,7 +13,7 @@
 busbar_test_kit::conformance_host! {
     far_end: "localhost:42841",
     doors: [
-        ("tcp", busbar_transport_tcp::door::MACRO_DOOR),
+        ("tcp", busbar_transport_tcp::linked::MACRO_DOOR),
         ("http", busbar_transport_http::door::MACRO_DOOR),
     ],
     http_need: true,
