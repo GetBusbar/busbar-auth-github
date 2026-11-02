@@ -574,6 +574,52 @@ fn begin_login_refuses_a_missing_or_non_utf8_field_through_both_doors() {
     }
 }
 
+/// The scopes a host requests in `BeginLoginIn.scopes` reach the authorize URL (merged with the
+/// configured ones, de-duplicated); a scope that is not UTF-8 is refused, not skipped. Both doors.
+#[test]
+fn begin_login_carries_the_requested_scopes_through_both_doors() {
+    const BAD: AbiStr = AbiStr::of_bytes(b"\xff\xfe");
+    let d = dispatcher();
+    for (door, p) in [("linked", linked(&d)), ("dropped-in", dropped(&d))] {
+        assert_eq!(open(&p, CFG, Some(SECRET)), "Ready lease=false ");
+        let call = |scopes: &[AbiStr]| {
+            begin_with(
+                &p,
+                s("https://node.example/auth/token"),
+                s("st"),
+                s("ch"),
+                scopes,
+            )
+        };
+        let (spoken, url) = call(&[s("gist"), s("read:user")]);
+        let url = url.unwrap_or_default();
+        assert!(spoken.starts_with("Ready"), "{door}: {spoken}");
+        let scope = url
+            .split('&')
+            .find_map(|kv| kv.strip_prefix("scope="))
+            .unwrap_or_default()
+            .replace("%3A", ":")
+            .replace("%20", " ")
+            .replace('+', " ");
+        let scopes: Vec<&str> = scope.split(' ').collect();
+        assert!(
+            scopes.contains(&"gist"),
+            "{door}: requested scope missing: {url}"
+        );
+        assert_eq!(
+            scopes.iter().filter(|x| **x == "read:user").count(),
+            1,
+            "{door}: scope not de-duplicated: {url}"
+        );
+        let (spoken, url) = call(&[s("gist"), BAD]);
+        assert!(
+            !spoken.starts_with("Ready"),
+            "{door}: bad scope accepted: {spoken}"
+        );
+        assert!(url.is_none(), "{door}: bad scope leaked a URL: {url:?}");
+    }
+}
+
 /// RED ARM 1: the dropped-in door under a different operator config is a different transcript, so
 /// the equality in the both-ways test is not vacuous.
 #[test]

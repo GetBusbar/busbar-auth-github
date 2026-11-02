@@ -237,8 +237,9 @@ fn blob_text(b: Lent<'_, Blob>) -> Option<&str> {
     std::str::from_utf8(b.bytes()).ok()
 }
 
-/// `begin_login`: the GitHub authorize URL, leased. The requested scopes are not read (the safe
-/// SDK lends no accessor for `BeginLoginIn.scopes`); the configured scopes are asked for.
+/// `begin_login`: the GitHub authorize URL, leased. The scopes the host requests
+/// (`BeginLoginIn.scopes`) are asked for alongside the configured ones; a requested scope that is
+/// not UTF-8 refuses the call rather than being skipped.
 #[derive(Debug)]
 pub struct Begin;
 
@@ -263,10 +264,19 @@ impl SafeSlot for Begin {
                 "begin_login: redirect_uri, state and code_challenge are required UTF-8",
             ));
         };
+        let mut requested = Vec::new();
+        for scope in input.scopes().iter() {
+            let Some(scope) = text(scope) else {
+                return out.fail(Refusal::failed(
+                    "begin_login: a requested scope is absent or not UTF-8",
+                ));
+            };
+            requested.push(scope.to_owned());
+        }
         let url = h
             .life()
             .login()
-            .begin_login(redirect_uri, state, challenge, &[]);
+            .begin_login(redirect_uri, state, challenge, &requested);
         out.set(|o| &o.shape, BEGIN_AUTHORIZE);
         out.lease_str(|o| &o.authorize_url, h.leases(), url);
         Outcome::Ready
