@@ -1484,6 +1484,33 @@ mod logging {
         }
     }
 
+    /// The token endpoint declining the client itself (invalid_client / unauthorized_client) is the
+    /// operator's misconfiguration: it warns, naming client_secret. A user's bad code (invalid_grant)
+    /// stays at info.
+    #[test]
+    fn a_token_endpoint_refusing_the_client_warns_the_operator() {
+        let l = login();
+        for body in [
+            r#"{"error":"invalid_client","error_description":"x"}"#,
+            r#"{"error":"unauthorized_client"}"#,
+        ] {
+            let mut s = Script::happy().answer(TOKEN_URL, 401, body);
+            let cap = WarnCapture::default();
+            let step = tracing::subscriber::with_default(cap.clone(), || run(&l, &mut s));
+            assert_eq!(step, LoginStep::BadCredential, "{body}");
+            assert!(
+                cap.contains("client_secret"),
+                "{body}: {:?}",
+                cap.messages()
+            );
+        }
+        let mut s = Script::happy().answer(TOKEN_URL, 400, r#"{"error":"invalid_grant"}"#);
+        let cap = WarnCapture::default();
+        let step = tracing::subscriber::with_default(cap.clone(), || run(&l, &mut s));
+        assert_eq!(step, LoginStep::BadCredential);
+        assert!(!cap.contains("client_secret"), "{:?}", cap.messages());
+    }
+
     /// RED L8: a hop that could not be made (refused, connect, TLS, timeout, a request that could
     /// not be framed) ends the login as an outage with one WARN naming the hop, never silently.
     #[test]
