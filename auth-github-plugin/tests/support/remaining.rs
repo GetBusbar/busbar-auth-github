@@ -150,8 +150,8 @@ impl DeclaredConns for RateLimited {
     }
     fn declare(
         &self,
-        _: InstanceId,
-        _: NeedId,
+        owner: InstanceId,
+        need: NeedId,
         spec: &ReadNeed,
         _: Option<&str>,
         trust: Option<&str>,
@@ -159,14 +159,21 @@ impl DeclaredConns for RateLimited {
         if !spec.trust_from.is_empty() && trust.is_none() {
             Err(ConnError::Refused)
         } else {
+            if self.stream {
+                self.streams.declare(owner, need);
+            }
             Ok(())
         }
     }
-    fn declared(&self, _: InstanceId, need: NeedId) -> Option<Result<(), ConnError>> {
+    fn declared(&self, owner: InstanceId, need: NeedId) -> Option<Result<(), ConnError>> {
         Some(if need.0 == 0 {
             Err(ConnError::Refused)
         } else if need.0 == 1 {
-            Ok(())
+            if self.stream {
+                self.streams.check_need(owner, need)
+            } else {
+                Ok(())
+            }
         } else {
             Err(ConnError::UndeclaredNeed)
         })
