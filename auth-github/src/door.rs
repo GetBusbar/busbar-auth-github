@@ -2,20 +2,6 @@
 // Copyright (C) 2026 Busbar Inc and contributors
 
 //! The door: the GitHub login on the auth kind's table (`busbar_contract::abi::auth`, v3), every
-//! slot a [`SafeSlot`] over the SDK's safe surface, so this crate holds no `unsafe`. The verify-only
-//! `auth_verify_door!` refuses the login ops, so the door is this crate's own `plugin_door!`.
-//!
-//! * The lifecycle is the SDK's ([`Life`]): `validate`/`open`/`refresh` parse the settings
-//!   ([`GithubLogin::open`]); the client secret is the Statement's one secret
-//!   reference, resolved by the kernel into `OpenIn.secrets[0]`, never a settings value.
-//! * `begin_login` answers the GitHub authorize URL under a lease.
-//! * `complete_login` runs the hop chain itself ([`GithubLogin::drive`]) over one of the Statement's
-//!   outbound needs, each hop one framed `exchange()`; PENDING parks the flow on the ticket. A
-//!   ticket-less call cannot wait on I/O and answers REFUSED. A parked flow is driven by the login
-//!   it began under, to its end, whatever `refresh` swapped in meanwhile. An identity that does
-//!   not fit the host's buffer is the short answer, and the retry is served from the identity
-//!   reached (an authorization code redeems once).
-//! * `verify` and the outbound ops are not served (the tail states only `CAP_LOGIN`): REFUSED.
 
 use std::collections::HashMap;
 use std::marker::PhantomData;
@@ -54,25 +40,22 @@ pub const NAME: &str = "busbar-auth-github";
 /// The name config gives it (`auth.chain`, `identity-providers.<name>.module`).
 pub const ALIAS: &str = "github";
 /// The settings key whose value is the client secret's reference; the kernel resolves it into
-/// `OpenIn.secrets[0]`.
+
 pub const CLIENT_SECRET_KEY: &str = "client_secret";
 
 const SECRET_REFS: &[AbiStr] = &[abi_str(CLIENT_SECRET_KEY)];
 const REWRITES: &[Rewrite] = &[alias(ALIAS)];
 /// The need a login whose settings name a `ca_cert_pem` goes out on (it trusts that root beside
-/// the public ones).
+
 const NEED_ANCHORED: u32 = 0;
 /// The need every other login goes out on (the public roots only). The host refuses a need whose
-/// `trust_from` names nothing at declaration, so the anchored one of a login with no
-/// `ca_cert_pem` is never asked for a connection.
+
 const NEED_PUBLIC: u32 = 1;
 /// The setting the anchored need's extra trusted root comes from (a config path the host reads).
 const CA_CERT_PATH: &str = "settings.ca_cert_pem";
 
 /// One outbound need to the IdP over the `http` transport (the scheme the http framer claims; an
-/// `https` target is secured by the connector), its target named per hop (token, `/user`,
-/// `/user/orgs`), bounded by a per-hop timeout, trusting `trust_from`'s root beside the public
-/// roots (`ABSENT`: the public roots only).
+
 const fn need(trust_from: AbiStr) -> Need {
     let mut n = Need::EMPTY;
     n.direction = DIRECTION_OUTBOUND;
@@ -101,7 +84,7 @@ const TAIL: AuthTail = {
     let mut t = AuthTail::EMPTY;
     t.caps = CAP_LOGIN;
     t.login_kind = LOGIN_KIND_REDIRECT;
-    // No inbound point: the plugin does not verify (the tail states no `CAP_INBOUND`).
+
     t.operator_principal = abi_str("");
     t
 };
@@ -119,7 +102,7 @@ pub const STATEMENT: Statement = with_tail(
 const ANSWERED_MAX: usize = 1024;
 
 /// The identities short answers reached, by the ticket whose retry they wait for, each stamped with
-/// when it was kept.
+
 type Answered = HashMap<Ticket, (Instant, Principal)>;
 
 /// How long a short answer waits for its retry: an entry older is dropped on the next access.
@@ -139,8 +122,7 @@ fn take(map: &mut Answered, now: Instant, ticket: Ticket) -> Option<Principal> {
 }
 
 /// Keep `p` for `ticket`'s retry, at most `max` at once: entries past [`ANSWERED_TTL`] go first;
-/// at the cap the OLDEST entry goes, never the rest (an in-flight short answer awaiting its retry
-/// must survive).
+
 fn keep(map: &mut Answered, max: usize, at: Instant, ticket: Ticket, p: Principal) -> usize {
     let mut evicted = sweep(map, at);
     if map.len() >= max && !map.contains_key(&ticket) {
@@ -166,7 +148,7 @@ fn warn_evicted(evicted: usize) {
 }
 
 /// One instance: the login (swapped whole on `refresh`) and the identities a short answer reached,
-/// kept for the retry on the same ticket.
+
 pub struct Github {
     login: RwLock<Arc<GithubLogin>>,
     answered: Mutex<Answered>,
@@ -293,8 +275,7 @@ impl SafeSlot for Begin {
 }
 
 /// What a pending `complete_login` parks on its ticket: the login the flow began under, the flow,
-/// the exchange in flight, and how many connector services the finished hops made (the next hop's
-/// handles count on from there).
+
 struct Parked {
     login: Arc<GithubLogin>,
     flow: LoginFlow,
@@ -303,8 +284,7 @@ struct Parked {
 }
 
 /// The login a resumed flow is driven by: the one it began under, to its end. A `refresh` swaps
-/// the instance's login for the flows begun after it; a flow parked before it keeps its own client
-/// secret, bases and allowlist (the hop parked on a pending exchange was rendered by it).
+
 fn driving(parked: &Parked) -> Arc<GithubLogin> {
     parked.login.clone()
 }
@@ -342,7 +322,6 @@ impl Exchange for Over<'_, '_> {
                 *self.base = self.c.issued();
                 match answer {
                     Ok(reply) => {
-                        // The whole reply wipes when it goes; its body moves on, uncopied.
                         let mut reply = Zeroizing::new(reply);
                         Fetched::Ready(HopResponse {
                             status: reply.status,
@@ -355,7 +334,7 @@ impl Exchange for Over<'_, '_> {
                             body: Zeroizing::new(std::mem::take(&mut reply.body)),
                         })
                     }
-                    // A reply past the cap is refused by the exchange (`REPLY_OVER_BOUND`).
+
                     Err(e) => {
                         tracing::warn!(module = "github", error = ?e, "github login: the hop exchange failed");
                         Fetched::Unreachable
@@ -380,7 +359,7 @@ impl Exchange for Unarmed {
 }
 
 /// Write `p` into the host's identity buffer and answer READY, or answer the short FAILED (every
-/// `needed_*` at its full size), keeping `p` for the retry on `ticket`.
+
 fn identify(
     g: &Github,
     ticket: Ticket,
@@ -417,7 +396,6 @@ impl SafeSlot for Complete {
         };
         let ticket = instance.ticket();
         if ticket.is_none() {
-            // The exchange waits on I/O: the host submits the op on a ticket.
             return refused(
                 "no-ticket",
                 "complete_login arrived without a ticket (it waits on I/O); the host resubmits it on one",

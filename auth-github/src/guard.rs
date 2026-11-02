@@ -2,11 +2,6 @@
 // Copyright (C) 2026 Busbar Inc and contributors
 
 //! The hop guard applied to every login hop, enforced by the plugin itself in addition to the
-//! need's egress class.
-//!
-//! The host readers and the private/metadata judgements are `busbar_contract::net`, the one
-//! definition. The operator's `security.{allow,blocked}_metadata_hosts` / `allow_all_metadata` do not
-//! reach the hop vetting, so only the hardcoded denylist is here.
 
 use busbar_contract::net::{
     extract_normalized_host, host_is_cloud_metadata, host_is_private_or_loopback, scheme_is,
@@ -22,11 +17,7 @@ pub struct Refused;
 const FORBIDDEN_HOP_HEADERS: [&str; 3] = ["host", "content-length", "transfer-encoding"];
 
 /// The hop host-allowlist, derived from the OPERATOR's settings only: the host of every absolute http(s) URL string
-/// anywhere in the settings tree, lowercased. Never derived from anything an IdP answered.
-///
-/// A key the operator left at its default is not in the settings, so its host is not allowed: a GitHub
-/// method whose `token_base`/`api_base` were not written out would have every hop refused.
-/// [`crate::login::GithubLogin::open`] therefore refuses such settings up front, explained.
+
 pub fn collect_allowed_hosts(settings: &Value) -> HashSet<String> {
     fn walk(v: &Value, hosts: &mut HashSet<String>) {
         match v {
@@ -44,17 +35,15 @@ pub fn collect_allowed_hosts(settings: &Value) -> HashSet<String> {
     }
     let mut hosts = HashSet::new();
     if let Value::Object(o) = settings {
-        // Each explicitly written endpoint contributes its host.
         o.values().for_each(|v| walk(v, &mut hosts));
     }
     hosts
 }
 
 /// Vet a hop URL: the host must be allow-listed; https for a public host (http only for a
-/// loopback/private one); never a cloud-metadata host.
+
 pub fn vet_hop_url(url: &str, allowed: &HashSet<String>) -> Result<(), Refused> {
     let Some(host) = extract_normalized_host(url) else {
-        // The URL is not named: it may carry userinfo.
         tracing::warn!(
             module = "github",
             "github login: hop refused, its host could not be read from the URL"
@@ -82,10 +71,8 @@ pub fn vet_hop_url(url: &str, allowed: &HashSet<String>) -> Result<(), Refused> 
 }
 
 /// Sanitize a hop header, answering the header as the http stack would write it: the name
-/// lowercased (`HeaderName::from_bytes`), the value unchanged (`HeaderValue::from_str`). A hop's
-/// headers are public: the bearer is the chip's ([`crate::login::HopRequest::bearer`]).
+
 pub fn sanitize_hop_header(name: &str, value: &str) -> Result<(String, String), Refused> {
-    // Only the header NAME is ever logged (as `?`, so CR/LF cannot forge a line): never the value.
     let refuse = |why: &str| {
         tracing::warn!(module = "github", header = ?name, "github login: hop refused, {why}");
         Err(Refused)

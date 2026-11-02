@@ -2,8 +2,6 @@
 // Copyright (C) 2026 Busbar Inc and contributors
 
 //! The plugin-owned login, driven over a scripted exchange. Hermetic: no network. Each arm states
-//! the 1.5.5 answer it keeps (the core hop loop in busbar v1.5.5 `auth/token.rs` over the v1.0.3
-//! step machine).
 
 #[path = "audit_tests.rs"]
 mod audit;
@@ -93,7 +91,7 @@ impl Script {
 }
 
 /// A request's header fields as the SDK frames them (the chip's sealed bearer included), read
-/// back off the head it would send.
+
 fn plain(r: &HopRequest) -> Vec<(String, String)> {
     let wire = r.wire(MAX_HOP_REPLY_BYTES).expect("the hop frames");
     let head = chip::framed_head(&wire);
@@ -178,8 +176,7 @@ fn a_member_signs_in_with_org_groups() {
 }
 
 /// The token exchange as 1.5.5's core sent it: the form in the module's order with the secret
-/// injected into its slot, serde_urlencoded bytes, `content-type`; then (RED L3) `accept:
-/// application/json`, so GitHub answers JSON rather than its form-encoded default.
+
 #[test]
 fn the_token_exchange_carries_the_plugins_own_secret_in_1_5_5_bytes() {
     let l = login();
@@ -208,7 +205,7 @@ fn the_token_exchange_carries_the_plugins_own_secret_in_1_5_5_bytes() {
 }
 
 /// The authenticated GETs: no body and (RED L4) no `content-type` (only a hop with a form body
-/// carries one), the bearer, then the module's headers, lowercase, in order.
+
 #[test]
 fn the_rest_gets_carry_the_bearer_and_user_agent() {
     let l = login();
@@ -232,8 +229,7 @@ fn the_rest_gets_carry_the_bearer_and_user_agent() {
 }
 
 /// RED ARM (non-member): a user outside the org signs in, as in 1.5.5, WITHOUT that org's group, so
-/// an `auth.role_bindings.github: "github:org/acme"` binding never admits them. Membership is the
-/// org list GitHub answers; the plugin invents none.
+
 #[test]
 fn red_a_non_member_carries_no_group_for_the_org() {
     let l = login();
@@ -252,7 +248,6 @@ fn red_a_non_member_carries_no_group_for_the_org() {
         ]
     );
 
-    // A member of nothing: identified, zero groups (a VALID empty list).
     let mut s = Script::happy().answer(ORGS_URL, 200, "[]");
     assert_eq!(
         identity(run(&l, &mut s)).roles,
@@ -261,7 +256,7 @@ fn red_a_non_member_carries_no_group_for_the_org() {
 }
 
 /// RED (ruling 2026-10-27): an identity provider that answers 5xx or 429 on any hop is an outage
-/// (the host answers 503, retryable), never a declined credential, and the flow goes no further.
+
 #[test]
 fn an_idp_5xx_or_429_is_an_outage_not_a_decline() {
     let l = login();
@@ -276,8 +271,7 @@ fn an_idp_5xx_or_429_is_an_outage_not_a_decline() {
 }
 
 /// RED ARM (revoked token): GitHub answers `/user` 401 for a revoked or expired bearer. 1.5.5 fed
-/// the 401 back and the module declined ("Sign-in was declined"): a bad credential, never an
-/// outage, and the org hop is never made with a dead token.
+
 #[test]
 fn red_a_revoked_token_is_declined_and_goes_no_further() {
     let l = login();
@@ -289,14 +283,12 @@ fn red_a_revoked_token_is_declined_and_goes_no_further() {
     assert_eq!(run(&l, &mut s), LoginStep::BadCredential);
     assert_eq!(s.targets(), vec![TOKEN_URL, USER_URL]);
 
-    // Revoked between /user and /user/orgs: declined as well.
     let mut s = Script::happy().answer(ORGS_URL, 401, r#"{"message":"Bad credentials"}"#);
     assert_eq!(run(&l, &mut s), LoginStep::BadCredential);
 }
 
 #[test]
 fn a_bad_code_answered_200_with_an_error_body_is_declined() {
-    // GitHub answers a bad/expired code with HTTP 200 and `{"error": ...}`: no token, declined.
     let l = login();
     let mut s = Script::happy().answer(TOKEN_URL, 200, r#"{"error":"bad_verification_code"}"#);
     assert_eq!(run(&l, &mut s), LoginStep::BadCredential);
@@ -304,9 +296,7 @@ fn a_bad_code_answered_200_with_an_error_body_is_declined() {
 }
 
 /// RED G2 (owner-signed 2026-10-30): GitHub answers a token exchange it refuses with HTTP 200 and an
-/// `error`. Only the user's own codes (a bad or expired code, an invalid grant) are a declined
-/// sign-in; the operator's (wrong client credentials, a redirect_uri mismatch, a suspended app),
-/// any other code, and a 2xx with neither a token nor an error are an outage. Both reply shapes.
+
 #[test]
 fn red_g2_a_200_token_error_is_declined_only_for_the_users_own_code() {
     let l = login();
@@ -365,7 +355,7 @@ fn an_unreachable_idp_is_an_outage() {
 }
 
 /// A truncated org list is never a zero-group login; it is no sign-in answer either (G3,
-/// owner-signed 2026-10-30): an outage.
+
 #[test]
 fn a_malformed_org_list_is_an_outage_not_a_zero_group_login() {
     let l = login();
@@ -375,8 +365,7 @@ fn a_malformed_org_list_is_an_outage_not_a_zero_group_login() {
 }
 
 /// RED G3 (owner-signed 2026-10-30): a malformed or foreign 2xx from `/user` or `/user/orgs` is
-/// the far end answering something that is no sign-in answer: an outage, never a declined
-/// sign-in, and nothing more is sent.
+
 #[test]
 fn red_g3_a_malformed_rest_answer_is_an_outage() {
     let l = login();
@@ -416,7 +405,7 @@ fn link_to(next: Option<&str>) -> ReplyFields {
 }
 
 /// RED G4: a user in more orgs than one page holds keeps every org: `/user/orgs` is followed by
-/// its `Link: rel="next"` to the end.
+
 #[test]
 fn red_g4_the_org_list_is_followed_past_page_one() {
     let l = login();
@@ -454,7 +443,7 @@ fn red_g4_the_org_list_is_followed_past_page_one() {
         s.targets(),
         vec![TOKEN_URL, USER_URL, ORGS_URL, p2.as_str(), p3.as_str()]
     );
-    // Every page is authenticated with the same token.
+
     for page in &s.issued[2..] {
         assert!(plain(page)
             .iter()
@@ -463,8 +452,7 @@ fn red_g4_the_org_list_is_followed_past_page_one() {
 }
 
 /// RED G4: the org list is read for at most 10 pages (1000 orgs); a next link left after the
-/// tenth is a WARN that the org groups are truncated, and the login identifies with what it read
-/// (fail-safe: fewer roles, never more).
+
 #[test]
 fn red_g4_the_org_list_stops_at_ten_pages_with_a_warn() {
     use busbar_test_kit::warn_capture::WarnCapture;
@@ -493,7 +481,7 @@ fn red_g4_the_org_list_stops_at_ten_pages_with_a_warn() {
 }
 
 /// RED G4: a next link is followed only on the API's own origin (and through the hop guard): one
-/// to another host, or to plain http, is an outage and is never sent.
+
 #[test]
 fn red_g4_a_next_link_off_the_api_origin_is_never_followed() {
     let l = login();
@@ -511,9 +499,7 @@ fn red_g4_a_next_link_off_the_api_origin_is_never_followed() {
 }
 
 /// RED L11: the far end's strings enter the Principal filtered. A login or an org login holding a
-/// control character, or longer than 64 bytes (GitHub's own limit is 39), is no GitHub reply: an
-/// outage. A display name holding a control character is not taken (the login stands in), and one
-/// longer than 256 characters is cut to 256.
+
 #[test]
 fn red_l11_far_end_strings_enter_the_principal_filtered() {
     let l = login();
@@ -573,7 +559,7 @@ fn a_callback_missing_the_verifier_is_declined_with_no_exchange() {
 }
 
 /// RED L7: an empty code, redirect_uri or code_verifier is refused before the exchange: the code
-/// is never spent on a callback that cannot complete.
+
 #[test]
 fn red_l7_an_empty_callback_value_is_declined_before_the_exchange() {
     let l = login();
@@ -598,7 +584,7 @@ fn red_l7_an_empty_callback_value_is_declined_before_the_exchange() {
 }
 
 /// Slow I/O pends: each hop answers PENDING once, the flow parks on it, and the next drive re-issues
-/// the SAME request (a one-shot exchange serves its stored result) and carries on.
+
 #[test]
 fn a_pending_exchange_parks_and_resumes_on_the_same_request() {
     let l = login();
@@ -615,7 +601,7 @@ fn a_pending_exchange_parks_and_resumes_on_the_same_request() {
     };
     assert_eq!(pendings, 3);
     assert_eq!(identity(step).id, "github:octocat");
-    // Every hop was issued twice, identically: once pending, once answered.
+
     assert_eq!(s.issued.len(), 6);
     for pair in s.issued.chunks(2) {
         assert_eq!(pair[0], pair[1]);
@@ -623,7 +609,7 @@ fn a_pending_exchange_parks_and_resumes_on_the_same_request() {
 }
 
 /// The answer is kept: a re-call (the host's short-buffer re-issue) is served from it and never
-/// redeems the code again.
+
 #[test]
 fn a_finished_flow_answers_again_without_new_exchanges() {
     let l = login();
@@ -636,9 +622,7 @@ fn a_finished_flow_answers_again_without_new_exchanges() {
 }
 
 /// 1.5.5's allowlist is the hosts the OPERATOR wrote: with the bases left at their defaults, 1.5.5
-/// refused the first hop before sending anything ("Couldn't reach your provider"). OWNER RULING
-/// (sibling/auth): such settings can never log in, so they are now refused at open, explained,
-/// instead of loading and failing every login; nothing is ever sent.
+
 #[test]
 fn defaulted_bases_are_refused_at_open_explained() {
     assert_eq!(
@@ -660,9 +644,7 @@ fn a_plaintext_public_token_base_is_refused_before_the_secret_leaves() {
 }
 
 /// G5: the client secret and the bearer are each required to go out on a secured connection when
-/// the operator's base for their hop is `https` (`Cred::secure_for`): the SDK's exchange then
-/// refuses to write either toward a target that is not secured (`cred::NOT_SECURE`), so a
-/// plain-http target never receives them. The flags are read off the hops as they are sent.
+
 #[test]
 fn the_secret_and_the_bearer_go_out_only_secured_under_https_bases() {
     let l = login();
@@ -685,9 +667,6 @@ fn the_secret_and_the_bearer_go_out_only_secured_under_https_bases() {
         assert!(!get.body.encoded().expect("an empty form").secure_required());
     }
 
-    // Each is pinned by its own base: an https token_base pins the secret even when the API is a
-    // private plain-http host, and an https api_base pins the bearer even when the token endpoint
-    // is.
     let mixed = |token_base: &str, api_base: &str| {
         let settings = format!(
             r#"{{"client_id":"Iv1.client","token_base":"{token_base}","api_base":"{api_base}"}}"#
@@ -726,13 +705,12 @@ fn the_secret_and_the_bearer_go_out_only_secured_under_https_bases() {
         mixed("http://10.0.0.7", "https://api.github.com"),
         (false, true)
     );
-    // An operator who writes both bases as plain http to a private host is not overruled.
+
     assert_eq!(mixed("http://10.0.0.7", "http://10.0.0.8"), (false, false));
 }
 
 #[test]
 fn a_bearer_with_a_line_break_fails_the_hop_closed() {
-    // A token that would split the request: 1.5.5's header sanitiser failed the hop (an outage).
     let l = login();
     let mut s = Script::happy().answer(TOKEN_URL, 200, r#"{"access_token":"gho_x\r\nX-Evil: 1"}"#);
     assert_eq!(run(&l, &mut s), OUTAGE);
@@ -754,7 +732,7 @@ fn id_token(claims: &str) -> String {
 }
 
 /// 1.5.5's core nonce binding, now the plugin's (WIRE-AUTH: `CompleteLoginIn.nonce`): an id_token
-/// whose nonce is not the one minted at begin is refused before any identity is trusted.
+
 #[test]
 fn an_id_token_with_a_foreign_nonce_is_refused() {
     let l = login();
@@ -774,7 +752,7 @@ fn an_id_token_with_a_foreign_nonce_is_refused() {
         assert_eq!(run(&l, &mut s), LoginStep::SecurityCheckFailed, "{body}");
         assert_eq!(s.targets(), vec![TOKEN_URL]);
     }
-    // No nonce minted: any id_token is refused (1.5.5 always minted one).
+
     let body = format!(
         r#"{{"access_token":"gho_x","id_token":"{}"}}"#,
         id_token(&format!(r#"{{"nonce":"{NONCE}"}}"#))
@@ -802,8 +780,7 @@ fn an_id_token_bound_to_the_minted_nonce_passes_the_check() {
 }
 
 /// The id_token payload is read strictly as base64url without padding, through the real nonce
-/// check: the unpadded url-safe segment binds; the same claims padded, or in the standard
-/// alphabet, do not.
+
 #[test]
 fn the_id_token_payload_is_read_strictly_base64url_no_pad() {
     let (mut padded_seen, mut alphabet_seen) = (false, false);
@@ -840,8 +817,7 @@ fn the_id_token_payload_is_read_strictly_base64url_no_pad() {
 }
 
 /// The hop loop is bounded: a far end that keeps answering token-shaped bodies from `/user` never
-/// identifies and is never asked again (L1: a hop's answer is read as that hop's answer). The send
-/// bound itself (the org pages) is `red_g4_the_org_list_stops_at_ten_pages_with_a_warn`.
+
 #[test]
 fn the_hop_loop_is_bounded() {
     let l = login();
@@ -852,9 +828,7 @@ fn the_hop_loop_is_bounded() {
 }
 
 /// RED L1: the step machine reads each answer as the answer of the hop it sent, never by its
-/// shape: a user-shaped token reply is no token (and never an identity with no token held), a
-/// token-shaped `/user` reply never swaps the bearer, an org list from `/user` or a user from
-/// `/user/orgs` is no answer. Each is an outage, and nothing more is sent.
+
 #[test]
 fn red_l1_an_answer_is_read_as_the_answer_of_the_hop_sent() {
     let login_only = GithubLogin::open(
@@ -903,8 +877,7 @@ fn red_l1_an_answer_is_read_as_the_answer_of_the_hop_sent() {
 }
 
 /// The answers the 1.5.5 module, driven by the 1.5.5 core, reached for these bodies (pinned while
-/// the legacy `GithubModule` lived beside the flow, and checked against it): the flow reaches the
-/// same answer over the same hops.
+
 #[test]
 fn the_flow_answers_as_the_1_5_5_module_driven_by_the_1_5_5_core() {
     let id = |roles: &[&str]| {
@@ -952,8 +925,6 @@ fn the_flow_answers_as_the_1_5_5_module_driven_by_the_1_5_5_core() {
     }
 }
 
-// ── the legacy module's step tests, on the live flow ────────────────────────────────────────────
-
 /// Request-time scopes are folded in, de-duplicated (was the legacy `begin_login` test).
 #[test]
 fn begin_login_folds_in_request_time_extra_scopes_deduped() {
@@ -970,7 +941,7 @@ fn begin_login_folds_in_request_time_extra_scopes_deduped() {
 }
 
 /// A callback without the full code + redirect_uri + verifier triple, or with no correlator at
-/// all, is declined before anything is sent.
+
 #[test]
 fn a_callback_without_the_full_triple_is_declined_with_no_exchange() {
     let l = login();
@@ -987,7 +958,7 @@ fn a_callback_without_the_full_triple_is_declined_with_no_exchange() {
 }
 
 /// The token endpoint's non-2xx is never a token, even when its body carries one: a 401 with an
-/// RFC 6749 §5.2 `error` is declined, a 401 without one is an outage (owner-signed 2026-10-30).
+
 #[test]
 fn a_non_2xx_token_answer_is_never_a_token_even_with_one_in_it() {
     let l = login();
@@ -1004,9 +975,7 @@ fn a_non_2xx_token_answer_is_never_a_token_even_with_one_in_it() {
 }
 
 /// RED G1 (owner-signed 2026-10-30: only RFC 6749 §5.2 credential errors are a declined sign-in):
-/// at the token endpoint a 400/401 carrying a §5.2 `error` (JSON or form) is declined; every other
-/// non-2xx (a redirect, 403, 404, 408, a 400/401 with no `error`) is an outage, and nothing more is
-/// sent.
+
 #[test]
 fn red_g1_the_token_endpoint_declines_only_a_5_2_error() {
     let l = login();
@@ -1036,7 +1005,7 @@ fn red_g1_the_token_endpoint_declines_only_a_5_2_error() {
 }
 
 /// RED G1: on `/user` and `/user/orgs` only a 401 (the token is not accepted) is a declined
-/// sign-in; a redirect, a 404, a 408 or a 403 that is no rate limit is an outage.
+
 #[test]
 fn red_g1_the_rest_hops_decline_only_a_401() {
     let l = login();
@@ -1055,8 +1024,7 @@ fn red_g1_the_rest_hops_decline_only_a_401() {
 }
 
 /// RED G1: a rate limit on any REST hop (a 403 or 429 with `retry-after` or
-/// `x-ratelimit-remaining: 0`), and a 5xx or 429 anywhere, is an outage carrying the IdP's retry
-/// hint: its `retry-after` seconds, else the seconds to its `x-ratelimit-reset`.
+
 #[test]
 fn red_g1_a_rate_limit_is_an_outage_with_the_idps_retry_hint() {
     let l = login();
@@ -1104,13 +1072,13 @@ fn red_g1_a_rate_limit_is_an_outage_with_the_idps_retry_hint() {
             );
         }
     }
-    // A hint that is no number of seconds is none.
+
     let mut s = Script::happy().answer_with(USER_URL, 503, after("soon"), "{}");
     assert_eq!(run(&l, &mut s), OUTAGE);
 }
 
 /// An empty access token (either shape) is no token: never a `Bearer ` with nothing after it. A
-/// 2xx with no token and no error is an outage (G2, owner-signed 2026-10-30).
+
 #[test]
 fn an_empty_access_token_is_refused() {
     let l = login();
@@ -1134,8 +1102,7 @@ fn a_user_without_a_login_is_an_outage() {
 }
 
 /// Out-of-order bodies fail closed: an org list or a `/user` where the token response belongs
-/// (no user held, no token held) never identifies and never sends an empty bearer: no token and no
-/// error is an outage (G2, L1).
+
 #[test]
 fn out_of_order_bodies_fail_closed() {
     let l = login();
@@ -1159,8 +1126,7 @@ fn the_orgs_hop_carries_the_token_from_the_token_step() {
 }
 
 /// Each flow owns its state (the legacy module's shared pending map, its correlation key, cap and
-/// TTL sweep have no live counterpart): two flows never see each other's bearer, and a finished
-/// flow, declined or identified, holds no token and no token response.
+
 #[test]
 fn each_flow_owns_its_state_and_a_finished_one_holds_nothing() {
     let l = login();
@@ -1170,7 +1136,7 @@ fn each_flow_owns_its_state_and_a_finished_one_holds_nothing() {
     a.pend_first = true;
     b.pend_first = true;
     let (mut fa, mut fb) = (flow(&l), flow(&l));
-    // Interleaved: each parks on its token exchange, then on /user.
+
     for _ in 0..2 {
         assert_eq!(l.drive(&mut fa, &mut a), LoginStep::Pending);
         assert_eq!(l.drive(&mut fb, &mut b), LoginStep::Pending);
@@ -1206,7 +1172,7 @@ fn open_refuses_in_the_contracts_settings_lines() {
     assert!(err("{ not json", Some(SECRET)).starts_with("settings: not a JSON document"));
     assert!(err(r#"{"client_id":"x","bogus":1}"#, Some(SECRET))
         .starts_with("settings: unknown field `bogus`"));
-    // The secret is never a settings key: it comes from browser_login.client_secret.
+
     let leaked = err(r#"{"client_id":"x","client_secret":"leak"}"#, Some(SECRET));
     assert!(
         leaked.starts_with("settings: unknown field `client_secret`"),
@@ -1255,7 +1221,7 @@ fn the_v1_5_5_example_provider_loads_and_logs_in_with_the_secret_beside_the_sett
             r#"[{"login":"testorg"}]"#,
         );
     let p = identity(run(&l, &mut s));
-    // The principal, byte for byte (owner Q109 signed: the stable numeric id role leads).
+
     let mut expected = Principal::from_id("github:octocat");
     expected.name = Some("octocat".to_string());
     expected.roles = vec!["github:id/1".to_string(), "github:org/testorg".to_string()];
@@ -1267,8 +1233,6 @@ fn the_v1_5_5_example_provider_loads_and_logs_in_with_the_secret_beside_the_sett
         "{body}"
     );
 
-    // RED: a secret left in the settings (not moved into OpenIn.secrets) is refused, as 1.5.5's
-    // plugin refused a `client_secret` key in its config; the plugin never takes one from there.
     let leaked = delivered.replace("\"client_id\"", "\"client_secret\": \"s\", \"client_id\"");
     assert!(GithubLogin::open(&leaked, Some(SECRET))
         .unwrap_err()
@@ -1276,8 +1240,7 @@ fn the_v1_5_5_example_provider_loads_and_logs_in_with_the_secret_beside_the_sett
 }
 
 /// A headless-only provider (no `browser_login`, so no secret) loaded in 1.5.5 and still does; a
-/// hop then carries no `client_secret` field at all (1.5.5 dropped the placeholder), and an empty
-/// secret (the loader's answer for a missing one) is the same as none.
+
 #[test]
 fn no_secret_loads_and_drops_the_secret_field_as_1_5_5_did() {
     for secret in [None, Some("")] {
@@ -1296,8 +1259,8 @@ fn nothing_formats_a_secret_the_code_or_the_bearer() {
     let mut s = Script::happy();
     s.pend_first = true;
     let mut f = flow(&l);
-    l.drive(&mut f, &mut s); // pending on the token exchange
-    l.drive(&mut f, &mut s); // pending on /user, the bearer held
+    l.drive(&mut f, &mut s);
+    l.drive(&mut f, &mut s);
     let text = format!("{l:?} {f:?} {:?}", s.issued);
     for secret in [SECRET, TOKEN, "the-code", "the-verifier"] {
         assert!(!text.contains(secret), "{secret} leaked into {text}");
@@ -1344,17 +1307,9 @@ fn the_form_is_serde_urlencoded() {
 }
 
 /// A GitHub Enterprise base delivered as a plain URL logs in. HISTORY: v1.5.5 built the hop
-/// allowlist from the RAW settings (auth/token.rs:283), so `api_base: {env: GHE_API}` contributed no
-/// host and every hop was refused (502); OWNER Q123 (2026-09-30) then had the kernel resolve such a
-/// reference in place. Q123 is OVERTURNED (OWNER RULING, CHIP-REVIEW-v4 change 2): this plugin's
-/// Statement declares only `client_secret`, so the kernel REFUSES a reference at `api_base`,
-/// `token_base` or `authorize_base` at boot and at `--validate`, and the operator writes each base
-/// as its URL. The plugin side is unchanged: what it is delivered is the plain URLs below.
+
 #[test]
 fn decision_a_reference_written_base_resolved_by_the_kernel_logs_in() {
-    // As the kernel delivers `settings: { api_base: "https://ghe.corp.example/api/v3", token_base:
-    // "https://ghe.corp.example", authorize_base: "https://ghe.corp.example", client_id:
-    // "Iv1.client" }`, each base written as its URL.
     let delivered = r#"{
         "client_id": "Iv1.client",
         "api_base": "https://ghe.corp.example/api/v3",
@@ -1393,7 +1348,7 @@ fn a_poisoned_orgs_array_cannot_swap_the_token_mid_flow() {
     assert_eq!(p.id, "github:octocat");
     assert!(p.roles.contains(&"github:org/acme".to_string()));
     assert_eq!(s.targets(), vec![TOKEN_URL, USER_URL, ORGS_URL]);
-    // The bearer is the chip's (sealed, never in `fields`): read every hop as the wire frames it.
+
     for r in &s.issued[1..] {
         let authorization: Vec<String> = plain(r)
             .into_iter()
@@ -1422,8 +1377,7 @@ mod logging {
         r#"{"client_id": "Iv1.client", "api_base": "https://api.github.com"}"#;
 
     /// OWNER RULING (sibling/auth): settings that leave `token_base` at its default are refused at
-    /// open, explained, instead of loading and having the guard refuse every hop. The guard's own
-    /// log for a hop it refuses is kept below.
+
     #[test]
     fn a_hop_the_guard_refuses_is_explained_without_a_secret() {
         let err = GithubLogin::open(NO_TOKEN_BASE, Some(SECRET)).unwrap_err();
@@ -1470,7 +1424,7 @@ mod logging {
     }
 
     /// RED L8: a hop that could not be made (refused, connect, TLS, timeout, a request that could
-    /// not be framed) ends the login as an outage with one WARN naming the hop, never silently.
+
     #[test]
     fn red_l8_an_unreachable_hop_is_a_warn_naming_the_hop() {
         let l = login();
@@ -1494,7 +1448,7 @@ mod logging {
     }
 
     /// RED G1: a 403 on `/user/orgs` that is no rate limit is the operator's (the token lacks the
-    /// `read:org` scope): an outage, and a WARN naming the scope.
+
     #[test]
     fn red_g1_a_403_on_the_org_list_warns_of_the_scope() {
         let l = login();
@@ -1524,7 +1478,7 @@ mod logging {
     }
 
     /// RED G2: an error code is logged only when it is `[a-z0-9_]{1,64}`; any other far-end string
-    /// is `<unrecognised>`, never echoed.
+
     #[test]
     fn red_g2_a_foreign_error_string_is_never_logged() {
         let l = login();
@@ -1543,7 +1497,7 @@ mod logging {
 }
 
 /// RED: a hop answer's body is the token response (the access token): Debug shows its status and
-/// length, never its bytes.
+
 #[test]
 fn a_hop_response_debug_shows_no_body() {
     let r = HopResponse {
@@ -1553,7 +1507,7 @@ fn a_hop_response_debug_shows_no_body() {
     };
     let text = format!("{r:?} {:?}", Fetched::Ready(r.clone()));
     assert!(!text.contains("SECRETX"), "{text}");
-    // Nor as the bytes' numbers (`S` `E` `C` is 83, 69, 67).
+
     assert!(!text.contains("83, 69, 67"), "{text}");
     assert_eq!(
         format!("{r:?}"),
@@ -1562,7 +1516,7 @@ fn a_hop_response_debug_shows_no_body() {
 }
 
 /// RED: a hop reply past 256 KiB (the kind standard's bound on a token or userinfo endpoint) is not
-/// parsed: the login ends as an outage, nothing more is sent.
+
 #[test]
 fn a_hop_reply_over_the_cap_is_an_outage() {
     assert_eq!(MAX_HOP_REPLY_BYTES, 256 * 1024);
@@ -1572,7 +1526,7 @@ fn a_hop_reply_over_the_cap_is_an_outage() {
     let mut s = Script::happy().answer(TOKEN_URL, 200, &body);
     assert_eq!(run(&l, &mut s), OUTAGE);
     assert_eq!(s.targets(), vec![TOKEN_URL]);
-    // At the cap exactly it is read.
+
     body.pop();
     let mut s = Script::happy().answer(TOKEN_URL, 200, &body);
     assert_eq!(identity(run(&l, &mut s)).id, "github:octocat");
@@ -1599,7 +1553,7 @@ mod module_field {
 }
 
 /// RED (type level): the hop bodies (the token form carries the client secret, the code and the
-/// verifier; the token response the access token) are wiped on drop.
+
 #[test]
 fn the_hop_bodies_are_wiped_on_drop() {
     fn wipes<T: zeroize::ZeroizeOnDrop>(_: &T) {}
@@ -1617,10 +1571,7 @@ fn the_hop_bodies_are_wiped_on_drop() {
 }
 
 /// GHO2, REFRESH MID-FLOW: the door swaps the login whole on `refresh`, but a parked flow is
-/// driven by the login it began under to its end (L2, `door::driving`). Even a flow driven by
-/// another login re-issues the hop parked on a pending exchange exactly as it was sent (its stored
-/// answer is read, the code is never redeemed twice), and that login's client secret is never sent,
-/// as no token exchange is made again.
+
 #[test]
 fn a_refresh_mid_flow_resumes_the_parked_hop_unchanged() {
     let before = login();

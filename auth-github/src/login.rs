@@ -2,37 +2,6 @@
 // Copyright (C) 2026 Busbar Inc and contributors
 
 //! The plugin-owned login: it holds its own client secret and makes its token exchange through its
-//! own need, one-shot `exchange()` per hop.
-//!
-//! The plugin runs the hop loop itself, sans-IO: [`GithubLogin::drive`] turns the step machine over
-//! one flow's own state, renders each hop (vetting its URL, injecting `client_secret`, sanitising its
-//! headers), and hands it to an [`Exchange`], which answers [`Fetched::Pending`] until the response
-//! is in. A pending exchange returns [`LoginStep::Pending`] with the flow parked on that hop; the
-//! next `drive` re-issues the SAME request (a one-shot exchange answers its stored result on the
-//! re-issue, never sending twice).
-//!
-//! What the answer means:
-//!
-//! | answer | step |
-//! |---|---|
-//! | an identity reached | [`LoginStep::Identity`] |
-//! | a credential error, declined (`LOGIN_BAD_CREDENTIAL`) | [`LoginStep::BadCredential`] |
-//! | the IdP not answering, a hop refused or unreachable, the hop limit spent (`LOGIN_OUTAGE`) | [`LoginStep::Outage`] |
-//! | a hop body's `id_token` nonce mismatch (`LOGIN_SECURITY_CHECK_FAILED`) | [`LoginStep::SecurityCheckFailed`] |
-//!
-//! The HTTP status each verdict is answered with is the host's, not this plugin's.
-//!
-//! Any HTTP status the IdP answers is fed back to the step machine, per hop (OWNER-SIGNED
-//! 2026-10-30: only a credential error is a declined sign-in). The token endpoint's `400`/`401`
-//! carrying an RFC 6749 §5.2 `error`, and a revoked token's `401` from `/user` or `/user/orgs`, are
-//! declined. A `5xx`, a `429`, GitHub's `403` rate limit, a `403` on `/user/orgs` (the token lacks
-//! `read:org`), a redirect, a `404`, a `408` or any other status is the IdP not answering:
-//! [`LoginStep::Outage`], which the host answers 503, retryable, carrying the IdP's retry hint
-//! (`retry-after`, or the seconds to `x-ratelimit-reset`) when it gave one.
-//!
-//! The auth ABI adapter is [`crate::door`]: it calls [`GithubLogin::open`],
-//! [`GithubLogin::begin_login`], [`GithubLogin::start`] and [`GithubLogin::drive`], keeping one
-//! [`LoginFlow`] per ticket and each [`Exchange`] one framed `exchange()` over the plugin's need.
 
 use crate::guard::{collect_allowed_hosts, sanitize_hop_header, vet_hop_url, Refused};
 use crate::{
@@ -51,7 +20,7 @@ use std::fmt;
 use zeroize::{Zeroize, Zeroizing};
 
 /// A settings decoder error as the contract's instance-relative line: `settings.<path>: <reason>`
-/// (`settings: <reason>` for the document), every value in it written `***`.
+
 fn settings_line(e: &SettingsError) -> String {
     let text = e.to_string();
     let reason = text.strip_prefix("settings: ").unwrap_or(&text);
@@ -65,14 +34,12 @@ fn settings_line(e: &SettingsError) -> String {
 /// The per-hop request timeout.
 pub const HOP_TIMEOUT_MS: u64 = 10_000;
 /// The most `/user/orgs` pages read per login (requests ask for 100 entries per page; replies remain
-/// subject to the byte cap, not an entry cap). A next link left after
-/// the last is logged as a truncated org list, and the login identifies with the orgs read.
+
 pub const MAX_ORG_PAGES: usize = 10;
 /// The bound on the hops one callback sends: the token exchange, `/user`, and the org pages.
 pub const MAX_HOPS: usize = 2 + MAX_ORG_PAGES;
 /// The most a hop's reply body may carry: 256 KiB, the auth kind's bound on a token or userinfo
-/// endpoint's answer (the exchange refuses past it, `reply_limit`; `drive` checks it again). A
-/// GitHub token response or `/user` is under 2 KiB; a full 100-entry `/user/orgs` page is ~100 KiB.
+
 pub const MAX_HOP_REPLY_BYTES: usize = 256 * 1024;
 
 /// One hop, rendered as it goes on the wire: method, target, the public header fields in order
@@ -97,7 +64,6 @@ pub struct HopRequest {
 }
 
 impl fmt::Debug for HopRequest {
-    // The body's secret and the bearer are the chip's: only names and presence are formatted.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("HopRequest")
             .field("method", &self.method)
@@ -129,9 +95,7 @@ pub(crate) fn split(url: &str) -> Option<(&str, String)> {
 
 impl HopRequest {
     /// The SDK exchange that sends this hop: the public fields framed as they are, the bearer
-    /// sealed in as `authorization` first (after a `content-type`), the form encoded by the SDK
-    /// into the body it sends, the reply bounded by `reply_limit`. `None`: the URL has no scheme and authority,
-    /// the form could not be encoded, or the exchange refused the request.
+
     #[must_use]
     pub fn wire(&self, reply_limit: usize) -> Option<Wire> {
         let Some((_, target)) = split(&self.target) else {
@@ -199,7 +163,7 @@ pub struct ReplyFields {
 
 impl ReplyFields {
     /// The kept fields of a reply's field block, names matched case-insensitively. Repeated Link
-    /// lines are one comma-separated list; other fields keep the first value. Non-UTF8 is dropped.
+
     pub fn kept<'a>(fields: impl IntoIterator<Item = (&'a [u8], &'a [u8])>) -> Self {
         let mut kept = Self::default();
         for (name, value) in fields {
@@ -243,7 +207,6 @@ pub struct HopResponse {
 }
 
 impl fmt::Debug for HopResponse {
-    // The body is the token response (the access token) or a profile: never formatted.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("HopResponse")
             .field("status", &self.status)
@@ -315,8 +278,7 @@ struct Callback {
 }
 
 /// One login in flight: the callback's inputs, the step machine's state, the hop parked on a
-/// pending exchange, and the answer once reached (a re-call is served from it, never re-run: an
-/// authorization code redeems once).
+
 pub struct LoginFlow {
     req: Callback,
     state: FlowState,
@@ -328,7 +290,6 @@ pub struct LoginFlow {
 }
 
 impl fmt::Debug for LoginFlow {
-    // The code, verifier and access token are credential material: never formatted.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("LoginFlow")
             .field("turns", &self.turns)
@@ -355,19 +316,7 @@ impl fmt::Debug for GithubLogin {
 
 impl GithubLogin {
     /// Build the login from its settings and the client secret the kernel resolved from
-    /// `browser_login.client_secret`, which arrives in `OpenIn.secrets`, never in `settings`: a
-    /// `client_secret` key in the settings is refused (`deny_unknown_fields`).
-    ///
-    /// No secret (`None` or empty) is NOT a refusal: a headless-only provider has no `browser_login`
-    /// block, and a hop's `client_secret` field is then dropped. A redirect method missing its secret
-    /// is refused by the kernel.
-    ///
-    /// # Errors
-    /// Empty or invalid settings (a decoder error keeps serde's text only when it
-    /// names a key, never a value); an empty `client_id`; `fetch_orgs` with no scope that reads
-    /// orgs; a base that is not an http(s) URL with a
-    /// host; a `ca_cert_pem` that is no PEM certificate; a `token_base` or `api_base` not written out (the hop allowlist is built only from
-    /// the URLs written in the settings, so every hop to a defaulted base would be refused).
+
     pub fn open(settings: &str, client_secret: Option<&str>) -> Result<Self, String> {
         if settings.trim().is_empty() {
             return Err("settings: empty: the github plugin requires client_id".to_string());
@@ -379,8 +328,7 @@ impl GithubLogin {
         if cfg.client_id.is_empty() {
             return Err("settings.client_id: empty".to_string());
         }
-        // `/user/orgs` needs `read:org` or a scope that holds it; without one every login's org
-        // hop would be answered 403.
+
         if cfg.fetch_orgs
             && !cfg
                 .scopes
@@ -418,7 +366,7 @@ impl GithubLogin {
                     .to_string(),
             );
         }
-        // `authorize_base` is a browser redirect, never a hop: it may stay at its default.
+
         for key in ["token_base", "api_base"] {
             if raw.get(key).is_none() {
                 return Err(format!(
@@ -426,7 +374,7 @@ impl GithubLogin {
                 ));
             }
         }
-        // The secret goes only to the token endpoint: an `https` one requires a secured connection.
+
         let client_secret = client_secret.filter(|s| !s.is_empty()).map(|s| {
             Cred::captured(Zeroizing::new(s.as_bytes().to_vec())).secure_for(&cfg.token_base)
         });
@@ -438,7 +386,7 @@ impl GithubLogin {
     }
 
     /// Whether the settings name an operator CA (`ca_cert_pem`; `open` refuses a blank one): the
-    /// hops then go out on the need that trusts it beside the public roots.
+
     #[must_use]
     pub fn anchored(&self) -> bool {
         self.cfg
@@ -497,36 +445,34 @@ impl GithubLogin {
         loop {
             let request = match flow.inflight.take() {
                 Some(parked) => parked,
-                None => {
-                    match self.step(flow) {
-                        Turn::Identify(p) => return finish(flow, LoginStep::Identity(p)),
-                        Turn::Decline => return finish(flow, LoginStep::BadCredential),
-                        // The step has already said why.
-                        Turn::Outage { retry_after } => {
-                            return finish(flow, LoginStep::Outage { retry_after })
-                        }
-                        Turn::Exchange(mut hop) => {
-                            if flow.turns >= MAX_HOPS {
-                                wipe_hop(&mut hop);
-                                tracing::warn!(
-                                    module = "github",
-                                    "github login: hop limit ({MAX_HOPS}) spent without an identity"
-                                );
-                                return finish(flow, LoginStep::Outage { retry_after: None });
-                            }
-                            flow.turns += 1;
-                            let rendered = self.render(&hop, flow.state.access_token.as_ref());
+                None => match self.step(flow) {
+                    Turn::Identify(p) => return finish(flow, LoginStep::Identity(p)),
+                    Turn::Decline => return finish(flow, LoginStep::BadCredential),
+
+                    Turn::Outage { retry_after } => {
+                        return finish(flow, LoginStep::Outage { retry_after })
+                    }
+                    Turn::Exchange(mut hop) => {
+                        if flow.turns >= MAX_HOPS {
                             wipe_hop(&mut hop);
-                            match rendered {
-                                Ok(r) => r,
-                                // The guard has already said why.
-                                Err(Refused) => {
-                                    return finish(flow, LoginStep::Outage { retry_after: None })
-                                }
+                            tracing::warn!(
+                                module = "github",
+                                "github login: hop limit ({MAX_HOPS}) spent without an identity"
+                            );
+                            return finish(flow, LoginStep::Outage { retry_after: None });
+                        }
+                        flow.turns += 1;
+                        let rendered = self.render(&hop, flow.state.access_token.as_ref());
+                        wipe_hop(&mut hop);
+                        match rendered {
+                            Ok(r) => r,
+
+                            Err(Refused) => {
+                                return finish(flow, LoginStep::Outage { retry_after: None })
                             }
                         }
                     }
-                }
+                },
             };
             match ex.exchange(&request) {
                 Fetched::Pending => {
@@ -551,9 +497,7 @@ impl GithubLogin {
                         return finish(flow, LoginStep::Outage { retry_after: None });
                     }
                     let body = text_of(std::mem::take(&mut *resp.body));
-                    // NONCE BINDING: a hop body carrying an
-                    // `id_token` must carry the nonce minted at begin, before any identity is
-                    // trusted. GitHub issues no id_token, so this never fires against github.com.
+
                     if !id_token_nonce_binds(&body, flow.nonce.as_ref().map(|n| n.as_str())) {
                         tracing::warn!(module = "github", "github login: a hop body's id_token is not bound to the nonce minted at begin");
                         return finish(flow, LoginStep::SecurityCheckFailed);
@@ -573,7 +517,7 @@ impl GithubLogin {
     fn step(&self, flow: &mut LoginFlow) -> Turn {
         let Some((status, fields, body, request_url)) = flow.req.answer.take() else {
             let req = &flow.req;
-            // L7: an empty value is as missing, refused before the code is spent.
+
             let (Some(code), Some(redirect_uri), Some(code_verifier)) = (
                 given(req.code.as_deref().map(String::as_str)),
                 given(req.redirect_uri.as_deref()),
@@ -590,12 +534,9 @@ impl GithubLogin {
             ));
         };
         let body = body.as_str();
-        // L1: the answer is the answer of the hop that was sent, read as that hop's, never by its
-        // shape.
+
         let hop = flow.state.hop;
-        // OWNER-SIGNED 2026-10-30: only a credential error is a declined sign-in; every other
-        // answer that is no 2xx is the IdP not answering this hop, an outage (the host answers
-        // 503, retryable), carrying the IdP's retry hint when it gave one.
+
         if !(200..300).contains(&status) {
             let turn = refused_answer(hop, status, &fields, body);
             flow.state = FlowState::default();
@@ -604,7 +545,6 @@ impl GithubLogin {
         match hop {
             Hop::Token => {
                 let Some(token) = parse_access_token(body) else {
-                    // GitHub answered no access_token.
                     flow.state = FlowState::default();
                     return token_refusal(body);
                 };
@@ -617,8 +557,6 @@ impl GithubLogin {
             }
             Hop::User => {
                 let Some(user) = parse_user(body) else {
-                    // G3 (owner-signed 2026-10-30): a malformed or foreign 2xx from the REST API
-                    // is no sign-in answer: an outage.
                     tracing::warn!(
                         module = "github",
                         hop = hop.path(),
@@ -638,7 +576,6 @@ impl GithubLogin {
             Hop::Orgs => {
                 let state = std::mem::take(&mut flow.state);
                 let (Some(user), Some(groups)) = (state.user, parse_org_groups(body)) else {
-                    // G3 (owner-signed 2026-10-30): no sign-in answer, the far end's fault.
                     tracing::warn!(
                         module = "github",
                         hop = hop.path(),
@@ -649,8 +586,7 @@ impl GithubLogin {
                 let mut orgs = state.orgs;
                 orgs.extend(groups);
                 let pages = state.pages + 1;
-                // G4: the list is paginated; its `Link: rel="next"` is followed on the API's own
-                // origin (and through the hop guard, as every hop), up to MAX_ORG_PAGES pages.
+
                 match fields.link.as_deref().and_then(next_link) {
                     None => {}
                     Some(_) if pages >= MAX_ORG_PAGES => tracing::warn!(
@@ -682,16 +618,10 @@ impl GithubLogin {
     }
 
     /// Render a hop up to the send: vet the URL, seal the client secret into the named form
-    /// field (or drop the placeholder when there is none), and lay out the fields as the http
-    /// stack wrote them (`content-type` first when the hop has a form body, the hop's sanitised
-    /// headers, then the default `accept: */*` when the hop set none). An authenticated hop carries
-    /// `bearer`, which the chip writes as `authorization` first (after `content-type`, if any).
-    ///
-    /// The plugin never holds the secret's or the bearer's bytes here: the body is a [`FormBody`]
-    /// the SDK encodes at the wire.
+
     fn render(&self, hop: &LoginHop, bearer: Option<&Cred>) -> Result<HopRequest, Refused> {
         vet_hop_url(&hop.url, &self.allowed_hosts)?;
-        // A token that would split the request fails the hop closed (an outage).
+
         if bearer.is_some_and(|b| !b.is_field_value()) {
             tracing::warn!(
                 module = "github",
@@ -727,7 +657,7 @@ impl GithubLogin {
                 return Err(Refused);
             }
         };
-        // Only a hop with a form body says what its body is (L4).
+
         let mut fields = Vec::new();
         if !hop.form.is_empty() || sealed {
             fields.push((
@@ -753,7 +683,7 @@ impl GithubLogin {
 }
 
 /// A reply body as text, moved, never copied: valid UTF-8 is the buffer itself; otherwise the
-/// lossy text, the bytes it was read from wiped.
+
 fn text_of(bytes: Vec<u8>) -> Zeroizing<String> {
     match String::from_utf8(bytes) {
         Ok(text) => Zeroizing::new(text),
@@ -810,7 +740,7 @@ impl Hop {
 }
 
 /// Resolve a next-page reference against the page that supplied it, then require the API's
-/// scheme, host and effective port. Userinfo is never accepted from an untrusted next link.
+
 fn next_on_origin(next: &str, request: &str, base: &str) -> Option<url::Url> {
     let mut next = url::Url::parse(request).ok()?.join(next).ok()?;
     let base = url::Url::parse(base).ok()?;
@@ -827,7 +757,7 @@ fn rate_limited(fields: &ReplyFields) -> bool {
 }
 
 /// The IdP's retry hint, in seconds at `now`: its `retry-after` (delta seconds), else, when no
-/// requests remain, the seconds to its `x-ratelimit-reset`. An HTTP-date `retry-after` is not read.
+
 fn retry_hint(fields: &ReplyFields, now: u64) -> Option<u64> {
     if let Some(after) = fields.retry_after.as_deref().and_then(secs) {
         return Some(after);
@@ -850,7 +780,7 @@ fn secs(v: &str) -> Option<u64> {
 }
 
 /// Absolute resets require a usable wall clock. A delta Retry-After remains meaningful when
-/// the clock is unavailable; never reinterpret an absolute reset as a delay from epoch zero.
+
 fn retry_hint_at(fields: &ReplyFields, at: std::time::SystemTime) -> Option<u64> {
     match at.duration_since(std::time::UNIX_EPOCH) {
         Ok(now) => retry_hint(fields, now.as_secs()),
@@ -865,7 +795,7 @@ fn retry_hint_at(fields: &ReplyFields, at: std::time::SystemTime) -> Option<u64>
 }
 
 /// An IdP error code as a log may print it: the code when it is `[a-z0-9_]{1,64}`, else
-/// `<unrecognised>` (a far-end string is never logged raw).
+
 fn loggable(code: &str) -> &str {
     let plain = !code.is_empty()
         && code.len() <= 64
@@ -880,14 +810,7 @@ fn loggable(code: &str) -> &str {
 }
 
 /// The turn a non-2xx answer on `hop` is (OWNER-SIGNED 2026-10-30: only RFC 6749 §5.2 credential
-/// errors are a declined sign-in):
-///
-/// * any hop: a 5xx or 429 is the IdP unavailable, an outage carrying its retry hint;
-/// * the token endpoint: a 400/401 carrying a §5.2 `error` (JSON or form) is declined; anything else
-///   is an outage;
-/// * `/user`, `/user/orgs`: a 401 (the token is not accepted) is declined; a 403 that is GitHub's
-///   rate limit is an outage carrying its retry hint; any other 403 on `/user/orgs` is the token
-///   lacking `read:org`, the operator's to fix (an outage, at warn); anything else is an outage.
+
 fn refused_answer(hop: Hop, status: u16, fields: &ReplyFields, body: &str) -> Turn {
     let path = hop.path();
     if status >= 500 || status == 429 {
@@ -1003,7 +926,7 @@ fn github_error(body: &str) -> Option<String> {
 /// The token endpoint's codes that are the user's own: a bad or expired code, an invalid grant.
 const USER_TOKEN_ERRORS: [&str; 3] = ["bad_verification_code", "invalid_grant", "expired_token"];
 /// The token endpoint's codes that are the operator's: the OAuth App's credentials, its callback
-/// URL, the app itself.
+
 const OPERATOR_TOKEN_ERRORS: [&str; 3] = [
     "incorrect_client_credentials",
     "redirect_uri_mismatch",
@@ -1011,9 +934,7 @@ const OPERATOR_TOKEN_ERRORS: [&str; 3] = [
 ];
 
 /// The turn a 2xx token reply carrying no access token is (GitHub answers a refused exchange with
-/// HTTP 200 and an `error`), OWNER-SIGNED 2026-10-30: only the user's own code is a declined
-/// sign-in (at info); the operator's misconfiguration is an outage at warn; any other code, and a
-/// reply with neither a token nor an error (empty, HTML, not JSON), is an outage.
+
 fn token_refusal(body: &str) -> Turn {
     let Some(code) = github_error(body) else {
         tracing::warn!(
@@ -1056,7 +977,7 @@ fn finish(flow: &mut LoginFlow, step: LoginStep) -> LoginStep {
 }
 
 /// Wipe the plugin-owned values of a described hop once it is rendered: `LoginHop.form` carries
-/// the code and the verifier, in the contract's plain `String`s. Its headers are public.
+
 fn wipe_hop(hop: &mut LoginHop) {
     for (_, v) in &mut hop.form {
         v.zeroize();
@@ -1064,11 +985,8 @@ fn wipe_hop(hop: &mut LoginHop) {
 }
 
 /// The nonce binding (a constant-time compare): a body
-/// with no `id_token` binds trivially; one with an `id_token` binds only when its payload's `nonce`
-/// claim (base64url, no signature check: that is the IdP module's job) equals `minted`.
+
 fn id_token_nonce_binds(body: &str, minted: Option<&str>) -> bool {
-    // Distinguish an absent field from a present null or another unreadable shape. Only this
-    // field is decoded; the access token alongside it is skipped, never copied by this check.
     #[derive(Default)]
     enum TokenField {
         #[default]
@@ -1091,8 +1009,7 @@ fn id_token_nonce_binds(body: &str, minted: Option<&str>) -> bool {
     if body.starts_with('{') {
         let parsed = match serde_json::from_str::<IdToken>(body) {
             Ok(parsed) => parsed,
-            // A duplicate id_token is ambiguous. Syntax failures remain the hop decoder's
-            // malformed-response outage; they cannot yield a valid token/profile/org list.
+
             Err(error) => return !error.is_data(),
         };
         return match parsed.id_token {
@@ -1103,7 +1020,7 @@ fn id_token_nonce_binds(body: &str, minted: Option<&str>) -> bool {
             TokenField::Present(_) => false,
         };
     }
-    // A REST org array is not an id_token envelope (serde structs also accept positional arrays).
+
     if body.starts_with('[') {
         return true;
     }

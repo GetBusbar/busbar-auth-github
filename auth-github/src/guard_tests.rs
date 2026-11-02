@@ -39,9 +39,9 @@ fn an_allow_listed_https_host_passes() {
 fn a_host_the_operator_did_not_write_is_refused() {
     let a = allowed(&["api.github.com"]);
     assert!(vet_hop_url("https://evil.example/user", &a).is_err());
-    // userinfo does not smuggle a host past the list
+
     assert!(vet_hop_url("https://api.github.com@evil.example/", &a).is_err());
-    // a backslash ends the authority, as the http stack reads it
+
     assert!(vet_hop_url("https://evil.example\\@api.github.com/", &a).is_err());
     assert!(vet_hop_url("not a url", &a).is_err());
 }
@@ -91,7 +91,7 @@ fn headers_are_sanitised_as_1_5_5_did() {
     ] {
         assert!(sanitize_hop_header(n, v).is_err(), "{n:?}: {v:?}");
     }
-    // A tab and non-ASCII bytes are values the http stack accepted.
+
     assert!(sanitize_hop_header("X", "a\tb é").is_ok());
 }
 

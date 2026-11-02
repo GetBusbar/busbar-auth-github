@@ -2,30 +2,9 @@
 // Copyright (C) 2026 Busbar Inc and contributors
 
 //! **ONE GITHUB LOGIN, BOTH DOORS, ONE TABLE**: the GitHub login plugin's linked + dropped-in
-//! conformance on the auth kind's memory ABI (v3), run against the busbar rev this repo pins
-//! (`.busbar-ref`).
-//!
-//! The plugin is held two ways at once: LINKED (the logic crate's `door::door`, as a compiled-in
-//! row through the loader's `load_linked`) and DROPPED IN (this crate's built cdylib, its door's
-//! Statement rendered and signed into the manifest's `statement` as the pack tool does, packed into
-//! a temp `plugins/` directory, admitted by the loader's scan, and bound from the verified bytes
-//! against that signed rendering through `load_dropped_bytes`). Each is driven over the same script
-//! through the auth table: `validate` over the config refusals, `open` with the kernel-resolved
-//! client secret, `verify` (not served), `begin_login` (the authorize URL, leased, then released),
-//! a ticket-less `complete_login` (REFUSED: the token exchange waits on I/O, so it runs on a
-//! ticket), `refresh` accepted and refused, `tick` and `close`. The two transcripts must be equal.
-//!
-//! THE RED ARMS, each its own test: the dropped-in door opened over ANOTHER config answers a different
-//! transcript (so the equality is not vacuous); the door asked for as another kind is refused,
-//! linked and dropped in. A missing cdylib PANICS: this test IS the dropped-in door's proof, and
-//! never skips.
 
 use std::path::PathBuf;
 
-// BUSBAR'S PUBLISHED CONFORMANCE SUITE (plugin-ci's conformance step): the linked door and this
-// crate's cdylib through the one loader, driven by the auth kind's script over the login family
-// (the token exchange and the `/user` and `/user/orgs` hops reach the far ends in
-// `conformance.json`), exact crossings, both folds equal, its RED arms kept.
 busbar_test_kit::conformance_suite! {
     door: busbar_auth_github::door::MACRO_DOOR,
     cdylib: "busbar_auth_github_plugin",
@@ -69,7 +48,7 @@ fn release() -> SigningKey {
 }
 
 /// This crate's built cdylib (uplifted or under `deps`, newest wins). A missing artifact is a
-/// failure, never a skip.
+
 fn cdylib() -> PathBuf {
     let exe = std::env::current_exe().expect("the test binary has a path");
     let profile = exe
@@ -100,9 +79,7 @@ fn bind(d: &Dispatcher) -> Bind {
         max_inflight_cap: 64,
         sink: Arc::new(NoSink),
         dispatcher: d.adopter(),
-        // The door declares its `http` need (the login's token exchange); this transcript binds it
-        // as a PROBE, with no connection table (nothing opened to the network), as it bound before
-        // the loader named the table.
+
         conns: busbar_plugin_loader::dispatch::ConnTable::Probe,
     }
 }
@@ -124,8 +101,7 @@ fn rendering() -> Vec<u8> {
 }
 
 /// THE DROPPED-IN DOOR: the cdylib signed first-party with its Statement in the manifest, packed
-/// into a fresh `plugins/` directory, scanned under a policy holding the release key, and bound
-/// from the verified bytes against the signed rendering.
+
 fn dropped(d: &Dispatcher) -> Plugin<Auth> {
     let lib = std::fs::read(cdylib()).expect("read the cdylib");
     let hex: String = rendering().iter().map(|b| format!("{b:02x}")).collect();
@@ -142,7 +118,7 @@ fn dropped(d: &Dispatcher) -> Plugin<Auth> {
         statement: Some(hex),
         ..Manifest::default()
     };
-    // One directory per call: the tests of this target run in parallel and each packs its own.
+
     static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let n = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let dir = std::env::temp_dir().join(format!("auth-github-conf-{}-{n}", std::process::id()));
@@ -307,7 +283,7 @@ const ABSENT: Span = Span {
 };
 
 /// An all-zero `T`: every `in`/`out` here is plain C data, all-zero a valid value of each (the
-/// fields a test does not name stay zero, so a field the ABI appends needs no edit here).
+
 fn z<T>() -> T {
     // SAFETY: plain C data; all-zero is a valid value of each type this file zeroes.
     unsafe { std::mem::zeroed() }
@@ -361,7 +337,7 @@ fn verify(p: &Plugin<Auth>) -> String {
 }
 
 /// `begin_login`: the answer, the authorize URL it leased, and the release of that lease (READY
-/// once, REFUSED the second time).
+
 fn begin_login(p: &Plugin<Auth>) -> Vec<String> {
     let mut f = Frame::new(
         BeginLoginIn {
@@ -457,7 +433,7 @@ fn transcript(p: &Plugin<Auth>, cfg: &str) -> Vec<String> {
 }
 
 /// The GitHub login plugin answers as ONE plugin through either door (the RED arms below show the
-/// comparison is not vacuous).
+
 #[test]
 fn the_linked_and_the_dropped_in_github_login_are_one_plugin() {
     let d = dispatcher();
@@ -465,7 +441,6 @@ fn the_linked_and_the_dropped_in_github_login_are_one_plugin() {
     let dropped_in = transcript(&dropped(&d), CFG);
     assert_eq!(linked, dropped_in, "the two doors are not one plugin");
 
-    // Not a vacuous pass: the script did what the plugin is for.
     let text = linked.join("\n");
     assert!(
         !text.contains(SECRET),
@@ -499,7 +474,7 @@ fn the_linked_and_the_dropped_in_github_login_are_one_plugin() {
 }
 
 /// RED ARM 1: the dropped-in door under a different operator config is a different transcript, so
-/// the equality in the both-ways test is not vacuous.
+
 #[test]
 fn a_different_operator_config_is_a_different_transcript() {
     let d = dispatcher();
@@ -618,8 +593,7 @@ impl busbar_plugin_loader::dispatch::EnvelopeSink for Logs {
 }
 
 /// RED L9: a REFUSED complete_login is never near-silent: the ticket-less one (it waits on I/O,
-/// the host resubmits it on a ticket) is one INFO record (severity 0) naming `module=github` and
-/// its `reason` word, as the host's plugin log receives it.
+
 #[test]
 fn red_l9_a_ticketless_complete_login_is_refused_at_info_with_a_reason() {
     let d = dispatcher();

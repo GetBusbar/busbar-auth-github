@@ -44,18 +44,17 @@ use serde_json::Value;
 use zeroize::Zeroizing;
 
 /// The default OAuth scopes requested: `read:org` (to enumerate the caller's org memberships → groups)
-/// and `read:user` (the profile `/user` read). Operators can override via `scopes`; the door asks
-/// for exactly the configured scopes (it passes no request-time extras).
+
 fn default_scopes() -> Vec<String> {
     vec!["read:org".to_string(), "read:user".to_string()]
 }
 /// Default REST API base (`api.github.com`). Overridden for GitHub Enterprise Server (GHES), whose
-/// REST API lives at `https://<host>/api/v3`.
+
 fn default_api_base() -> String {
     "https://api.github.com".to_string()
 }
 /// The public GitHub web base shared by the authorize and token endpoint defaults (both `github.com`;
-/// each is overridden to `https://<host>` for GHES). Single source so the two defaults can't drift.
+
 const GITHUB_WEB_BASE: &str = "https://github.com";
 /// Default web base for the authorize endpoint (`github.com`). Overridden to `https://<host>` for GHES.
 fn default_authorize_base() -> String {
@@ -131,10 +130,7 @@ fn user_endpoint(cfg: &GitHubConfig) -> String {
     format!("{}/user", cfg.api_base.trim_end_matches('/'))
 }
 /// The `/user/orgs` endpoint URL (`{api_base}/user/orgs?per_page=100`): its first page. GitHub
-/// paginates this list (30 entries a page by default; `per_page=100` is its most). The login follows
-/// each page's `Link: rel="next"` ([`next_link`]) on the API's origin, up to
-/// [`login::MAX_ORG_PAGES`] pages, each subject to the reply byte cap; past that the org list is
-/// logged as truncated. The requested page size is not a separate response entry cap.
+
 fn orgs_endpoint(cfg: &GitHubConfig) -> String {
     format!(
         "{}/user/orgs?per_page=100",
@@ -143,8 +139,7 @@ fn orgs_endpoint(cfg: &GitHubConfig) -> String {
 }
 
 /// Percent-encode `s` for a URL QUERY-component value (RFC 3986 unreserved kept literal, everything
-/// else `%`-escaped). Used only for the authorize URL; the token-exchange form is encoded by the
-/// SDK's `FormBody`.
+
 fn pct(s: &str) -> String {
     const HEX: &[u8; 16] = b"0123456789ABCDEF";
     let mut out = String::with_capacity(s.len());
@@ -164,7 +159,7 @@ fn pct(s: &str) -> String {
 }
 
 /// The space-delimited `scope` value: the configured scopes plus `extra` (the door passes none),
-/// order preserved and de-duplicated.
+
 fn scope_value(cfg: &GitHubConfig, extra: &[String]) -> String {
     let mut scopes: Vec<String> = Vec::new();
     for s in cfg.scopes.iter().chain(extra.iter()) {
@@ -176,13 +171,7 @@ fn scope_value(cfg: &GitHubConfig, extra: &[String]) -> String {
 }
 
 /// Build the GitHub **authorization-code** authorize URL: `response_type=code`, `client_id`,
-/// `redirect_uri`, `scope` (the configured scopes, plus `extra_scopes`: the door passes none), `state`, and PKCE `code_challenge` +
-/// `code_challenge_method=S256`. Structurally cannot contain a `client_secret`: the begin path is
-/// public.
-///
-/// GitHub supports S256 PKCE on the web authorization-code flow (2024+); the `code_challenge` the
-/// kernel minted is always sent. A GitHub OAuth App that has not opted into PKCE simply ignores it, and the
-/// paired `code_verifier` still rides the token exchange harmlessly. See the crate README's PKCE note.
+
 pub fn build_github_authorize_url(
     cfg: &GitHubConfig,
     redirect_uri: &str,
@@ -202,14 +191,7 @@ pub fn build_github_authorize_url(
 }
 
 /// Build the token-exchange hop: `POST` to the token endpoint with `client_id`, `code`,
-/// `redirect_uri`, and the PKCE `code_verifier`. The `client_secret` is an EMPTY placeholder keyed by
-/// `secret_form_field`: the step machine writes the KEY, and [`login`]'s renderer seals the client
-/// secret (the chip's `Cred`) into that slot of the form body (or drops the field when no secret
-/// was given).
-///
-/// GitHub's token endpoint answers `application/x-www-form-urlencoded` UNLESS the request sends
-/// `Accept: application/json`, which this hop sends. [`parse_access_token`] still reads BOTH shapes,
-/// for a GitHub App or GHES that answers the form anyway.
+
 pub fn build_token_exchange(
     cfg: &GitHubConfig,
     code: &str,
@@ -233,8 +215,7 @@ pub fn build_token_exchange(
 }
 
 /// The public request headers of an authenticated GitHub REST hop: the mandatory `User-Agent`
-/// (GitHub rejects a UA-less request) and the `Accept` GitHub recommends. Its `Authorization:
-/// Bearer <token>` is the chip's, sealed in ahead of them when the hop is rendered.
+
 pub fn userinfo_headers() -> Vec<(String, String)> {
     vec![
         ("User-Agent".to_string(), "busbar".to_string()),
@@ -246,7 +227,7 @@ pub fn userinfo_headers() -> Vec<(String, String)> {
 }
 
 /// Build the `/user` profile GET hop, with the `User-Agent` + `Accept` headers
-/// ([`userinfo_headers`]); the bearer is sealed in when it is rendered.
+
 pub fn build_userinfo_get(cfg: &GitHubConfig) -> LoginHop {
     LoginHop {
         method: "GET".to_string(),
@@ -269,8 +250,7 @@ pub fn build_orgs_get(cfg: &GitHubConfig) -> LoginHop {
 }
 
 /// Build the GET hop of a later `/user/orgs` page: `url` is the previous page's `Link: rel="next"`
-/// (the login checks it is on the API's origin; the hop guard vets it as every hop), with the same
-/// headers as [`build_orgs_get`].
+
 pub fn build_orgs_page_get(url: &str) -> LoginHop {
     LoginHop {
         method: "GET".to_string(),
@@ -282,8 +262,7 @@ pub fn build_orgs_page_get(url: &str) -> LoginHop {
 }
 
 /// The target of an RFC 8288 `Link` field's `rel="next"` link (`<url>; rel="next", ...`), if any.
-/// A `rel` may list several relation types (`rel="next last"`); its name and value are matched
-/// ASCII case-insensitively.
+
 pub fn next_link(link: &str) -> Option<&str> {
     let mut rest = link;
     while let Some(open) = rest.find('<') {
@@ -329,13 +308,7 @@ pub struct GhUser {
 }
 
 /// Parse the access token out of a token-endpoint response body, accepting BOTH the JSON shape
-/// (`{"access_token": "..."}`) and the `application/x-www-form-urlencoded` shape
-/// (`access_token=...&scope=...&token_type=bearer`) GitHub returns without an `Accept: application/json`
-/// header. The token is captured into the chip's [`Cred`] as it is read; the enclosing response is
-/// wiped when its step consumes it, before the next hop. Returns `None` when absent — which covers GitHub's fail-CLOSED case where the token endpoint
-/// answers `HTTP 200` with an `{"error": "..."}` body (a bad/expired code), so a missing token is
-/// treated as a rejection, never a success with an empty token. A JSON array (the `/user/orgs` shape)
-/// is never a token response, so its text can never reach the form branch.
+
 pub fn parse_access_token(body: &str) -> Option<Cred> {
     /// Only `access_token` is read, captured as the parser meets it.
     #[derive(Deserialize)]
@@ -367,8 +340,7 @@ pub fn parse_access_token(body: &str) -> Option<Cred> {
 }
 
 /// Minimal `application/x-www-form-urlencoded` value decode (`+` → space, `%XX` → byte), into a
-/// buffer wiped on drop, sized once so no growth leaves a copy behind. Sufficient for a GitHub
-/// access token / scope value; not a general-purpose decoder.
+
 fn form_decode(s: &str) -> Zeroizing<Vec<u8>> {
     let bytes = s.as_bytes();
     let mut out = Zeroizing::new(Vec::with_capacity(bytes.len()));
@@ -408,15 +380,13 @@ pub const MAX_LOGIN_BYTES: usize = 64;
 pub const MAX_NAME_CHARS: usize = 256;
 
 /// Whether `login` is one a GitHub reply can carry: non-empty, at most [`MAX_LOGIN_BYTES`], no
-/// control character.
+
 fn plain_login(login: &str) -> bool {
     !login.is_empty() && login.len() <= MAX_LOGIN_BYTES && !login.chars().any(char::is_control)
 }
 
 /// Parse a GitHub `/user` response body into a [`GhUser`]. Fail-CLOSED: a missing, empty or
-/// foreign `login` (a control character, over [`MAX_LOGIN_BYTES`]), a missing numeric `id`, or
-/// non-JSON yields `None` (the caller's outage). A `name` holding a control, Unicode format
-/// character or line/paragraph separator is not taken; a longer one than [`MAX_NAME_CHARS`] is cut.
+
 pub fn parse_user(body: &str) -> Option<GhUser> {
     let v: Value = serde_json::from_str(body.trim()).ok()?;
     let login = v
@@ -424,9 +394,7 @@ pub fn parse_user(body: &str) -> Option<GhUser> {
         .and_then(Value::as_str)
         .filter(|s| plain_login(s))?
         .to_string();
-    // Required: a genuine /user body always carries a numeric `id`, so its absence means a
-    // malformed/foreign body → fail closed. It is also KEPT: it is the only stable thing GitHub
-    // gives us about an account (see `GhUser::id` and `build_principal`).
+
     let id = v.get("id").and_then(Value::as_i64)?;
     let name = v
         .get("name")
@@ -467,12 +435,7 @@ pub fn parse_user(body: &str) -> Option<GhUser> {
 }
 
 /// Parse a GitHub `/user/orgs` response (a JSON array of org objects) into `github:org/<org-login>`
-/// group strings. Fail-CLOSED: malformed JSON, a non-array body, or an org `login` no GitHub reply
-/// carries (a control character, over [`MAX_LOGIN_BYTES`]) yields `None` (the caller's outage) — a
-/// truncated or foreign orgs response must NOT be mistaken for "no orgs" and silently drop the
-/// user's org groups (which would lock them out of org-gated roles). A VALID empty array is
-/// `Some(vec![])` (login succeeds with zero groups). Every entry must carry a valid non-empty
-/// string `login`; a foreign entry refuses the whole response.
+
 pub fn parse_org_groups(body: &str) -> Option<Vec<String>> {
     let v: Value = serde_json::from_str(body.trim()).ok()?;
     let mut groups = Vec::new();
@@ -486,37 +449,11 @@ pub fn parse_org_groups(body: &str) -> Option<Vec<String>> {
 }
 
 /// Assemble the identity [`Principal`] from the parsed `/user` and org groups: id `github:<login>`,
-/// display name (the profile `name`, falling back to the `login`), and the `github:org/<org>` groups.
-///
-/// The principal id stays `github:<login>`: it is the documented, human-readable identity operators
-/// already bind roles to in `auth.role_bindings.github:`, and changing it would silently break every
-/// existing binding and every persisted `user:github:<login>` group at once.
-///
-/// But a login is NOT a safe thing to anchor identity on, and saying "renaming is rare, just re-bind"
-/// understates it. GitHub RELEASES a handle when an account is renamed or deleted, and anyone may then
-/// register it. A departed employee's handle, taken by an outsider, produces the identical principal
-/// id and inherits that person's role bindings, per-user group, pools and budgets — with nothing
-/// anywhere reporting a change of person.
-///
-/// So the stable numeric account id is emitted ALONGSIDE, as the `github:id/<id>` role. That is
-/// purely additive: every existing login binding keeps working untouched, and an operator can bind to
-/// `github:id/12345`. New deployments should prefer it.
-///
-/// WHAT THIS DOES AND DOES NOT FIX, because the difference is easy to overread. It narrows WHO GETS
-/// GRANTED: a binding on `github:id/<id>` cannot be inherited by whoever re-registers the handle,
-/// because core matches roles by exact lookup and the impostor carries a different numeric role. It
-/// does NOT separate the BUCKETS: the enforcement subject is still `principal.id`, so the
-/// re-registered handle continues to land on the same `user:github:<login>` group, usage ledger and
-/// budget as its previous owner. Separating those means changing the principal id, which is the
-/// breaking change this deliberately avoids.
-///
-/// `github:org/<org>` has the same weakness, being likewise a renameable slug. Closing that one needs
-/// the org's numeric id threaded through `parse_org_groups`, a payload change rather than a one-line
-/// addition.
+
 pub fn build_principal(user: &GhUser, org_groups: Vec<String>) -> Principal {
     let mut p = Principal::from_id(format!("github:{}", user.login));
     p.name = Some(user.name.clone().unwrap_or_else(|| user.login.clone()));
-    // FIRST, so it is the one an operator reading a principal sees before the org list.
+
     p.roles = Vec::with_capacity(org_groups.len() + 1);
     p.roles.push(format!("github:id/{}", user.id));
     p.roles.extend(org_groups);

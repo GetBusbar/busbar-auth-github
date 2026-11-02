@@ -13,8 +13,6 @@ use busbar_plugin_loader::dispatch::{now_ns, ConnTable};
 use std::collections::HashMap;
 use std::sync::Mutex;
 
-// The existing safe Door runs the real exchange against its host connection table.
-// HTTP loopback is an explicit operator setting; no TLS fact or public-HTTP exception is invented.
 const LOCAL: &str = r#"{"client_id":"Iv1.conformance","token_base":"http://127.0.0.1:8080","api_base":"http://127.0.0.1:8080"}"#;
 struct RateLimited {
     hint: Option<u64>,
@@ -145,8 +143,6 @@ fn load(dropped: bool, binding: Bind) -> Plugin<Auth> {
 
 #[test]
 fn retry_hint_reaches_host_owned_extensions_through_both_doors() {
-    // Old API only: the extension key is read through the existing generic extension parser.
-    // Thus the old plugin fails behaviorally (missing metadata), not on a new SDK test API.
     let d = dispatcher();
     for dropped in [false, true] {
         for hint in [None, Some(0), Some(120), Some(u64::MAX)] {

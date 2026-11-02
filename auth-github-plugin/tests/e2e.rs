@@ -2,22 +2,6 @@
 // Copyright (C) 2026 Busbar Inc and contributors
 
 //! Plugin-SIDE live end-to-end for the GitHub login plugin — the mirror of `auth-oidc-plugin`'s
-//! `tests/e2e.rs`, testing THIS plugin's OWN token-exchange direction (the GET browser-redirect flow
-//! where, on 1.6, the plugin itself runs the token → `/user` → `/user/orgs` hops over its `http` need).
-//!
-//! GitHub issues an OPAQUE access token (no id_token/JWKS to verify offline), so — unlike OIDC — there
-//! is no held-token `POST /auth/token` path to exercise, and the hops run inside a login flow, not via
-//! a direct plugin-ABI call. The only faithful test is therefore a REAL busbar boot driving the real
-//! GET flow. The GitHub REST endpoints are stubbed by a READY-MADE WireMock container (never a
-//! hand-rolled server), provided by CI as a service container and addressed via
-//! `BUSBAR_TEST_WIREMOCK_URL` (mirrors how the store plugins read `BUSBAR_TEST_POSTGRES_URL`). This
-//! test registers its stub mappings over WireMock's own `/__admin` API, packs the real plugin cdylib
-//! with the real `busbar-plugin-pack`, boots the real `busbar` binary with an `identity-providers.github`
-//! pointed at WireMock, and drives GET begin → callback so the plugin really runs the hops.
-//!
-//! GATING: when `BUSBAR_TEST_WIREMOCK_URL` is unset (a local run without the container) the test
-//! SKIPS loudly — never a silent-vacuous pass — exactly like the store plugins' service-gated tests.
-//! Under CI, the plugin-ci `service: wiremock` arm sets the env var and the test RUNS.
 
 use std::io::Write as _;
 
@@ -30,9 +14,7 @@ fn wiremock_url() -> Option<String> {
 }
 
 /// The busbar checkout the live e2e builds the REAL `busbar` and `busbar-plugin-pack` binaries from:
-/// `BUSBAR_CHECKOUT`, a checkout of GetBusbar/busbar at `.busbar-ref` field 1 (this repo's CI `e2e` job
-/// checks it out and sets the variable). This repo builds against busbar by git rev, not a sibling
-/// path, so the binaries' source is named explicitly. Unset ⇒ the live leg cannot run, and says so.
+
 fn busbar_root() -> std::path::PathBuf {
     let dir = std::env::var_os("BUSBAR_CHECKOUT").expect(
         "BUSBAR_CHECKOUT is unset: the live e2e builds the real busbar binaries from a checkout of \
@@ -46,9 +28,7 @@ fn busbar_root() -> std::path::PathBuf {
 /// Build (cargo-cached) and return the real `busbar` + `busbar-plugin-pack` binaries from the sibling.
 fn build_real_binaries() -> (std::path::PathBuf, std::path::PathBuf) {
     let root = busbar_root();
-    // Two invocations: in busbar 1.6.0 `busbar-plugin-pack` is a feature-gated bin of the
-    // `busbar-plugin-loader` package (`--features pack`), not a package of its own, and building it
-    // separately keeps the `pack` feature out of the `busbar` build.
+
     for args in [
         &[
             "build",
@@ -74,9 +54,6 @@ fn build_real_binaries() -> (std::path::PathBuf, std::path::PathBuf) {
         let status = std::process::Command::new("cargo")
             .args(args)
             .current_dir(&root)
-            // The binaries are read back from `<sibling>/target/release` below, so the build must
-            // land there: an inherited CARGO_TARGET_DIR (set for the outer `cargo test`) would
-            // redirect it into the plugin's own target dir.
             .env_remove("CARGO_TARGET_DIR")
             .status()
             .expect("run cargo build for busbar / busbar-plugin-pack");
@@ -92,7 +69,7 @@ fn build_real_binaries() -> (std::path::PathBuf, std::path::PathBuf) {
 }
 
 /// Locate the built `busbar_auth_github_plugin` cdylib (checks the uplifted profile dir and target/deps,
-/// newest wins — same helper shape as auth-oidc's `plugin_path`). Under CI a missing cdylib is fatal.
+
 fn plugin_path() -> Option<std::path::PathBuf> {
     let candidate = (|| {
         let exe = std::env::current_exe().ok()?;
@@ -133,8 +110,6 @@ fn pack_github(pack_bin: &std::path::Path, so: &std::path::Path, out: &std::path
             "--kind",
             "auth",
             "--version",
-            // The release version is the plugin's own, the one its Statement states (the pack tool
-            // refuses any other).
             env!("CARGO_PKG_VERSION"),
             "--publisher",
             "busbar",
@@ -152,7 +127,7 @@ fn pack_github(pack_bin: &std::path::Path, so: &std::path::Path, out: &std::path
 }
 
 /// The busbar process, killed and reaped when it drops: a failed assertion never leaks it (or its
-/// ports) past the test.
+
 struct Busbar(std::process::Child);
 
 impl Drop for Busbar {
@@ -183,9 +158,8 @@ fn reserve_port() -> std::net::TcpListener {
 }
 
 /// Register the GitHub stub mappings on WireMock over its admin API (equivalent to the JSON files under
-/// busbar/scripts/fixtures/auth-github-wiremock, kept here so the plugin's own CI is self-contained).
+
 fn register_wiremock_stubs(client: &reqwest::blocking::Client, base: &str) {
-    // Poll WireMock's admin API until it answers (the service container may still be starting).
     let mut ready = false;
     for _ in 0..60 {
         if client
@@ -199,7 +173,7 @@ fn register_wiremock_stubs(client: &reqwest::blocking::Client, base: &str) {
         std::thread::sleep(std::time::Duration::from_millis(500));
     }
     assert!(ready, "WireMock admin API never became ready at {base}");
-    // Fresh slate so a rerun does not stack duplicate stubs.
+
     let _ = client.post(format!("{base}/__admin/mappings/reset")).send();
     let mappings = [
         serde_json::json!({
@@ -248,7 +222,7 @@ fn register_wiremock_stubs(client: &reqwest::blocking::Client, base: &str) {
 }
 
 /// Decode the busbar login cookie (base64url(JSON)) and read its `state` (the CSRF value the callback
-/// must echo — a real browser round-trips the HttpOnly cookie; the test reads it out of the cookie).
+
 fn cookie_fields(cookie_value: &str) -> serde_json::Value {
     use base64::Engine as _;
     let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
@@ -285,13 +259,10 @@ fn wait_for_health(client: &reqwest::blocking::Client, url: &str, child: &mut st
 }
 
 /// THE plugin-side proof: a REAL busbar boot drives the github GET flow; the plugin executes the real
-/// token/user/orgs hops against WireMock; a self-scoped key is minted for `github:octotest` bound
-/// through role `github:org/testorg`, and that key receives a successful model response on the data plane.
+
 #[test]
 fn github_get_flow_mints_key_via_core_executed_hops() {
     let Some(wm) = wiremock_url() else {
-        // Under CI the service container is the test's subject: its absence is a failure, never a
-        // green skip.
         assert!(
             std::env::var_os("CI").is_none(),
             "CI is set but BUSBAR_TEST_WIREMOCK_URL is unset: the plugin-ci `service: wiremock` \
@@ -310,7 +281,7 @@ fn github_get_flow_mints_key_via_core_executed_hops() {
     let (busbar_bin, pack_bin) = build_real_binaries();
 
     let client = reqwest::blocking::Client::builder()
-        .redirect(reqwest::redirect::Policy::none()) // capture the 302 + Set-Cookie ourselves
+        .redirect(reqwest::redirect::Policy::none())
         .build()
         .unwrap();
     register_wiremock_stubs(&client, &wm);
@@ -331,7 +302,6 @@ fn github_get_flow_mints_key_via_core_executed_hops() {
         &plugins_dir.join("busbar-auth-github.tar.gz"),
     );
 
-    // Hold both reservations simultaneously, so the allocator cannot give both roles one port.
     let data_listener = reserve_port();
     let admin_listener = reserve_port();
     let data_port = data_listener.local_addr().unwrap().port();
@@ -349,7 +319,7 @@ fn github_get_flow_mints_key_via_core_executed_hops() {
     }
 
     let providers = work.join("providers.yaml");
-    // A successful upstream response proves that the issued identity can use the data plane.
+
     std::fs::write(
         &providers,
         format!("mock:\n  protocol: anthropic\n  base_url: \"{wm}\"\n"),
@@ -383,7 +353,6 @@ fn github_get_flow_mints_key_via_core_executed_hops() {
     )
     .unwrap();
 
-    // busbar binds these addresses itself; release reservations immediately before spawn.
     drop((data_listener, admin_listener));
     let mut child = Busbar(
         std::process::Command::new(&busbar_bin)
@@ -401,7 +370,6 @@ fn github_get_flow_mints_key_via_core_executed_hops() {
     let base = format!("http://127.0.0.1:{data_port}");
     wait_for_health(&client, &format!("{base}/healthz"), &mut child.0);
 
-    // begin: GET ?method=github → 302 + login cookie carrying state.
     let begin = client
         .get(format!("{base}/auth/token?method=github"))
         .send()
@@ -419,7 +387,6 @@ fn github_get_flow_mints_key_via_core_executed_hops() {
     let login_cookie = cookie_fields(&cookie_value);
     let state = login_cookie["state"].as_str().expect("cookie state");
 
-    // callback: GET ?code=…&state=… WITH the cookie → the plugin executes the token/user/orgs hops.
     let cb = client
         .get(format!("{base}/auth/token?code=e2e-code&state={state}"))
         .header(
@@ -434,7 +401,7 @@ fn github_get_flow_mints_key_via_core_executed_hops() {
         cb.status()
     );
     let page = cb.text().unwrap();
-    // Inspect the request WireMock actually received, including the exact PKCE verifier.
+
     let journal: serde_json::Value = client
         .get(format!("{wm}/__admin/requests"))
         .send()
@@ -476,9 +443,6 @@ fn github_get_flow_mints_key_via_core_executed_hops() {
     );
     let api_key = issued_key_from_html(&page).expect("the key page carries the issued api_key");
 
-    // The ROLE BINDING applied: `github:org/testorg` (the org group the plugin read off
-    // /user/orgs) bound the sign-in to `eng-team`, so its `user:github:octotest` leaf was
-    // provisioned UNDER eng-team. Read off the admin API, not inferred from the page.
     let leaf = client
         .get(format!(
             "http://127.0.0.1:{admin_port}/api/v1/admin/groups/user:github:octotest"
@@ -498,7 +462,6 @@ fn github_get_flow_mints_key_via_core_executed_hops() {
         "role github:org/testorg must bind the sign-in to eng-team: {leaf}"
     );
 
-    // The issued key authenticates and reaches the model under its provisioned identity.
     let chat = client
         .post(format!("{base}/v1/chat/completions"))
         .bearer_auth(&api_key)
@@ -515,5 +478,4 @@ fn github_get_flow_mints_key_via_core_executed_hops() {
     );
     let chat: serde_json::Value = chat.json().expect("chat response JSON");
     assert_eq!(chat["choices"][0]["message"]["content"], "authenticated");
-    // `child` and `work` are killed and removed when they drop, on a failed assertion too.
 }
