@@ -825,6 +825,18 @@ fn refused_answer(hop: Hop, status: u16, fields: &ReplyFields, body: &str) -> Tu
         Hop::Token => {
             if let (400 | 401, Some(code)) = (
                 status,
+                github_error(body).filter(|code| OPERATOR_TOKEN_ERRORS.contains(&code.as_str())),
+            ) {
+                tracing::warn!(
+                    module = "github",
+                    status,
+                    error = %code,
+                    "github login: the token endpoint refused this client: the operator's configuration (check client_id, client_secret, the OAuth App's callback URL and that the app is not suspended)"
+                );
+                return Turn::Outage { retry_after: None };
+            }
+            if let (400 | 401, Some(code)) = (
+                status,
                 github_error(body).filter(|code| {
                     matches!(
                         code.as_str(),
@@ -838,9 +850,7 @@ fn refused_answer(hop: Hop, status: u16, fields: &ReplyFields, body: &str) -> Tu
                 }),
             ) {
                 let code = loggable(&code);
-                if matches!(code, "invalid_client" | "unauthorized_client")
-                    || OPERATOR_TOKEN_ERRORS.contains(&code)
-                {
+                if matches!(code, "invalid_client" | "unauthorized_client") {
                     tracing::warn!(
                         module = "github",
                         status,

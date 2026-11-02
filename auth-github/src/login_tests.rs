@@ -1401,22 +1401,37 @@ mod logging {
     #[test]
     fn a_token_endpoint_refusing_the_client_warns_the_operator() {
         let l = login();
-        for body in [
-            r#"{"error":"invalid_client","error_description":"x"}"#,
-            r#"{"error":"unauthorized_client"}"#,
-            r#"{"error":"incorrect_client_credentials"}"#,
-            r#"{"error":"redirect_uri_mismatch"}"#,
-            r#"{"error":"application_suspended"}"#,
+        for (body, expected) in [
+            (
+                r#"{"error":"invalid_client","error_description":"x"}"#,
+                LoginStep::BadCredential,
+            ),
+            (
+                r#"{"error":"unauthorized_client"}"#,
+                LoginStep::BadCredential,
+            ),
+            (r#"{"error":"incorrect_client_credentials"}"#, OUTAGE),
+            (r#"{"error":"redirect_uri_mismatch"}"#, OUTAGE),
+            (r#"{"error":"application_suspended"}"#, OUTAGE),
         ] {
             let mut s = Script::happy().answer(TOKEN_URL, 401, body);
             let cap = GithubDiagnostics::default();
             let step = tracing::subscriber::with_default(cap.subscriber(), || run(&l, &mut s));
-            assert_eq!(step, LoginStep::BadCredential, "{body}");
+            assert_eq!(step, expected, "{body}");
             assert!(
                 cap.contains("client_secret"),
                 "{body}: {:?}",
                 cap.messages()
             );
+            assert_eq!(
+                cap.messages().len(),
+                1,
+                "one operator WARN: {:?}",
+                cap.messages()
+            );
+            for secret in [SECRET, "the-code", "the-verifier"] {
+                assert!(!cap.contains(secret), "{:?}", cap.messages());
+            }
         }
         let mut s = Script::happy().answer(TOKEN_URL, 400, r#"{"error":"invalid_grant"}"#);
         let cap = GithubDiagnostics::default();
