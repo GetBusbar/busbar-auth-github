@@ -1376,8 +1376,6 @@ mod logging {
     const NO_TOKEN_BASE: &str =
         r#"{"client_id": "Iv1.client", "api_base": "https://api.github.com"}"#;
 
-    /// OWNER RULING (sibling/auth): settings that leave `token_base` at its default are refused at
-
     #[test]
     fn a_hop_the_guard_refuses_is_explained_without_a_secret() {
         let err = GithubLogin::open(NO_TOKEN_BASE, Some(SECRET)).unwrap_err();

@@ -809,8 +809,6 @@ fn loggable(code: &str) -> &str {
     }
 }
 
-/// The turn a non-2xx answer on `hop` is (OWNER-SIGNED 2026-10-30: only RFC 6749 §5.2 credential
-
 fn refused_answer(hop: Hop, status: u16, fields: &ReplyFields, body: &str) -> Turn {
     let path = hop.path();
     if status >= 500 || status == 429 {
