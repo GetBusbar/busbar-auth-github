@@ -1028,6 +1028,65 @@ fn wipe_hop(hop: &mut LoginHop) {
     }
 }
 
+/// The `id_token` member of a token answer: absent, a string (wiped on drop), or any other value.
+#[derive(Default)]
+enum Member {
+    #[default]
+    Absent,
+    Str(Zeroizing<String>),
+    Other,
+}
+
+#[derive(serde::Deserialize)]
+struct IdTokenMember {
+    #[serde(default, deserialize_with = "member")]
+    id_token: Member,
+}
+
+fn member<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Member, D::Error> {
+    use serde::de::{IgnoredAny, MapAccess, SeqAccess, Visitor};
+    struct V;
+    impl<'de> Visitor<'de> for V {
+        type Value = Member;
+        fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+            f.write_str("any JSON value")
+        }
+        fn visit_str<E>(self, v: &str) -> Result<Member, E> {
+            Ok(Member::Str(Zeroizing::new(v.to_string())))
+        }
+        fn visit_string<E>(self, v: String) -> Result<Member, E> {
+            Ok(Member::Str(Zeroizing::new(v)))
+        }
+        fn visit_bool<E>(self, _: bool) -> Result<Member, E> {
+            Ok(Member::Other)
+        }
+        fn visit_i64<E>(self, _: i64) -> Result<Member, E> {
+            Ok(Member::Other)
+        }
+        fn visit_u64<E>(self, _: u64) -> Result<Member, E> {
+            Ok(Member::Other)
+        }
+        fn visit_f64<E>(self, _: f64) -> Result<Member, E> {
+            Ok(Member::Other)
+        }
+        fn visit_unit<E>(self) -> Result<Member, E> {
+            Ok(Member::Other)
+        }
+        fn visit_none<E>(self) -> Result<Member, E> {
+            Ok(Member::Other)
+        }
+        fn visit_map<A: MapAccess<'de>>(self, mut m: A) -> Result<Member, A::Error> {
+            while m.next_entry::<IgnoredAny, IgnoredAny>()?.is_some() {}
+            Ok(Member::Other)
+        }
+        fn visit_seq<A: SeqAccess<'de>>(self, mut s: A) -> Result<Member, A::Error> {
+            while s.next_element::<IgnoredAny>()?.is_some() {}
+            Ok(Member::Other)
+        }
+    }
+    d.deserialize_any(V)
+}
+
 /// The nonce binding (a constant-time compare): a body
 /// with no `id_token` binds trivially; one with an `id_token` binds only when its payload's `nonce`
 /// claim (base64url, no signature check: that is the IdP module's job) equals `minted`.
@@ -1037,13 +1096,21 @@ fn id_token_nonce_binds(body: &str, minted: Option<&str>) -> bool {
     // not bind), else a form body's key (the shape `parse_access_token` also accepts). Only that
     // member is read: the rest of the body (an access token) is skipped, never copied.
     let id_token: Zeroizing<String> = if trimmed.starts_with('{') || trimmed.starts_with('[') {
-        let Ok(Value::Object(mut members)) = serde_json::from_str::<Value>(trimmed) else {
+        if trimmed.starts_with('[') {
             return true;
+        }
+        // Only the `id_token` member is deserialized; serde skips the rest unread. A repeated
+        // `id_token` or a malformed object fails the parse, which never binds.
+        let Ok(IdTokenMember {
+            id_token: member, ..
+        }) = serde_json::from_str::<IdTokenMember>(trimmed)
+        else {
+            return false;
         };
-        match members.remove("id_token") {
-            None => return true,
-            Some(Value::String(t)) => Zeroizing::new(t),
-            Some(_) => return false,
+        match member {
+            Member::Absent => return true,
+            Member::Str(t) => t,
+            Member::Other => return false,
         }
     } else {
         let Some(raw) = trimmed.split('&').find_map(|pair| {
