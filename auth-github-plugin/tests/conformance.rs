@@ -1035,16 +1035,25 @@ fn github_lifecycle_crosses_once_and_undeclared_outbound_slots_refuse() {
         assert_eq!(count(), 0);
         assert_eq!(p.max_inflight(), 64);
         assert_eq!(p.name(), NAME);
-        for bad in ["{}", r#"{"client_id":5}"#] {
+        for (bad, error_prefix) in [
+            ("{}", "Failed lease=false settings:"),
+            (
+                r#"{"client_id":5}"#,
+                "Failed lease=false settings.client_id:",
+            ),
+        ] {
             let before = count();
             assert!(validate(&p, bad).starts_with("Failed"));
             assert_eq!(count() - before, 1);
             let before = count();
             let answer = open(&p, bad, Some(SECRET));
-            assert!(
-                answer.starts_with("Failed lease=false settings:"),
-                "bad OPEN {bad}: {answer}"
-            );
+            assert!(answer.starts_with(error_prefix), "bad OPEN {bad}: {answer}");
+            if bad == r#"{"client_id":5}"# {
+                assert!(
+                    answer.contains("invalid type: integer `***`, expected a string"),
+                    "bad OPEN masks the field value and names its type: {answer}"
+                );
+            }
             assert_eq!(count() - before, 1);
         }
         let before = count();
