@@ -304,7 +304,7 @@ fn red_l2_a_parked_flow_resumes_under_the_login_it_began_with() {
     let rotated = WRITTEN.replace("https://api.github.com", "https://ghe.example/api/v3");
     <Github as Life>::refresh(&g, rotated.as_bytes(), &[b"secret-after"], 2).expect("refreshes");
     assert_eq!(g.login().config().api_base, "https://ghe.example/api/v3");
-    let resumed = driving(&g, &parked);
+    let resumed = parked.login.clone();
     assert!(
         Arc::ptr_eq(&resumed, &begun),
         "the flow keeps its own login"
@@ -317,7 +317,7 @@ fn red_l2_a_parked_flow_resumes_under_the_login_it_began_with() {
         wire: None,
         base: 0,
     };
-    assert!(Arc::ptr_eq(&driving(&g, &after), &g.login()));
+    assert!(Arc::ptr_eq(&after.login, &g.login()));
 }
 
 /// RED L6: `fetch_orgs` (the default) reads `/user/orgs`, which needs the `read:org` scope (or a

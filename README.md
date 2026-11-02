@@ -50,8 +50,9 @@ a `403` on `/user/orgs` (the token lacks `read:org`: logged at warn as the opera
 redirect, `404`, `408` or any other status; a 200 token error that is the operator's
 (`incorrect_client_credentials`, `redirect_uri_mismatch`, `application_suspended`, logged at warn)
 or unknown; a 2xx with no token, no user or no org list (empty, HTML, malformed JSON); a hop that
-cannot be made (refused, connect, TLS, timeout); a reply past 256 KiB. An outage carries GitHub's
-retry hint (`retry-after` seconds, or the seconds to `x-ratelimit-reset`) for the host. An
+cannot be made (refused, connect, TLS, timeout); a reply past 256 KiB. An outage's GitHub retry
+hint (`retry-after` seconds, or the seconds to `x-ratelimit-reset`) is logged at warn with the outage:
+the auth ABI has no slot to pass it to the host. An
 `id_token` on a hop answer (never from github.com) must carry the nonce minted at begin, else the
 sign-in fails its security check (400).
 

@@ -9,8 +9,8 @@
 //!   ([`GithubLogin::open`]); the client secret is the Statement's one secret
 //!   reference, resolved by the kernel into `OpenIn.secrets[0]`, never a settings value.
 //! * `begin_login` answers the GitHub authorize URL under a lease.
-//! * `complete_login` runs the hop chain itself ([`GithubLogin::drive`]) over the Statement's one
-//!   outbound need, each hop one framed `exchange()`; PENDING parks the flow on the ticket. A
+//! * `complete_login` runs the hop chain itself ([`GithubLogin::drive`]) over the Statement's
+//!   outbound needs (anchored or public, see `need_of`), each hop one framed `exchange()`; PENDING parks the flow on the ticket. A
 //!   ticket-less call cannot wait on I/O and answers REFUSED. A parked flow is driven by the login
 //!   it began under, to its end, whatever `refresh` swapped in meanwhile. An identity that does
 //!   not fit the host's buffer is the short answer, and the retry is served from the identity
@@ -69,7 +69,7 @@ const NEED_PUBLIC: u32 = 1;
 /// The setting the anchored need's extra trusted root comes from (a config path the host reads).
 const CA_CERT_PATH: &str = "settings.ca_cert_pem";
 
-/// One outbound need to the IdP over the `http` transport (the scheme the http framer claims; an
+/// An outbound need (anchored or public, see [`need_of`]) to the IdP over the `http` transport (the scheme the http framer claims; an
 /// `https` target is secured by the connector), its target named per hop (token, `/user`,
 /// `/user/orgs`), bounded by a per-hop timeout, trusting `trust_from`'s root beside the public
 /// roots (`ABSENT`: the public roots only).
@@ -283,14 +283,7 @@ struct Parked {
     base: u32,
 }
 
-/// The login a resumed flow is driven by: the one it began under, to its end. A `refresh` swaps
-/// the instance's login for the flows begun after it; a flow parked before it keeps its own client
-/// secret, bases and allowlist (the hop parked on a pending exchange was rendered by it).
-fn driving(_: &Github, parked: &Parked) -> Arc<GithubLogin> {
-    parked.login.clone()
-}
-
-/// The hop exchange over the instance's connector: one framed `exchange()` per hop on the one need.
+/// The hop exchange over the instance's connector: one framed `exchange()` per hop on the login's need (anchored or public, see `need_of`).
 struct Over<'c, 'h> {
     c: &'c mut Connector<'h>,
     need: u32,
@@ -423,7 +416,11 @@ impl SafeSlot for Complete {
                 }
             }
         };
-        let login = driving(g, &parked);
+        // The login a resumed flow is driven by: the one it began under, to its end. A `refresh`
+        // swaps the instance's login for the flows begun after it; a flow parked before it keeps
+        // its own client secret, bases and allowlist (the hop parked on a pending exchange was
+        // rendered by it).
+        let login = parked.login.clone();
         let step = match h.host() {
             None => login.drive(&mut parked.flow, &mut Unarmed),
             Some(host) => {
@@ -458,7 +455,9 @@ fn verdict(step: &LoginStep) -> u32 {
     match step {
         LoginStep::Outage { .. } => LOGIN_OUTAGE,
         LoginStep::SecurityCheckFailed => LOGIN_SECURITY_CHECK_FAILED,
-        _ => LOGIN_BAD_CREDENTIAL,
+        LoginStep::BadCredential => LOGIN_BAD_CREDENTIAL,
+        // Neither is terminal: the caller answers them before it asks for a verdict.
+        LoginStep::Pending | LoginStep::Identity(_) => LOGIN_OUTAGE,
     }
 }
 
