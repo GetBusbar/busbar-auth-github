@@ -711,7 +711,13 @@ impl GithubLogin {
         }
         let method = match hop.method.as_str() {
             m if !m.is_empty() && m.bytes().all(|b| b.is_ascii_alphabetic()) => m.to_string(),
-            _ => "POST".to_string(),
+            _ => {
+                tracing::warn!(
+                    module = "github",
+                    "github login: hop refused, its method is not an HTTP token"
+                );
+                return Err(Refused);
+            }
         };
         // Only a hop with a form body says what its body is (L4).
         let mut fields = Vec::new();

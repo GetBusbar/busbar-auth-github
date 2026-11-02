@@ -729,6 +729,31 @@ fn a_bearer_with_a_line_break_fails_the_hop_closed() {
     assert_eq!(s.targets(), vec![TOKEN_URL]);
 }
 
+#[test]
+fn red_r1_prod0_7_a_hop_with_an_invalid_method_is_refused_not_sent_as_post() {
+    let l = login();
+    let mut hop = busbar_auth_github_plugin_hop();
+    for bad in ["", "GET ", "G3T", "GE\r\nT"] {
+        hop.method = bad.to_string();
+        assert!(
+            l.render(&hop, None).is_err(),
+            "method {bad:?} must be refused"
+        );
+    }
+    hop.method = "GET".to_string();
+    assert_eq!(l.render(&hop, None).expect("valid").method, "GET");
+}
+
+fn busbar_auth_github_plugin_hop() -> busbar_contract::auth::LoginHop {
+    busbar_contract::auth::LoginHop {
+        method: "GET".to_string(),
+        url: format!("{}/user", "https://api.github.com"),
+        form: Vec::new(),
+        secret_form_field: None,
+        headers: Vec::new(),
+    }
+}
+
 /// An unsigned JWT-shaped token whose payload is `claims` (base64url, no padding).
 fn id_token(claims: &str) -> String {
     const A: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
