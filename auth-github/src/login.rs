@@ -528,7 +528,9 @@ impl GithubLogin {
         let body = body.as_str();
 
         let hop = flow.state.hop;
-
+        // OWNER-SIGNED 2026-10-30: only a credential error is a declined sign-in; every other
+        // answer that is no 2xx is the IdP not answering this hop, an outage (the host answers
+        // 503, retryable); the step carries the IdP's retry hint when it gave one.
         if !(200..300).contains(&status) {
             let turn = refused_answer(hop, status, &fields, body);
             flow.state = FlowState::default();
@@ -836,7 +838,9 @@ fn refused_answer(hop: Hop, status: u16, fields: &ReplyFields, body: &str) -> Tu
                 }),
             ) {
                 let code = loggable(&code);
-                if matches!(code, "invalid_client" | "unauthorized_client") {
+                if matches!(code, "invalid_client" | "unauthorized_client")
+                    || OPERATOR_TOKEN_ERRORS.contains(&code)
+                {
                     tracing::warn!(
                         module = "github",
                         status,
@@ -965,39 +969,77 @@ fn wipe_hop(hop: &mut LoginHop) {
     }
 }
 
-/// The nonce binding (a constant-time compare): a body
-fn id_token_nonce_binds(body: &str, minted: Option<&str>) -> bool {
-    #[derive(Default)]
-    enum TokenField {
-        #[default]
-        Missing,
-        Present(Value),
-    }
-    impl<'de> serde::Deserialize<'de> for TokenField {
-        fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
-            serde::Deserialize::deserialize(d).map(Self::Present)
+/// The `id_token` member of a token answer: absent, a string (wiped on drop), or any other value.
+#[derive(Default)]
+enum Member {
+    #[default]
+    Absent,
+    Str(Zeroizing<String>),
+    Other,
+}
+
+#[derive(serde::Deserialize)]
+struct IdTokenMember {
+    #[serde(default, deserialize_with = "member")]
+    id_token: Member,
+}
+
+fn member<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Member, D::Error> {
+    use serde::de::{IgnoredAny, MapAccess, SeqAccess, Visitor};
+    struct V;
+    impl<'de> Visitor<'de> for V {
+        type Value = Member;
+        fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+            f.write_str("any JSON value")
+        }
+        fn visit_str<E>(self, v: &str) -> Result<Member, E> {
+            Ok(Member::Str(Zeroizing::new(v.to_string())))
+        }
+        fn visit_string<E>(self, v: String) -> Result<Member, E> {
+            Ok(Member::Str(Zeroizing::new(v)))
+        }
+        fn visit_bool<E>(self, _: bool) -> Result<Member, E> {
+            Ok(Member::Other)
+        }
+        fn visit_i64<E>(self, _: i64) -> Result<Member, E> {
+            Ok(Member::Other)
+        }
+        fn visit_u64<E>(self, _: u64) -> Result<Member, E> {
+            Ok(Member::Other)
+        }
+        fn visit_f64<E>(self, _: f64) -> Result<Member, E> {
+            Ok(Member::Other)
+        }
+        fn visit_unit<E>(self) -> Result<Member, E> {
+            Ok(Member::Other)
+        }
+        fn visit_none<E>(self) -> Result<Member, E> {
+            Ok(Member::Other)
+        }
+        fn visit_map<A: MapAccess<'de>>(self, mut m: A) -> Result<Member, A::Error> {
+            while m.next_entry::<IgnoredAny, IgnoredAny>()?.is_some() {}
+            Ok(Member::Other)
+        }
+        fn visit_seq<A: SeqAccess<'de>>(self, mut s: A) -> Result<Member, A::Error> {
+            while s.next_element::<IgnoredAny>()?.is_some() {}
+            Ok(Member::Other)
         }
     }
-    /// Only the `id_token` member is read: the rest of the body (an access token) is skipped,
-    /// never copied.
-    #[derive(serde::Deserialize)]
-    struct IdToken {
-        #[serde(default)]
-        id_token: TokenField,
-    }
+    d.deserialize_any(V)
+}
+
+/// The nonce binding (a constant-time compare): a body
+fn id_token_nonce_binds(body: &str, minted: Option<&str>) -> bool {
     let body = body.trim();
     if body.starts_with('{') {
-        let parsed = match serde_json::from_str::<IdToken>(body) {
+        let parsed = match serde_json::from_str::<IdTokenMember>(body) {
             Ok(parsed) => parsed,
-
             Err(error) => return !error.is_data(),
         };
         return match parsed.id_token {
-            TokenField::Missing => true,
-            TokenField::Present(Value::String(token)) => {
-                token_nonce_binds(&Zeroizing::new(token), minted)
-            }
-            TokenField::Present(_) => false,
+            Member::Absent => true,
+            Member::Str(token) => token_nonce_binds(&token, minted),
+            Member::Other => false,
         };
     }
 

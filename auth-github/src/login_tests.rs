@@ -687,6 +687,31 @@ fn a_bearer_with_a_line_break_fails_the_hop_closed() {
     assert_eq!(s.targets(), vec![TOKEN_URL]);
 }
 
+#[test]
+fn red_r1_prod0_7_a_hop_with_an_invalid_method_is_refused_not_sent_as_post() {
+    let l = login();
+    let mut hop = busbar_auth_github_plugin_hop();
+    for bad in ["", "GET ", "G3T", "GE\r\nT"] {
+        hop.method = bad.to_string();
+        assert!(
+            l.render(&hop, None).is_err(),
+            "method {bad:?} must be refused"
+        );
+    }
+    hop.method = "GET".to_string();
+    assert_eq!(l.render(&hop, None).expect("valid").method, "GET");
+}
+
+fn busbar_auth_github_plugin_hop() -> busbar_contract::auth::LoginHop {
+    busbar_contract::auth::LoginHop {
+        method: "GET".to_string(),
+        url: format!("{}/user", "https://api.github.com"),
+        form: Vec::new(),
+        secret_form_field: None,
+        headers: Vec::new(),
+    }
+}
+
 /// An unsigned JWT-shaped token whose payload is `claims` (base64url, no padding).
 fn id_token(claims: &str) -> String {
     const A: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
@@ -1370,6 +1395,38 @@ mod logging {
         }
     }
 
+    /// The token endpoint declining the client itself (invalid_client / unauthorized_client) is the
+    /// operator's misconfiguration: it warns, naming client_secret. A user's bad code (invalid_grant)
+    /// stays at info.
+    #[test]
+    fn a_token_endpoint_refusing_the_client_warns_the_operator() {
+        let l = login();
+        for body in [
+            r#"{"error":"invalid_client","error_description":"x"}"#,
+            r#"{"error":"unauthorized_client"}"#,
+            r#"{"error":"incorrect_client_credentials"}"#,
+            r#"{"error":"redirect_uri_mismatch"}"#,
+            r#"{"error":"application_suspended"}"#,
+        ] {
+            let mut s = Script::happy().answer(TOKEN_URL, 401, body);
+            let cap = GithubDiagnostics::default();
+            let step = tracing::subscriber::with_default(cap.subscriber(), || run(&l, &mut s));
+            assert_eq!(step, LoginStep::BadCredential, "{body}");
+            assert!(
+                cap.contains("client_secret"),
+                "{body}: {:?}",
+                cap.messages()
+            );
+        }
+        let mut s = Script::happy().answer(TOKEN_URL, 400, r#"{"error":"invalid_grant"}"#);
+        let cap = GithubDiagnostics::default();
+        let step = tracing::subscriber::with_default(cap.subscriber(), || run(&l, &mut s));
+        assert_eq!(step, LoginStep::BadCredential);
+        assert!(!cap.contains("client_secret"), "{:?}", cap.messages());
+    }
+
+    /// RED L8: a hop that could not be made (refused, connect, TLS, timeout, a request that could
+    /// not be framed) ends the login as an outage with one WARN naming the hop, never silently.
     #[test]
     fn red_l8_an_unreachable_hop_is_a_warn_naming_the_hop() {
         let l = login();
@@ -1508,6 +1565,11 @@ fn the_hop_bodies_are_wiped_on_drop() {
     wipes(&response.body);
 }
 
+/// GHO2, REFRESH MID-FLOW: the door swaps the login whole on `refresh`, but a parked flow is
+/// driven by the login it began under to its end (L2, `Parked::login`). Even a flow driven by
+/// another login re-issues the hop parked on a pending exchange exactly as it was sent (its stored
+/// answer is read, the code is never redeemed twice), and that login's client secret is never sent,
+/// as no token exchange is made again.
 #[test]
 fn a_refresh_mid_flow_resumes_the_parked_hop_unchanged() {
     let before = login();
@@ -1532,4 +1594,76 @@ fn a_refresh_mid_flow_resumes_the_parked_hop_unchanged() {
         .issued
         .iter()
         .all(|r| !body_text(r).contains("rotated-secret")));
+}
+
+/// RED r1-prod0-2: an `id_token` that is no string, or one in a form-shaped token answer, is
+/// still checked against the minted nonce; it never fails open.
+#[test]
+fn the_id_token_is_found_by_the_shape_of_the_answer() {
+    let foreign = id_token(r#"{"nonce":"foreign"}"#);
+    // A non-string member does not bind.
+    assert!(!id_token_nonce_binds(
+        r#"{"access_token":"x","id_token":123}"#,
+        Some("minted")
+    ));
+    // A null member and a repeated member never bind.
+    assert!(!id_token_nonce_binds(
+        r#"{"id_token":null}"#,
+        Some("minted")
+    ));
+    let bound_once = id_token(r#"{"nonce":"minted"}"#);
+    assert!(!id_token_nonce_binds(
+        &format!(r#"{{"id_token":"{bound_once}","id_token":"{bound_once}"}}"#),
+        Some("minted")
+    ));
+    // A malformed object carries no readable id_token; the shape check rules it an outage.
+    assert!(id_token_nonce_binds(r#"{"id_token":"#, Some("minted")));
+    assert!(id_token_nonce_binds("{not json", Some("minted")));
+    // A form-shaped answer carrying a foreign nonce does not bind.
+    assert!(!id_token_nonce_binds(
+        &format!("access_token=x&id_token={foreign}"),
+        Some("minted")
+    ));
+    // The same form answer with the minted nonce binds; one with no id_token binds trivially.
+    let bound = id_token(r#"{"nonce":"minted"}"#);
+    assert!(id_token_nonce_binds(
+        &format!("access_token=x&id_token={bound}"),
+        Some("minted")
+    ));
+    assert!(id_token_nonce_binds(
+        "access_token=x&scope=repo",
+        Some("minted")
+    ));
+    assert!(id_token_nonce_binds(
+        r#"{"access_token":"x"}"#,
+        Some("minted")
+    ));
+    assert!(id_token_nonce_binds(
+        r#"[{"login":"acme"}]"#,
+        Some("minted")
+    ));
+}
+
+/// RED r1-prod0-3: repeated `Link` field lines are one comma-joined list (RFC 9110 5.3), so a
+/// `rel="next"` on a later line is found.
+#[test]
+fn repeated_link_lines_are_one_list() {
+    let fields = ReplyFields::kept([
+        (
+            &b"Link"[..],
+            &b"<https://api.github.com/user/orgs?page=1>; rel=\"prev\""[..],
+        ),
+        (
+            &b"link"[..],
+            &b"<https://api.github.com/user/orgs?page=3>; rel=\"next\""[..],
+        ),
+        (&b"Retry-After"[..], &b"5"[..]),
+        (&b"retry-after"[..], &b"9"[..]),
+    ]);
+    let link = fields.link.as_deref().expect("a link");
+    assert_eq!(
+        next_link(link),
+        Some("https://api.github.com/user/orgs?page=3")
+    );
+    assert_eq!(fields.retry_after.as_deref(), Some("5"));
 }

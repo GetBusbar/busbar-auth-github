@@ -352,6 +352,51 @@ fn begin_login(p: &Plugin<Auth>) -> Vec<String> {
     ]
 }
 
+/// One `begin_login` with the caller's own fields: the call's outcome (as the transcript spells
+/// it), the authorize URL it named (if any), and the lease it returned (released here).
+fn begin_with(
+    p: &Plugin<Auth>,
+    redirect_uri: AbiStr,
+    state: AbiStr,
+    code_challenge: AbiStr,
+    scopes: &[AbiStr],
+) -> (String, Option<String>) {
+    let mut f = Frame::new(
+        BeginLoginIn {
+            head: in_head(),
+            redirect_uri,
+            state,
+            nonce: NO_STR,
+            code_challenge,
+            scopes: scopes.as_ptr(),
+            scopes_len: scopes.len(),
+        },
+        BeginLoginOut {
+            head: out_head(),
+            shape: 0,
+            _reserved: 0,
+            authorize_url: NO_STR,
+            form: std::ptr::null(),
+            form_len: 0,
+        },
+    );
+    let c = p.call(auth::slot::BEGIN_LOGIN, &mut f);
+    let url = &f.out.authorize_url;
+    // SAFETY: a READY `begin_login` names its URL in plugin memory held under the answer's lease,
+    // valid until that lease is released (below, after this copy).
+    let url = if url.is_absent() {
+        None
+    } else {
+        #[allow(unused_unsafe)]
+        Some(String::from_utf8_lossy(unsafe { url.bytes() }).into_owned())
+    };
+    let spoken = spelled(&c);
+    if c.lease != 0 {
+        release_lease(p, c.lease);
+    }
+    (spoken, url)
+}
+
 fn complete_login(p: &Plugin<Auth>) -> String {
     let (mut bytes, mut groups) = (vec![0u8; 256], vec![ABSENT; 4]);
     let (code, verifier) = (b"the-code", b"conformance-verifier");
@@ -444,6 +489,90 @@ fn the_linked_and_the_dropped_in_github_login_are_one_plugin() {
     }
 }
 
+/// `begin_login` fails closed: a redirect_uri, state or code_challenge that is absent or not
+/// UTF-8 is refused with no authorize URL, never defaulted to an empty string (which would drop
+/// CSRF and PKCE silently). Both doors.
+#[test]
+fn begin_login_refuses_a_missing_or_non_utf8_field_through_both_doors() {
+    const BAD: AbiStr = AbiStr::of_bytes(b"\xff\xfe");
+    let d = dispatcher();
+    for (door, p) in [("linked", linked(&d)), ("dropped-in", dropped(&d))] {
+        assert_eq!(open(&p, CFG, Some(SECRET)), "Ready lease=false ");
+        let (ok, url) = begin_with(
+            &p,
+            s("https://node.example/auth/token"),
+            s("st"),
+            s("ch"),
+            &[],
+        );
+        assert!(
+            ok.starts_with("Ready"),
+            "{door}: control must succeed: {ok}"
+        );
+        assert!(url.is_some(), "{door}: control names a URL");
+        for bad in [NO_STR, BAD] {
+            for which in 0..3 {
+                let mut f = [s("https://node.example/auth/token"), s("st"), s("ch")];
+                f[which] = bad;
+                let (spoken, url) = begin_with(&p, f[0], f[1], f[2], &[]);
+                assert!(
+                    !spoken.starts_with("Ready"),
+                    "{door}: field {which} bad must be refused, got {spoken}"
+                );
+                assert!(url.is_none(), "{door}: field {which} leaked a URL: {url:?}");
+            }
+        }
+    }
+}
+
+/// The scopes a host requests in `BeginLoginIn.scopes` reach the authorize URL (merged with the
+/// configured ones, de-duplicated); a scope that is not UTF-8 is refused, not skipped. Both doors.
+#[test]
+fn begin_login_carries_the_requested_scopes_through_both_doors() {
+    const BAD: AbiStr = AbiStr::of_bytes(b"\xff\xfe");
+    let d = dispatcher();
+    for (door, p) in [("linked", linked(&d)), ("dropped-in", dropped(&d))] {
+        assert_eq!(open(&p, CFG, Some(SECRET)), "Ready lease=false ");
+        let call = |scopes: &[AbiStr]| {
+            begin_with(
+                &p,
+                s("https://node.example/auth/token"),
+                s("st"),
+                s("ch"),
+                scopes,
+            )
+        };
+        let (spoken, url) = call(&[s("gist"), s("read:user")]);
+        let url = url.unwrap_or_default();
+        assert!(spoken.starts_with("Ready"), "{door}: {spoken}");
+        let scope = url
+            .split('&')
+            .find_map(|kv| kv.strip_prefix("scope="))
+            .unwrap_or_default()
+            .replace("%3A", ":")
+            .replace("%20", " ")
+            .replace('+', " ");
+        let scopes: Vec<&str> = scope.split(' ').collect();
+        assert!(
+            scopes.contains(&"gist"),
+            "{door}: requested scope missing: {url}"
+        );
+        assert_eq!(
+            scopes.iter().filter(|x| **x == "read:user").count(),
+            1,
+            "{door}: scope not de-duplicated: {url}"
+        );
+        let (spoken, url) = call(&[s("gist"), BAD]);
+        assert!(
+            !spoken.starts_with("Ready"),
+            "{door}: bad scope accepted: {spoken}"
+        );
+        assert!(url.is_none(), "{door}: bad scope leaked a URL: {url:?}");
+    }
+}
+
+/// RED ARM 1: the dropped-in door under a different operator config is a different transcript, so
+/// the equality in the both-ways test is not vacuous.
 #[test]
 fn a_different_operator_config_is_a_different_transcript() {
     let d = dispatcher();

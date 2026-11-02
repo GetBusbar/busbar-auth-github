@@ -44,6 +44,8 @@ use serde_json::Value;
 use zeroize::Zeroizing;
 
 /// The default OAuth scopes requested: `read:org` (to enumerate the caller's org memberships → groups)
+/// and `read:user` (the profile `/user` read). Operators can override via `scopes`; the door asks
+/// for the configured scopes plus any the host requests at begin time.
 fn default_scopes() -> Vec<String> {
     vec!["read:org".to_string(), "read:user".to_string()]
 }
@@ -153,7 +155,8 @@ fn pct(s: &str) -> String {
     out
 }
 
-/// The space-delimited `scope` value: the configured scopes plus `extra` (the door passes none),
+/// The space-delimited `scope` value: the configured scopes plus `extra` (the host's requested scopes),
+/// order preserved and de-duplicated.
 fn scope_value(cfg: &GitHubConfig, extra: &[String]) -> String {
     let mut scopes: Vec<String> = Vec::new();
     for s in cfg.scopes.iter().chain(extra.iter()) {
@@ -165,6 +168,13 @@ fn scope_value(cfg: &GitHubConfig, extra: &[String]) -> String {
 }
 
 /// Build the GitHub **authorization-code** authorize URL: `response_type=code`, `client_id`,
+/// `redirect_uri`, `scope` (the configured scopes, plus `extra_scopes`: the host's requested scopes), `state`, and PKCE `code_challenge` +
+/// `code_challenge_method=S256`. Structurally cannot contain a `client_secret`: the begin path is
+/// public.
+///
+/// GitHub supports S256 PKCE on the web authorization-code flow (2024+); the `code_challenge` the
+/// kernel minted is always sent. A GitHub OAuth App that has not opted into PKCE simply ignores it, and the
+/// paired `code_verifier` still rides the token exchange harmlessly. See the crate README's PKCE note.
 pub fn build_github_authorize_url(
     cfg: &GitHubConfig,
     redirect_uri: &str,

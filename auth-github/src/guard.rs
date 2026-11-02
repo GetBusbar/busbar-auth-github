@@ -34,6 +34,7 @@ pub fn collect_allowed_hosts(settings: &Value) -> HashSet<String> {
     }
     let mut hosts = HashSet::new();
     if let Value::Object(o) = settings {
+        // The URL strings of the same tree (`api_base`, `authorize_base`, `token_base`) are what the walk covers.
         o.values().for_each(|v| walk(v, &mut hosts));
     }
     hosts

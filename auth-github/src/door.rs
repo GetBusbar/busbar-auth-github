@@ -51,7 +51,10 @@ const NEED_PUBLIC: u32 = 1;
 /// The setting the anchored need's extra trusted root comes from (a config path the host reads).
 const CA_CERT_PATH: &str = "settings.ca_cert_pem";
 
-/// One outbound need to the IdP over the `http` transport (the scheme the http framer claims; an
+/// An outbound need (anchored or public, see [`need_of`]) to the IdP over the `http` transport (the scheme the http framer claims; an
+/// `https` target is secured by the connector), its target named per hop (token, `/user`,
+/// `/user/orgs`), bounded by a per-hop timeout, trusting `trust_from`'s root beside the public
+/// roots (`ABSENT`: the public roots only).
 const fn need(trust_from: AbiStr) -> Need {
     let mut n = Need::EMPTY;
     n.direction = DIRECTION_OUTBOUND;
@@ -231,8 +234,9 @@ fn blob_text(b: Lent<'_, Blob>) -> Option<&str> {
     std::str::from_utf8(b.bytes()).ok()
 }
 
-/// `begin_login`: the GitHub authorize URL, leased. The requested scopes are not read (the safe
-/// SDK lends no accessor for `BeginLoginIn.scopes`); the configured scopes are asked for.
+/// `begin_login`: the GitHub authorize URL, leased. The scopes the host requests
+/// (`BeginLoginIn.scopes`) are asked for alongside the configured ones; a requested scope that is
+/// not UTF-8 refuses the call rather than being skipped.
 #[derive(Debug)]
 pub struct Begin;
 
@@ -257,10 +261,19 @@ impl SafeSlot for Begin {
                 "begin_login: redirect_uri, state and code_challenge are required UTF-8",
             ));
         };
+        let mut requested = Vec::new();
+        for scope in input.scopes().iter() {
+            let Some(scope) = text(scope) else {
+                return out.fail(Refusal::failed(
+                    "begin_login: a requested scope is absent or not UTF-8",
+                ));
+            };
+            requested.push(scope.to_owned());
+        }
         let url = h
             .life()
             .login()
-            .begin_login(redirect_uri, state, challenge, &[]);
+            .begin_login(redirect_uri, state, challenge, &requested);
         out.set(|o| &o.shape, BEGIN_AUTHORIZE);
         out.lease_str(|o| &o.authorize_url, h.leases(), url);
         Outcome::Ready
@@ -275,12 +288,7 @@ struct Parked {
     base: u32,
 }
 
-/// The login a resumed flow is driven by: the one it began under, to its end. A `refresh` swaps
-fn driving(parked: &Parked) -> Arc<GithubLogin> {
-    parked.login.clone()
-}
-
-/// The hop exchange over the instance's connector: one framed `exchange()` per hop on its selected need.
+/// The hop exchange over the instance's connector: one framed `exchange()` per hop on the login's need (anchored or public, see `need_of`).
 struct Over<'c, 'h> {
     c: &'c mut Connector<'h>,
     need: u32,
@@ -421,7 +429,11 @@ impl SafeSlot for Complete {
                 }
             }
         };
-        let login = driving(&parked);
+        // The login a resumed flow is driven by: the one it began under, to its end. A `refresh`
+        // swaps the instance's login for the flows begun after it; a flow parked before it keeps
+        // its own client secret, bases and allowlist (the hop parked on a pending exchange was
+        // rendered by it).
+        let login = parked.login.clone();
         let step = match h.host() {
             None => login.drive(&mut parked.flow, &mut Unarmed),
             Some(host) => {
@@ -455,9 +467,9 @@ fn verdict(step: &LoginStep) -> u32 {
     match step {
         LoginStep::Outage { .. } => LOGIN_OUTAGE,
         LoginStep::SecurityCheckFailed => LOGIN_SECURITY_CHECK_FAILED,
-        LoginStep::BadCredential | LoginStep::Pending | LoginStep::Identity(_) => {
-            LOGIN_BAD_CREDENTIAL
-        }
+        LoginStep::BadCredential => LOGIN_BAD_CREDENTIAL,
+        // Neither is terminal: the caller answers them before it asks for a verdict.
+        LoginStep::Pending | LoginStep::Identity(_) => LOGIN_OUTAGE,
     }
 }
 
