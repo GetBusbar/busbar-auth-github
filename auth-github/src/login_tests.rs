@@ -881,7 +881,6 @@ fn the_flow_answers_as_the_1_5_5_module_driven_by_the_1_5_5_core() {
             LoginStep::BadCredential,
             vec![TOKEN_URL],
         ),
-        // G3 (owner-signed 2026-10-30): a malformed REST answer is an outage, where 1.5.5 declined.
         (
             Script::happy().answer(ORGS_URL, 200, "[{bad"),
             OUTAGE,
