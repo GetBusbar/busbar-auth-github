@@ -1040,7 +1040,11 @@ fn github_lifecycle_crosses_once_and_undeclared_outbound_slots_refuse() {
             assert!(validate(&p, bad).starts_with("Failed"));
             assert_eq!(count() - before, 1);
             let before = count();
-            assert!(open(&p, bad, Some(SECRET)).starts_with("Failed lease=false settings:"));
+            let answer = open(&p, bad, Some(SECRET));
+            assert!(
+                answer.starts_with("Failed lease=false settings:"),
+                "bad OPEN {bad}: {answer}"
+            );
             assert_eq!(count() - before, 1);
         }
         let before = count();
