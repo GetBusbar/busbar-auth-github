@@ -198,21 +198,31 @@ pub struct ReplyFields {
 
 impl ReplyFields {
     /// The kept fields of a reply's field block, names matched case-insensitively, the first of a
-    /// repeated name kept; a value that is not UTF-8 is dropped.
+    /// repeated name kept (repeated `link` lines are joined with `, `, RFC 9110 5.3); a value that is not UTF-8 is dropped.
     pub fn kept<'a>(fields: impl IntoIterator<Item = (&'a [u8], &'a [u8])>) -> Self {
         let mut kept = Self::default();
         for (name, value) in fields {
-            let slot = match name.to_ascii_lowercase().as_slice() {
+            let name = name.to_ascii_lowercase();
+            let is_link = name == b"link";
+            let slot = match name.as_slice() {
                 b"retry-after" => &mut kept.retry_after,
                 b"x-ratelimit-remaining" => &mut kept.ratelimit_remaining,
                 b"x-ratelimit-reset" => &mut kept.ratelimit_reset,
                 b"link" => &mut kept.link,
                 _ => continue,
             };
-            if slot.is_none() {
-                *slot = std::str::from_utf8(value)
-                    .ok()
-                    .map(|v| v.trim().to_string());
+            let Ok(value) = std::str::from_utf8(value) else {
+                continue;
+            };
+            let value = value.trim();
+            match slot {
+                // RFC 9110 5.3: repeated `link` lines are one comma-joined list.
+                Some(joined) if is_link => {
+                    joined.push_str(", ");
+                    joined.push_str(value);
+                }
+                Some(_) => {}
+                None => *slot = Some(value.to_string()),
             }
         }
         kept
@@ -1016,18 +1026,27 @@ fn wipe_hop(hop: &mut LoginHop) {
 /// with no `id_token` binds trivially; one with an `id_token` binds only when its payload's `nonce`
 /// claim (base64url, no signature check: that is the IdP module's job) equals `minted`.
 fn id_token_nonce_binds(body: &str, minted: Option<&str>) -> bool {
-    /// Only the `id_token` member is read: the rest of the body (an access token) is skipped,
-    /// never copied.
-    #[derive(serde::Deserialize)]
-    struct IdToken {
-        id_token: Option<String>,
-    }
-    let Some(id_token) = serde_json::from_str::<IdToken>(body)
-        .ok()
-        .and_then(|t| t.id_token)
-        .map(Zeroizing::new)
-    else {
-        return true;
+    let trimmed = body.trim();
+    // The `id_token` member by the body's shape: a JSON object's member (any non-string value does
+    // not bind), else a form body's key (the shape `parse_access_token` also accepts). Only that
+    // member is read: the rest of the body (an access token) is skipped, never copied.
+    let id_token: Zeroizing<String> = if trimmed.starts_with('{') || trimmed.starts_with('[') {
+        let Ok(Value::Object(mut members)) = serde_json::from_str::<Value>(trimmed) else {
+            return true;
+        };
+        match members.remove("id_token") {
+            None => return true,
+            Some(Value::String(t)) => Zeroizing::new(t),
+            Some(_) => return false,
+        }
+    } else {
+        let Some(raw) = trimmed.split('&').find_map(|pair| {
+            let mut it = pair.splitn(2, '=');
+            (it.next() == Some("id_token")).then(|| it.next().unwrap_or(""))
+        }) else {
+            return true;
+        };
+        Zeroizing::new(String::from_utf8_lossy(&crate::form_decode(raw)).into_owned())
     };
     let claimed = id_token
         .split('.')

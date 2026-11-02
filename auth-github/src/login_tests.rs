@@ -1636,3 +1636,62 @@ fn a_refresh_mid_flow_resumes_the_parked_hop_unchanged() {
         .iter()
         .all(|r| !body_text(r).contains("rotated-secret")));
 }
+
+/// RED r1-prod0-2: an `id_token` that is no string, or one in a form-shaped token answer, is
+/// still checked against the minted nonce; it never fails open.
+#[test]
+fn the_id_token_is_found_by_the_shape_of_the_answer() {
+    let foreign = id_token(r#"{"nonce":"foreign"}"#);
+    // A non-string member does not bind.
+    assert!(!id_token_nonce_binds(
+        r#"{"access_token":"x","id_token":123}"#,
+        Some("minted")
+    ));
+    // A form-shaped answer carrying a foreign nonce does not bind.
+    assert!(!id_token_nonce_binds(
+        &format!("access_token=x&id_token={foreign}"),
+        Some("minted")
+    ));
+    // The same form answer with the minted nonce binds; one with no id_token binds trivially.
+    let bound = id_token(r#"{"nonce":"minted"}"#);
+    assert!(id_token_nonce_binds(
+        &format!("access_token=x&id_token={bound}"),
+        Some("minted")
+    ));
+    assert!(id_token_nonce_binds(
+        "access_token=x&scope=repo",
+        Some("minted")
+    ));
+    assert!(id_token_nonce_binds(
+        r#"{"access_token":"x"}"#,
+        Some("minted")
+    ));
+    assert!(id_token_nonce_binds(
+        r#"[{"login":"acme"}]"#,
+        Some("minted")
+    ));
+}
+
+/// RED r1-prod0-3: repeated `Link` field lines are one comma-joined list (RFC 9110 5.3), so a
+/// `rel="next"` on a later line is found.
+#[test]
+fn repeated_link_lines_are_one_list() {
+    let fields = ReplyFields::kept([
+        (
+            &b"Link"[..],
+            &b"<https://api.github.com/user/orgs?page=1>; rel=\"prev\""[..],
+        ),
+        (
+            &b"link"[..],
+            &b"<https://api.github.com/user/orgs?page=3>; rel=\"next\""[..],
+        ),
+        (&b"Retry-After"[..], &b"5"[..]),
+        (&b"retry-after"[..], &b"9"[..]),
+    ]);
+    let link = fields.link.as_deref().expect("a link");
+    assert_eq!(
+        next_link(link),
+        Some("https://api.github.com/user/orgs?page=3")
+    );
+    assert_eq!(fields.retry_after.as_deref(), Some("5"));
+}
