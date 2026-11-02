@@ -884,7 +884,9 @@ fn refused_answer(hop: Hop, status: u16, fields: &ReplyFields, body: &str) -> Tu
         Hop::Token => {
             if let (400 | 401, Some(code)) = (status, github_error(body)) {
                 let code = loggable(&code);
-                if matches!(code, "invalid_client" | "unauthorized_client") {
+                if matches!(code, "invalid_client" | "unauthorized_client")
+                    || OPERATOR_TOKEN_ERRORS.contains(&code)
+                {
                     tracing::warn!(
                         module = "github",
                         status,

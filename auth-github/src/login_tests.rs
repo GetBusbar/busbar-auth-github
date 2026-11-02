@@ -1493,6 +1493,9 @@ mod logging {
         for body in [
             r#"{"error":"invalid_client","error_description":"x"}"#,
             r#"{"error":"unauthorized_client"}"#,
+            r#"{"error":"incorrect_client_credentials"}"#,
+            r#"{"error":"redirect_uri_mismatch"}"#,
+            r#"{"error":"application_suspended"}"#,
         ] {
             let mut s = Script::happy().answer(TOKEN_URL, 401, body);
             let cap = WarnCapture::default();
