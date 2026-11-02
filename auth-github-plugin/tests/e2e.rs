@@ -27,20 +27,33 @@ fn busbar_root() -> std::path::PathBuf {
 /// Build (cargo-cached) and return the real `busbar` + `busbar-plugin-pack` binaries from the sibling.
 fn build_real_binaries() -> (std::path::PathBuf, std::path::PathBuf) {
     let root = busbar_root();
+    let target = std::path::PathBuf::from(
+        std::env::var_os("CARGO_TARGET_DIR")
+            .expect("CARGO_TARGET_DIR must name the assigned native target directory"),
+    );
+    assert!(
+        target.is_absolute() && target.is_dir(),
+        "CARGO_TARGET_DIR must be an existing absolute assigned target: {}",
+        target.display()
+    );
 
     for args in [
         &[
+            "+1.98.0",
             "build",
+            "--locked",
+            "-j2",
             "--release",
             "--manifest-path",
             "dist/default/Cargo.toml",
-            "--target-dir",
-            "target",
             "--bin",
             "busbar",
         ][..],
         &[
+            "+1.98.0",
             "build",
+            "--locked",
+            "-j2",
             "--release",
             "-p",
             "busbar-plugin-loader",
@@ -53,7 +66,6 @@ fn build_real_binaries() -> (std::path::PathBuf, std::path::PathBuf) {
         let status = std::process::Command::new("cargo")
             .args(args)
             .current_dir(&root)
-            .env_remove("CARGO_TARGET_DIR")
             .status()
             .expect("run cargo build for busbar / busbar-plugin-pack");
         assert!(
@@ -62,8 +74,8 @@ fn build_real_binaries() -> (std::path::PathBuf, std::path::PathBuf) {
         );
     }
     (
-        root.join("target/release/busbar"),
-        root.join("target/release/busbar-plugin-pack"),
+        target.join("release/busbar"),
+        target.join("release/busbar-plugin-pack"),
     )
 }
 
