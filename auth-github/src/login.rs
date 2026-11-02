@@ -27,8 +27,9 @@
 //! carrying an RFC 6749 §5.2 `error`, and a revoked token's `401` from `/user` or `/user/orgs`, are
 //! declined. A `5xx`, a `429`, GitHub's `403` rate limit, a `403` on `/user/orgs` (the token lacks
 //! `read:org`), a redirect, a `404`, a `408` or any other status is the IdP not answering:
-//! [`LoginStep::Outage`], which the host answers 503, retryable, carrying the IdP's retry hint
-//! (`retry-after`, or the seconds to `x-ratelimit-reset`) when it gave one.
+//! [`LoginStep::Outage`], which the host answers 503, retryable. The IdP's retry hint
+//! (`retry-after`, or the seconds to `x-ratelimit-reset`), when it gave one, rides the step and is
+//! logged by the door; the ABI answer has no slot to carry it to the host.
 //!
 //! The auth ABI adapter is [`crate::door`]: it calls [`GithubLogin::open`],
 //! [`GithubLogin::begin_login`], [`GithubLogin::start`] and [`GithubLogin::drive`], keeping one
@@ -588,7 +589,7 @@ impl GithubLogin {
         let hop = flow.state.hop;
         // OWNER-SIGNED 2026-10-30: only a credential error is a declined sign-in; every other
         // answer that is no 2xx is the IdP not answering this hop, an outage (the host answers
-        // 503, retryable), carrying the IdP's retry hint when it gave one.
+        // 503, retryable); the step carries the IdP's retry hint when it gave one.
         if !(200..300).contains(&status) {
             let turn = refused_answer(hop, status, fields, body);
             flow.state = FlowState::default();
