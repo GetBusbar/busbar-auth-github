@@ -978,8 +978,12 @@ fn github_needs_match_its_declares_file_and_release_profile() {
             .map(|v| v.as_str().unwrap())
             .collect::<Vec<_>>()
     );
+    let debug_build = std::hint::black_box(cfg!(debug_assertions));
     if std::env::var_os("BUSBAR_EXPECT_RELEASE").is_some() {
-        assert!(!cfg!(debug_assertions));
+        assert!(
+            !debug_build,
+            "BUSBAR_EXPECT_RELEASE requires a release build"
+        );
     }
 }
 

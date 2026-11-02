@@ -369,9 +369,9 @@ fn short_answer_capacity_eviction_warns_without_exposing_the_identity() {
         assert!(conns.reads.lock().unwrap().is_empty());
         let sent = conns.sent.lock().unwrap();
         assert_eq!(sent.len(), 1025 * 4);
-        for targets in sent.chunks_exact(4) {
+        for targets in sent.as_chunks::<4>().0 {
             assert_eq!(
-                targets,
+                targets.as_slice(),
                 [
                     "/login/oauth/access_token",
                     "/user",
