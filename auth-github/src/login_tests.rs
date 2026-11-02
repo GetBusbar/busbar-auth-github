@@ -204,8 +204,6 @@ fn the_token_exchange_carries_the_plugins_own_secret_in_1_5_5_bytes() {
     );
 }
 
-/// The authenticated GETs: no body and (RED L4) no `content-type` (only a hop with a form body
-
 #[test]
 fn the_rest_gets_carry_the_bearer_and_user_agent() {
     let l = login();
@@ -227,8 +225,6 @@ fn the_rest_gets_carry_the_bearer_and_user_agent() {
         );
     }
 }
-
-/// RED ARM (non-member): a user outside the org signs in, as in 1.5.5, WITHOUT that org's group, so
 
 #[test]
 fn red_a_non_member_carries_no_group_for_the_org() {
@@ -255,8 +251,6 @@ fn red_a_non_member_carries_no_group_for_the_org() {
     );
 }
 
-/// RED (ruling 2026-10-27): an identity provider that answers 5xx or 429 on any hop is an outage
-
 #[test]
 fn an_idp_5xx_or_429_is_an_outage_not_a_decline() {
     let l = login();
@@ -269,8 +263,6 @@ fn an_idp_5xx_or_429_is_an_outage_not_a_decline() {
         assert_eq!(s.targets(), vec![TOKEN_URL, USER_URL]);
     }
 }
-
-/// RED ARM (revoked token): GitHub answers `/user` 401 for a revoked or expired bearer. 1.5.5 fed
 
 #[test]
 fn red_a_revoked_token_is_declined_and_goes_no_further() {
@@ -294,8 +286,6 @@ fn a_bad_code_answered_200_with_an_error_body_is_declined() {
     assert_eq!(run(&l, &mut s), LoginStep::BadCredential);
     assert_eq!(s.targets(), vec![TOKEN_URL]);
 }
-
-/// RED G2 (owner-signed 2026-10-30): GitHub answers a token exchange it refuses with HTTP 200 and an
 
 #[test]
 fn red_g2_a_200_token_error_is_declined_only_for_the_users_own_code() {
@@ -364,8 +354,6 @@ fn a_malformed_org_list_is_an_outage_not_a_zero_group_login() {
     assert_eq!(s.targets(), [TOKEN_URL, USER_URL, ORGS_URL]);
 }
 
-/// RED G3 (owner-signed 2026-10-30): a malformed or foreign 2xx from `/user` or `/user/orgs` is
-
 #[test]
 fn red_g3_a_malformed_rest_answer_is_an_outage() {
     let l = login();
@@ -403,8 +391,6 @@ fn link_to(next: Option<&str>) -> ReplyFields {
         ..ReplyFields::default()
     }
 }
-
-/// RED G4: a user in more orgs than one page holds keeps every org: `/user/orgs` is followed by
 
 #[test]
 fn red_g4_the_org_list_is_followed_past_page_one() {
@@ -451,8 +437,6 @@ fn red_g4_the_org_list_is_followed_past_page_one() {
     }
 }
 
-/// RED G4: the org list is read for at most 10 pages (1000 orgs); a next link left after the
-
 #[test]
 fn red_g4_the_org_list_stops_at_ten_pages_with_a_warn() {
     use busbar_test_kit::warn_capture::WarnCapture;
@@ -480,8 +464,6 @@ fn red_g4_the_org_list_stops_at_ten_pages_with_a_warn() {
     assert!(cap.contains("truncated"), "{:?}", cap.messages());
 }
 
-/// RED G4: a next link is followed only on the API's own origin (and through the hop guard): one
-
 #[test]
 fn red_g4_a_next_link_off_the_api_origin_is_never_followed() {
     let l = login();
@@ -497,8 +479,6 @@ fn red_g4_a_next_link_off_the_api_origin_is_never_followed() {
         assert_eq!(s.targets(), vec![TOKEN_URL, USER_URL, ORGS_URL], "{next}");
     }
 }
-
-/// RED L11: the far end's strings enter the Principal filtered. A login or an org login holding a
 
 #[test]
 fn red_l11_far_end_strings_enter_the_principal_filtered() {
@@ -557,8 +537,6 @@ fn a_callback_missing_the_verifier_is_declined_with_no_exchange() {
     assert_eq!(l.drive(&mut f, &mut s), LoginStep::BadCredential);
     assert!(s.issued.is_empty());
 }
-
-/// RED L7: an empty code, redirect_uri or code_verifier is refused before the exchange: the code
 
 #[test]
 fn red_l7_an_empty_callback_value_is_declined_before_the_exchange() {
@@ -642,8 +620,6 @@ fn a_plaintext_public_token_base_is_refused_before_the_secret_leaves() {
     assert_eq!(run(&l, &mut s), OUTAGE);
     assert!(s.issued.is_empty());
 }
-
-/// G5: the client secret and the bearer are each required to go out on a secured connection when
 
 #[test]
 fn the_secret_and_the_bearer_go_out_only_secured_under_https_bases() {
@@ -827,8 +803,6 @@ fn the_hop_loop_is_bounded() {
     assert_eq!(s.targets(), vec![TOKEN_URL, USER_URL]);
 }
 
-/// RED L1: the step machine reads each answer as the answer of the hop it sent, never by its
-
 #[test]
 fn red_l1_an_answer_is_read_as_the_answer_of_the_hop_sent() {
     let login_only = GithubLogin::open(
@@ -974,8 +948,6 @@ fn a_non_2xx_token_answer_is_never_a_token_even_with_one_in_it() {
     assert_eq!(s.targets(), vec![TOKEN_URL]);
 }
 
-/// RED G1 (owner-signed 2026-10-30: only RFC 6749 §5.2 credential errors are a declined sign-in):
-
 #[test]
 fn red_g1_the_token_endpoint_declines_only_a_5_2_error() {
     let l = login();
@@ -1004,8 +976,6 @@ fn red_g1_the_token_endpoint_declines_only_a_5_2_error() {
     }
 }
 
-/// RED G1: on `/user` and `/user/orgs` only a 401 (the token is not accepted) is a declined
-
 #[test]
 fn red_g1_the_rest_hops_decline_only_a_401() {
     let l = login();
@@ -1022,8 +992,6 @@ fn red_g1_the_rest_hops_decline_only_a_401() {
         }
     }
 }
-
-/// RED G1: a rate limit on any REST hop (a 403 or 429 with `retry-after` or
 
 #[test]
 fn red_g1_a_rate_limit_is_an_outage_with_the_idps_retry_hint() {
@@ -1306,8 +1274,6 @@ fn the_form_is_serde_urlencoded() {
     assert_eq!(body_text(&r(FormBody::new())), "");
 }
 
-/// A GitHub Enterprise base delivered as a plain URL logs in. HISTORY: v1.5.5 built the hop
-
 #[test]
 fn decision_a_reference_written_base_resolved_by_the_kernel_logs_in() {
     let delivered = r#"{
@@ -1421,8 +1387,6 @@ mod logging {
         }
     }
 
-    /// RED L8: a hop that could not be made (refused, connect, TLS, timeout, a request that could
-
     #[test]
     fn red_l8_an_unreachable_hop_is_a_warn_naming_the_hop() {
         let l = login();
@@ -1444,8 +1408,6 @@ mod logging {
             assert!(cap.contains("module=github"), "{url}: {:?}", cap.messages());
         }
     }
-
-    /// RED G1: a 403 on `/user/orgs` that is no rate limit is the operator's (the token lacks the
 
     #[test]
     fn red_g1_a_403_on_the_org_list_warns_of_the_scope() {
@@ -1475,8 +1437,6 @@ mod logging {
         );
     }
 
-    /// RED G2: an error code is logged only when it is `[a-z0-9_]{1,64}`; any other far-end string
-
     #[test]
     fn red_g2_a_foreign_error_string_is_never_logged() {
         let l = login();
@@ -1494,8 +1454,6 @@ mod logging {
     }
 }
 
-/// RED: a hop answer's body is the token response (the access token): Debug shows its status and
-
 #[test]
 fn a_hop_response_debug_shows_no_body() {
     let r = HopResponse {
@@ -1512,8 +1470,6 @@ fn a_hop_response_debug_shows_no_body() {
         "HopResponse { status: 200, body_len: 20 }"
     );
 }
-
-/// RED: a hop reply past 256 KiB (the kind standard's bound on a token or userinfo endpoint) is not
 
 #[test]
 fn a_hop_reply_over_the_cap_is_an_outage() {
@@ -1534,7 +1490,6 @@ mod module_field {
     use super::*;
     use busbar_test_kit::warn_capture::WarnCapture;
 
-    /// RED: every record carries `module = "github"`, as the sibling auth plugins' do.
     #[test]
     fn a_decline_is_logged_with_the_module_field() {
         let l = login();
@@ -1549,8 +1504,6 @@ mod module_field {
         }
     }
 }
-
-/// RED (type level): the hop bodies (the token form carries the client secret, the code and the
 
 #[test]
 fn the_hop_bodies_are_wiped_on_drop() {
@@ -1567,8 +1520,6 @@ fn the_hop_bodies_are_wiped_on_drop() {
     };
     wipes(&response.body);
 }
-
-/// GHO2, REFRESH MID-FLOW: the door swaps the login whole on `refresh`, but a parked flow is
 
 #[test]
 fn a_refresh_mid_flow_resumes_the_parked_hop_unchanged() {

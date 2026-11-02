@@ -432,8 +432,6 @@ fn transcript(p: &Plugin<Auth>, cfg: &str) -> Vec<String> {
     t
 }
 
-/// The GitHub login plugin answers as ONE plugin through either door (the RED arms below show the
-
 #[test]
 fn the_linked_and_the_dropped_in_github_login_are_one_plugin() {
     let d = dispatcher();
@@ -473,8 +471,6 @@ fn the_linked_and_the_dropped_in_github_login_are_one_plugin() {
     }
 }
 
-/// RED ARM 1: the dropped-in door under a different operator config is a different transcript, so
-
 #[test]
 fn a_different_operator_config_is_a_different_transcript() {
     let d = dispatcher();
@@ -489,7 +485,6 @@ fn a_different_operator_config_is_a_different_transcript() {
     );
 }
 
-/// RED ARM 2: the door asked for as another kind is refused, linked and dropped in.
 #[test]
 fn an_auth_door_loaded_as_another_kind_is_refused() {
     let d = dispatcher();
@@ -591,8 +586,6 @@ impl busbar_plugin_loader::dispatch::EnvelopeSink for Logs {
     }
     fn dropped(&self, _: busbar_plugin_loader::dispatch::Dropped) {}
 }
-
-/// RED L9: a REFUSED complete_login is never near-silent: the ticket-less one (it waits on I/O,
 
 #[test]
 fn red_l9_a_ticketless_complete_login_is_refused_at_info_with_a_reason() {

@@ -63,8 +63,6 @@ fn a_ticket_kept_again_does_not_evict() {
     assert!(map.contains_key(&ticket(1)));
 }
 
-/// RED L10: a short answer kept for its retry is dropped once it is older than 10 minutes, on the
-
 #[test]
 fn red_l10_an_answered_entry_older_than_ten_minutes_is_dropped() {
     let stale = Instant::now();
@@ -114,8 +112,6 @@ fn the_written_out_settings_validate() {
 
 const PEM: &str = "-----BEGIN CERTIFICATE-----\\nY29uZm9ybWFuY2U=\\n-----END CERTIFICATE-----\\n";
 
-/// RED: a `ca_cert_pem` (a GHES behind an internal CA) anchors every hop: the login goes out on the
-
 #[test]
 fn a_set_ca_cert_pem_anchors_the_hops() {
     let anchored = WRITTEN.replace(
@@ -136,8 +132,6 @@ fn a_set_ca_cert_pem_anchors_the_hops() {
     }
 }
 
-/// RED L5: a `ca_cert_pem` written but blank names no certificate: refused at validate and open,
-
 #[test]
 fn red_l5_a_blank_ca_cert_pem_is_refused_by_name() {
     for blank in ["", "   ", "\\n\\t "] {
@@ -156,8 +150,6 @@ fn red_l5_a_blank_ca_cert_pem_is_refused_by_name() {
     }
 }
 
-/// RED: a `ca_cert_pem` that is not a PEM certificate is refused, named, at validate (as `open`
-
 #[test]
 fn a_ca_cert_pem_that_is_not_a_certificate_is_refused_by_name() {
     let settings = WRITTEN.replace(
@@ -171,8 +163,6 @@ fn a_ca_cert_pem_that_is_not_a_certificate_is_refused_by_name() {
         Some("settings.ca_cert_pem: not a PEM certificate (no -----BEGIN CERTIFICATE----- line)")
     );
 }
-
-/// RED: a base left at its default is not on the hop allowlist (built only from URLs written in
 
 #[test]
 fn a_hop_base_left_at_its_default_is_refused_explained() {
@@ -193,8 +183,6 @@ fn a_hop_base_left_at_its_default_is_refused_explained() {
     let settings = WRITTEN.replace("\"authorize_base\": \"https://github.com\",", "");
     assert!(<Github as Life>::validate(settings.as_bytes()).is_ok());
 }
-
-/// RED: a mistyped value is never echoed into the refusal (it may be a secret pasted into the
 
 #[test]
 fn a_mistyped_value_is_not_echoed_in_the_refusal() {
@@ -229,7 +217,6 @@ fn a_mistyped_value_is_not_echoed_in_the_refusal() {
     );
 }
 
-/// RED: a client secret that is not UTF-8 is refused in the kind's secrets line, by name.
 #[test]
 fn a_non_utf8_client_secret_is_refused_by_name() {
     let r = login_from(WRITTEN.as_bytes(), &[&[0xff, 0xfe]]).expect_err("refused");
@@ -239,8 +226,6 @@ fn a_non_utf8_client_secret_is_refused_by_name() {
     let r = login_from(&[b'{', 0xff, b'}'], &[]).expect_err("refused");
     assert_eq!(r.text(), Some("settings: not UTF-8"));
 }
-
-/// RED: an empty required string (the client id, a base URL) is refused at validate, named, as
 
 #[test]
 fn an_empty_client_id_or_base_is_refused_by_name() {
@@ -280,8 +265,6 @@ fn an_empty_client_id_or_base_is_refused_by_name() {
     }
 }
 
-/// RED L2: a flow parked before `refresh()` resumes under the login it began with, to its end (its
-
 #[test]
 fn red_l2_a_parked_flow_resumes_under_the_login_it_began_with() {
     let g = <Github as Life>::open(WRITTEN.as_bytes(), &[b"secret-before"], 1).expect("opens");
@@ -315,8 +298,6 @@ fn red_l2_a_parked_flow_resumes_under_the_login_it_began_with() {
     };
     assert!(Arc::ptr_eq(&driving(&after), &g.login()));
 }
-
-/// RED L6: `fetch_orgs` (the default) reads `/user/orgs`, which needs the `read:org` scope (or a
 
 #[test]
 fn red_l6_fetch_orgs_without_an_org_scope_is_refused_by_name() {

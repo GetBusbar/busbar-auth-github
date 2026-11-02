@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (C) 2026 Busbar Inc and contributors
 
-//! Verified follow-up audit: actual login flows over the existing scripted exchange API.
+//! Exercises GitHub login flows over the scripted exchange API.
 
 use super::*;
 
