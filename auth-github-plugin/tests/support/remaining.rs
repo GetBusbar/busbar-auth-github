@@ -116,6 +116,18 @@ impl Conns for RateLimited {
     }
 }
 impl DeclaredConns for RateLimited {
+    fn open_request(
+        &self,
+        caller: InstanceId,
+        need: NeedId,
+        desc: &OpenDesc<'_>,
+        require_secure: bool,
+        _dial_timeout_ms: u64,
+    ) -> Result<ConnId, ConnError> {
+        // This immediate in-memory I/O answer supports a separate dial deadline without waiting.
+        // Preserve the default security refusal: this value double never claims to provide TLS.
+        self.open_with_security(caller, need, desc, require_secure)
+    }
     fn serves_scheme(&self, transport: &str) -> bool {
         transport == "http"
     }
@@ -613,6 +625,8 @@ mod custody {
                     ..bind(&d)
                 },
             );
+            assert_eq!(open(&owner, LOCAL, Some(SECRET)), "Ready lease=false ");
+            assert_eq!(open(&other, LOCAL, Some(SECRET)), "Ready lease=false ");
             let (outcome, stream, text) = establish(&owner, 1, "127.0.0.1:8080");
             assert_eq!(outcome, Outcome::Ready, "{text}");
             assert_eq!(io(&owner, stream, true).0, Outcome::Ready);
@@ -635,6 +649,8 @@ mod custody {
             }
             assert_eq!(io(&owner, stream, true).0, Outcome::Ready);
             assert_eq!(close_stream(&owner, stream).0, Outcome::Ready);
+            assert_eq!(close(&other), "Ready lease=false ");
+            assert_eq!(close(&owner), "Ready lease=false ");
         }
     }
 }
