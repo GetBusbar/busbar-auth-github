@@ -444,7 +444,11 @@ impl GithubLogin {
         }
 
         let client_secret = client_secret.filter(|s| !s.is_empty()).map(|s| {
-            Cred::captured(Zeroizing::new(s.as_bytes().to_vec())).secure_for(&cfg.token_base)
+            Cred::captured(Zeroizing::new(s.as_bytes().to_vec())).require_secure_if(
+                cfg.token_base
+                    .split_once("://")
+                    .is_some_and(|(scheme, _)| scheme.eq_ignore_ascii_case("https")),
+            )
         });
         Ok(Self {
             cfg,
@@ -619,7 +623,14 @@ impl GithubLogin {
                     return token_refusal(body);
                 };
                 flow.state = FlowState {
-                    access_token: Some(token.secure_for(&self.cfg.api_base)),
+                    access_token: Some(
+                        token.require_secure_if(
+                            self.cfg
+                                .api_base
+                                .split_once("://")
+                                .is_some_and(|(scheme, _)| scheme.eq_ignore_ascii_case("https")),
+                        ),
+                    ),
                     hop: Hop::User,
                     ..FlowState::default()
                 };
