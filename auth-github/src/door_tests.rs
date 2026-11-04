@@ -265,38 +265,123 @@ fn an_empty_client_id_or_base_is_refused_by_name() {
     }
 }
 
+/// An exchange that records every hop it is handed and leaves each pending.
+struct Recording<'a> {
+    needs: &'a mut Vec<u32>,
+    targets: &'a mut Vec<String>,
+    need: u32,
+}
+
+impl Exchange for Recording<'_> {
+    fn exchange(&mut self, request: &HopRequest) -> Fetched {
+        self.needs.push(self.need);
+        self.targets.push(request.target.clone());
+        Fetched::Pending
+    }
+}
+
+/// L2 through the door's own resume path ([`drive_parked`], what `complete_login` calls): a flow
+/// parked before a `refresh` is driven by the login it began under (its token base and its need),
+/// one begun after it by the refreshed login.
 #[test]
 fn red_l2_a_parked_flow_resumes_under_the_login_it_began_with() {
     let g = <Github as Life>::open(WRITTEN.as_bytes(), &[b"secret-before"], 1).expect("opens");
-    let begun = g.login();
-    let parked = Parked {
-        flow: begun.start(
+    let begin = |login: Arc<GithubLogin>| Parked {
+        flow: login.start(
             Some("the-code"),
             Some("https://node.example/auth/token"),
             Some("the-verifier"),
             None,
         ),
-        login: begun.clone(),
+        login,
         wire: None,
         base: 0,
     };
-    let rotated = WRITTEN.replace("https://api.github.com", "https://ghe.example/api/v3");
+    let mut parked = begin(g.login());
+    let rotated = WRITTEN
+        .replace("https://github.com", "https://ghe.example")
+        .replace("https://api.github.com", "https://ghe.example/api/v3")
+        .replace(
+            "\"client_id\"",
+            &format!("\"ca_cert_pem\": \"{PEM}\", \"client_id\""),
+        );
     <Github as Life>::refresh(&g, rotated.as_bytes(), &[b"secret-after"], 2).expect("refreshes");
-    assert_eq!(g.login().config().api_base, "https://ghe.example/api/v3");
-    let resumed = parked.login.clone();
-    assert!(
-        Arc::ptr_eq(&resumed, &begun),
-        "the flow keeps its own login"
-    );
-    assert_eq!(resumed.config().api_base, "https://api.github.com");
+    assert_eq!(g.login().config().token_base, "https://ghe.example");
 
-    let after = Parked {
-        flow: g.login().start(None, None, None, None),
-        login: g.login(),
-        wire: None,
-        base: 0,
-    };
-    assert!(Arc::ptr_eq(&after.login, &g.login()));
+    let (mut needs, mut targets) = (Vec::new(), Vec::new());
+    let (needs_seen, targets_seen) = (&mut needs, &mut targets);
+    let step = drive_parked(&mut parked, move |need, _, _| Recording {
+        needs: needs_seen,
+        targets: targets_seen,
+        need,
+    });
+    assert_eq!(step, LoginStep::Pending);
+    assert_eq!(needs, [NEED_PUBLIC], "the parked flow keeps its own need");
+    assert_eq!(
+        targets,
+        ["https://github.com/login/oauth/access_token"],
+        "the parked flow keeps its own token base"
+    );
+
+    let mut after = begin(g.login());
+    let (mut needs, mut targets) = (Vec::new(), Vec::new());
+    let (needs_seen, targets_seen) = (&mut needs, &mut targets);
+    let step = drive_parked(&mut after, move |need, _, _| Recording {
+        needs: needs_seen,
+        targets: targets_seen,
+        need,
+    });
+    assert_eq!(step, LoginStep::Pending);
+    assert_eq!(needs, [NEED_ANCHORED]);
+    assert_eq!(targets, ["https://ghe.example/login/oauth/access_token"]);
+}
+
+/// A `refresh` that leaves the login without a client secret says so, as `open` does.
+#[test]
+fn refresh_warns_when_it_leaves_no_client_secret() {
+    let g = <Github as Life>::open(WRITTEN.as_bytes(), &[b"secret"], 1).expect("opens");
+    let empty: &[u8] = b"";
+    for (secrets, warned) in [
+        (&[][..], true),
+        (&[empty][..], true),
+        (&[&b"rotated"[..]][..], false),
+    ] {
+        let cap = crate::diagnostics::GithubDiagnostics::default();
+        tracing::subscriber::with_default(cap.subscriber(), || {
+            <Github as Life>::refresh(&g, WRITTEN.as_bytes(), secrets, 2)
+        })
+        .expect("refreshes");
+        assert_eq!(
+            cap.contains("refreshed without a client_secret"),
+            warned,
+            "{:?}",
+            cap.messages()
+        );
+    }
+}
+
+/// Both needs keep the reply fields the step machine reads, and no other: under `KEEP_NAMED` an
+/// undeclared field never reaches the plugin. (The rendered names are read back in the plugin
+/// crate's conformance test.)
+#[test]
+fn both_needs_keep_exactly_the_fields_the_login_reads() {
+    assert_eq!(KEPT.len(), KEPT_REPLY_FIELDS.len());
+    for (kept, name) in KEPT.iter().zip(KEPT_REPLY_FIELDS) {
+        assert_eq!(kept.len(), name.len(), "{name}");
+    }
+    for need in NEEDS {
+        assert_eq!(need.keep_mode, KEEP_NAMED);
+        assert_eq!(need.keep_response_headers_len, KEPT_REPLY_FIELDS.len());
+    }
+    assert_eq!(
+        KEPT_REPLY_FIELDS,
+        [
+            "link",
+            "retry-after",
+            "x-ratelimit-remaining",
+            "x-ratelimit-reset"
+        ]
+    );
 }
 
 #[test]

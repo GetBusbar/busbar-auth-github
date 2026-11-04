@@ -603,16 +603,58 @@ fn defaulted_bases_are_refused_at_open_explained() {
     );
 }
 
+/// A hop base on plain http to a public host could never sign anyone in (the hop guard refuses
+/// every hop to it), so it is refused at `open`, named, before any secret can leave; a loopback or
+/// private host may take plain http, and `authorize_base` (a browser redirect) is not judged.
 #[test]
-fn a_plaintext_public_token_base_is_refused_before_the_secret_leaves() {
+fn a_plaintext_public_hop_base_is_refused_at_open_by_name() {
+    for (key, from, public) in [
+        ("token_base", "https://github.com", "http://github.com"),
+        (
+            "api_base",
+            "https://api.github.com",
+            "http://api.github.com",
+        ),
+        (
+            "api_base",
+            "https://api.github.com",
+            "http://ghe.corp.internal/api/v3",
+        ),
+        ("token_base", "https://github.com", "HTTP://github.com"),
+    ] {
+        let settings = SETTINGS.replace(
+            &format!("\"{key}\": \"{from}\""),
+            &format!("\"{key}\": \"{public}\""),
+        );
+        let refused = GithubLogin::open(&settings, Some(SECRET)).unwrap_err();
+        assert!(
+            refused == format!("settings.{key}: plain http to a host that is not loopback or private: use https")
+                || refused == format!("settings.{key}: not an http(s) URL with a host"),
+            "{public}: {refused}"
+        );
+        assert!(!refused.contains(SECRET), "{refused}");
+    }
     let settings = SETTINGS.replace(
         "\"token_base\": \"https://github.com\"",
         "\"token_base\": \"http://github.com\"",
     );
-    let l = GithubLogin::open(&settings, Some(SECRET)).unwrap();
-    let mut s = Script::happy();
-    assert_eq!(run(&l, &mut s), OUTAGE);
-    assert!(s.issued.is_empty());
+    assert_eq!(
+        GithubLogin::open(&settings, Some(SECRET)).unwrap_err(),
+        "settings.token_base: plain http to a host that is not loopback or private: use https"
+    );
+    for private in [
+        "http://127.0.0.1:8080",
+        "http://10.0.0.7",
+        "http://ghe.localhost",
+    ] {
+        let settings = format!(
+            r#"{{"client_id":"Iv1.client","token_base":"{private}","api_base":"{private}","authorize_base":"http://github.com"}}"#
+        );
+        assert!(
+            GithubLogin::open(&settings, Some(SECRET)).is_ok(),
+            "{private}"
+        );
+    }
 }
 
 #[test]
@@ -809,14 +851,31 @@ fn the_id_token_payload_is_read_strictly_base64url_no_pad() {
     );
 }
 
-/// The hop loop is bounded: a far end that keeps answering token-shaped bodies from `/user` never
+/// The hop loop is bounded at [`MAX_HOPS`] exchanges per callback: a flow that has spent them sends
+/// nothing more and ends as an outage, at warn; one with a single hop left sends that one only.
+/// (The step machine itself stops at the tenth org page, so a full chain spends exactly the
+/// bound: `red_g4_the_org_list_stops_at_ten_pages_with_a_warn`.)
 #[test]
 fn the_hop_loop_is_bounded() {
     let l = login();
-    let tok = r#"{"access_token":"gho_again"}"#;
-    let mut s = Script::happy().answer(USER_URL, 200, tok);
-    assert_eq!(run(&l, &mut s), OUTAGE);
-    assert_eq!(s.targets(), vec![TOKEN_URL, USER_URL]);
+    let mut s = Script::happy();
+    let mut f = flow(&l);
+    f.turns = MAX_HOPS;
+    let cap = crate::diagnostics::GithubDiagnostics::default();
+    let step = tracing::subscriber::with_default(cap.subscriber(), || l.drive(&mut f, &mut s));
+    assert_eq!(step, OUTAGE);
+    assert!(s.issued.is_empty(), "no hop past the bound");
+    assert!(cap.contains("hop limit"), "{:?}", cap.messages());
+
+    let mut s = Script::happy();
+    let mut f = flow(&l);
+    f.turns = MAX_HOPS - 1;
+    assert_eq!(l.drive(&mut f, &mut s), OUTAGE);
+    assert_eq!(
+        s.targets(),
+        vec![TOKEN_URL],
+        "the last hop allowed, then none"
+    );
 }
 
 #[test]
@@ -1005,6 +1064,94 @@ fn red_g1_the_rest_hops_decline_only_a_401() {
     }
 }
 
+/// The retry hint against a fixed clock: delta seconds first, then an HTTP-date (its three
+/// RFC 9110 forms) as the seconds to it, then a spent rate limit's reset.
+#[test]
+fn the_retry_hint_reads_seconds_dates_and_resets_against_the_clock() {
+    // 1994-11-06T08:49:37Z, and the same date in each HTTP-date form.
+    const AT: u64 = 784_111_777;
+    let after = |v: &str| ReplyFields {
+        retry_after: Some(v.to_string()),
+        ..ReplyFields::default()
+    };
+    for date in [
+        "Sun, 06 Nov 1994 08:49:37 GMT",
+        "Sunday, 06-Nov-94 08:49:37 GMT",
+        "Sun Nov  6 08:49:37 1994",
+    ] {
+        assert_eq!(http_date(date), Some(AT), "{date}");
+        assert_eq!(retry_hint(&after(date), AT - 90), Some(90), "{date}");
+        assert_eq!(retry_hint(&after(date), AT + 5), Some(0), "{date}: past");
+    }
+    assert_eq!(http_date("Thu, 01 Jan 1970 00:00:00 GMT"), Some(0));
+    assert_eq!(
+        http_date("Wed, 04 Nov 2026 12:00:00 GMT"),
+        Some(1_793_793_600)
+    );
+    assert_eq!(
+        http_date("Tue, 29 Feb 2028 00:00:01 GMT"),
+        Some(1_835_395_201)
+    );
+    for bad in [
+        "",
+        "soon",
+        "Sun, 06 Nov 1994 08:49:37 UTC",
+        "Sun, 6 Nov 1994 08:49:37 GMT",
+        "Sun 06 Nov 1994 08:49:37 GMT",
+        "Sun, 06 Foo 1994 08:49:37 GMT",
+        "Sun, 06 Nov 1994 24:00:00 GMT",
+        "Sun, 32 Nov 1994 08:49:37 GMT",
+        "Sun, 06 Nov 1969 08:49:37 GMT",
+        "Sun, 06 Nov 1994 08:49 GMT",
+        "Sunday, 06-Nov-1994 08:49:37 GMT",
+    ] {
+        assert_eq!(http_date(bad), None, "{bad:?}");
+    }
+    assert_eq!(retry_hint(&after("120"), AT), Some(120), "seconds first");
+    let spent = ReplyFields {
+        ratelimit_remaining: Some("0".to_string()),
+        ratelimit_reset: Some((AT + 100).to_string()),
+        ..ReplyFields::default()
+    };
+    assert_eq!(retry_hint(&spent, AT), Some(100));
+    assert_eq!(retry_hint(&spent, AT + 200), Some(0));
+    let unreadable = ReplyFields {
+        retry_after: Some("soon".to_string()),
+        ..spent.clone()
+    };
+    assert_eq!(
+        retry_hint(&unreadable, AT),
+        Some(100),
+        "falls back to the reset"
+    );
+    assert_eq!(retry_hint(&ReplyFields::default(), AT), None);
+}
+
+/// Without a usable wall clock only a delta `retry-after` is meaningful: an absolute reset (or
+/// date) is dropped, said at warn, never read as a delay from epoch zero.
+#[test]
+fn unavailable_wall_clock_warns_and_preserves_only_delta_seconds() {
+    let before_epoch = std::time::UNIX_EPOCH - std::time::Duration::from_secs(1);
+    let cap = crate::diagnostics::GithubDiagnostics::default();
+    let mut fields = ReplyFields {
+        ratelimit_remaining: Some("0".into()),
+        ratelimit_reset: Some(u64::MAX.to_string()),
+        ..ReplyFields::default()
+    };
+    assert_eq!(
+        tracing::subscriber::with_default(cap.subscriber(), || retry_hint_at(
+            &fields,
+            before_epoch
+        )),
+        None
+    );
+    assert!(cap.contains("wall clock unavailable"));
+    fields.retry_after = Some("Sun, 06 Nov 1994 08:49:37 GMT".into());
+    assert_eq!(retry_hint_at(&fields, before_epoch), None);
+    fields.retry_after = Some(u64::MAX.to_string());
+    assert_eq!(retry_hint_at(&fields, before_epoch), Some(u64::MAX));
+}
+
 #[test]
 fn red_g1_a_rate_limit_is_an_outage_with_the_idps_retry_hint() {
     let l = login();
@@ -1031,11 +1178,13 @@ fn red_g1_a_rate_limit_is_an_outage_with_the_idps_retry_hint() {
                 },
                 "{url} {status}"
             );
+            // The exact seconds are pinned against a fixed clock above; through the flow the
+            // hint is the reset less the flow's own (later) clock, so never more than 100.
             let mut s = Script::happy().answer_with(url, status, spent.clone(), "{}");
             match run(&l, &mut s) {
                 LoginStep::Outage {
                     retry_after: Some(secs),
-                } => assert!((90..=100).contains(&secs), "{url} {status}: {secs}"),
+                } => assert!(secs <= 100, "{url} {status}: {secs}"),
                 other => panic!("{url} {status}: {other:?}"),
             }
         }
@@ -1564,14 +1713,30 @@ mod module_field {
     }
 }
 
+/// What the flow wipes, observed: a described hop's plain form values (the code, the verifier)
+/// once it is rendered, and every credential the flow held once it finishes. The hop bodies the
+/// SDK and the exchange hold are wiped on drop (their types say so).
 #[test]
 fn the_hop_bodies_are_wiped_on_drop() {
     fn wipes<T: zeroize::ZeroizeOnDrop>(_: &T) {}
+    let mut hop = build_token_exchange(
+        login().config(),
+        "code-canary",
+        "https://node.example/auth/token",
+        "verifier-canary",
+    );
+    assert!(hop.form.iter().any(|(_, v)| v == "code-canary"));
+    wipe_hop(&mut hop);
+    assert!(hop.form.iter().all(|(_, v)| v.is_empty()), "{:?}", hop.form);
+
     let l = login();
     let mut s = Script::happy();
-    run(&l, &mut s);
-    let request = &s.issued[0];
-    wipes(&request.body);
+    let mut f = flow(&l);
+    identity(l.drive(&mut f, &mut s));
+    assert!(f.req.code.is_none() && f.req.code_verifier.is_none());
+    assert!(f.req.answer.is_none() && f.inflight.is_none());
+    assert!(f.state.access_token.is_none() && f.state.user.is_none());
+    wipes(&s.issued[0].body);
     let response = HopResponse {
         status: 200,
         fields: ReplyFields::default(),
@@ -1677,8 +1842,221 @@ fn repeated_link_lines_are_one_list() {
     ]);
     let link = fields.link.as_deref().expect("a link");
     assert_eq!(
-        next_link(link),
+        crate::next_link(link),
         Some("https://api.github.com/user/orgs?page=3")
     );
     assert_eq!(fields.retry_after.as_deref(), Some("5"));
+}
+
+/// A non-UTF-8 `Link` line is kept as unreadable, never dropped as if absent.
+#[test]
+fn a_non_utf8_link_line_reads_as_unreadable() {
+    let fields = ReplyFields::kept([(
+        &b"Link"[..],
+        &b"<https://api.github.com/\xff>; rel=\"next\""[..],
+    )]);
+    assert_eq!(fields.link.as_deref(), Some("\u{fffd}"));
+    assert_eq!(crate::read_link(fields.link.as_deref().unwrap()), None);
+}
+
+/// Logins (the user's and each org's) are GitHub's own characters only: ASCII letters, digits,
+/// `-` and `_` (an Enterprise Managed User's `_<shortcode>`). A reply carrying any other login,
+/// an invisible, bidi or separator character among them, is foreign: an outage, never an
+/// identity or a group.
+#[test]
+fn a_login_outside_githubs_character_set_is_an_outage() {
+    let l = login();
+    let user = |login: &str| serde_json::json!({"login": login, "id": 1}).to_string();
+    for bad in [
+        "admin\u{200b}",
+        "acme\u{202e}gnp",
+        "octo\u{2028}cat",
+        "octo\u{feff}",
+        "octo cat",
+        "octo/cat",
+        "octo:cat",
+        "octo@cat",
+        "octo.cat",
+        "\u{fffd}",
+        "ｏｃｔｏ",
+    ] {
+        let mut s = Script::happy().answer(USER_URL, 200, &user(bad));
+        assert_eq!(run(&l, &mut s), OUTAGE, "login {bad:?}");
+        assert_eq!(s.targets(), [TOKEN_URL, USER_URL], "login {bad:?}");
+        let orgs = serde_json::json!([{"login": "acme"}, {"login": bad}]).to_string();
+        let mut s = Script::happy().answer(ORGS_URL, 200, &orgs);
+        assert_eq!(run(&l, &mut s), OUTAGE, "org {bad:?}");
+    }
+    for good in [
+        "octocat",
+        "Octo-Cat",
+        "octo--cat",
+        "octocat-",
+        "octo_acme",
+        "x1",
+    ] {
+        let orgs = serde_json::json!([{ "login": good }]).to_string();
+        let mut s = Script::happy()
+            .answer(USER_URL, 200, &user(good))
+            .answer(ORGS_URL, 200, &orgs);
+        let p = identity(run(&l, &mut s));
+        assert_eq!(p.id, format!("github:{good}"));
+        assert!(p.roles.contains(&format!("github:org/{good}")), "{good}");
+    }
+}
+
+/// A token reply whose `token_type` is not `bearer` (any case) is a token this plugin does not
+/// understand: never presented, an outage. An absent `token_type` keeps GitHub's bearer meaning.
+#[test]
+fn a_token_of_another_type_is_never_presented() {
+    let l = login();
+    for body in [
+        format!(r#"{{"access_token":"{TOKEN}","token_type":"mac"}}"#),
+        format!(r#"{{"access_token":"{TOKEN}","token_type":""}}"#),
+        format!(r#"{{"access_token":"{TOKEN}","token_type":7}}"#),
+        format!("access_token={TOKEN}&token_type=mac"),
+        format!("token_type=pop&access_token={TOKEN}"),
+    ] {
+        let mut s = Script::happy().answer(TOKEN_URL, 200, &body);
+        assert_eq!(run(&l, &mut s), OUTAGE, "{body}");
+        assert_eq!(s.targets(), [TOKEN_URL], "{body}");
+    }
+    for body in [
+        format!(r#"{{"access_token":"{TOKEN}","token_type":"Bearer"}}"#),
+        format!(r#"{{"access_token":"{TOKEN}","token_type":null}}"#),
+        format!(r#"{{"access_token":"{TOKEN}"}}"#),
+        format!("access_token={TOKEN}&token_type=BEARER"),
+        format!("access_token={TOKEN}"),
+    ] {
+        let mut s = Script::happy().answer(TOKEN_URL, 200, &body);
+        assert_eq!(identity(run(&l, &mut s)).id, "github:octocat", "{body}");
+    }
+}
+
+/// The ten-page cap is judged only after the next link's origin: a foreign next link on the
+/// tenth page is the same outage it is on any other page, never a truncated sign-in.
+#[test]
+fn a_foreign_next_link_on_the_last_page_is_still_an_outage() {
+    let l = login();
+    let mut s = Script::happy().answer_with(
+        ORGS_URL,
+        200,
+        link_to(Some(&orgs_page(2))),
+        r#"[{"login":"o1"}]"#,
+    );
+    for n in 2..=10 {
+        let next = if n == 10 {
+            "https://evil.example/user/orgs?page=11".to_string()
+        } else {
+            orgs_page(n + 1)
+        };
+        s = s.answer_with(
+            &orgs_page(n),
+            200,
+            link_to(Some(&next)),
+            &format!(r#"[{{"login":"o{n}"}}]"#),
+        );
+    }
+    assert_eq!(run(&l, &mut s), OUTAGE);
+    assert_eq!(s.issued.len(), 2 + 10, "the foreign link is never followed");
+}
+
+/// A `Link` field that cannot be read is said at warn, and the user signs in with the groups read
+/// (fail-safe: fewer roles, never more); it is never silently taken as the last page.
+#[test]
+fn an_unreadable_link_field_is_logged_and_the_groups_read_stand() {
+    let l = login();
+    for link in [
+        "<https://api.github.com/user/orgs?page=2; rel=\"next\"",
+        "garbage",
+        "\u{fffd}",
+    ] {
+        let fields = ReplyFields {
+            link: Some(link.to_string()),
+            ..ReplyFields::default()
+        };
+        let mut s = Script::happy().answer_with(ORGS_URL, 200, fields, r#"[{"login":"acme"}]"#);
+        let cap = crate::diagnostics::GithubDiagnostics::default();
+        let step = tracing::subscriber::with_default(cap.subscriber(), || run(&l, &mut s));
+        assert_eq!(
+            identity(step).roles,
+            ["github:id/1", "github:org/acme"],
+            "{link:?}"
+        );
+        assert_eq!(s.targets(), [TOKEN_URL, USER_URL, ORGS_URL], "{link:?}");
+        assert!(
+            cap.contains("cannot be read"),
+            "{link:?}: {:?}",
+            cap.messages()
+        );
+    }
+}
+
+/// An org page answers at most the 100 entries it was asked for; one carrying more is no answer
+/// GitHub gives (an outage), which bounds what one login can assert.
+#[test]
+fn an_org_page_past_its_requested_size_is_an_outage() {
+    let l = login();
+    let page = |n: usize| {
+        serde_json::Value::Array(
+            (0..n)
+                .map(|i| serde_json::json!({ "login": format!("o{i}") }))
+                .collect(),
+        )
+        .to_string()
+    };
+    let mut s = Script::happy().answer(ORGS_URL, 200, &page(crate::ORGS_PER_PAGE));
+    assert_eq!(
+        identity(run(&l, &mut s)).roles.len(),
+        1 + crate::ORGS_PER_PAGE
+    );
+    let mut s = Script::happy().answer(ORGS_URL, 200, &page(crate::ORGS_PER_PAGE + 1));
+    assert_eq!(run(&l, &mut s), OUTAGE);
+}
+
+/// The token endpoint's `error` is read alone, whatever members sit beside it (a repeated access
+/// token included); a repeated or non-string `error` is no code.
+#[test]
+fn the_token_error_is_read_alone() {
+    assert_eq!(
+        github_error(
+            r#"{"access_token":"gho_x","access_token":"gho_x","error":"bad_verification_code"}"#
+        )
+        .as_deref(),
+        Some("bad_verification_code")
+    );
+    assert_eq!(github_error(r#"{"error":"a","error":"b"}"#), None);
+    assert_eq!(github_error(r#"{"error":5}"#), None);
+    assert_eq!(github_error(r#"{"access_token":"gho_x"}"#), None);
+    assert_eq!(
+        github_error("error=invalid_grant&x=1").as_deref(),
+        Some("invalid_grant")
+    );
+}
+
+/// The id_token's nonce claim is read alone from an object payload: an array payload, a repeated
+/// or non-string nonce never binds.
+#[test]
+fn the_id_token_nonce_is_read_alone_from_an_object() {
+    let body = |claims: &str| format!(r#"{{"id_token":"{}"}}"#, id_token(claims));
+    assert!(id_token_nonce_binds(
+        &body(r#"{"sub":"x","nonce":"minted"}"#),
+        Some("minted")
+    ));
+    assert!(!id_token_nonce_binds(
+        &body(r#"["minted"]"#),
+        Some("minted")
+    ));
+    assert!(!id_token_nonce_binds(
+        &body(r#"{"nonce":"minted","nonce":"minted"}"#),
+        Some("minted")
+    ));
+    assert!(!id_token_nonce_binds(
+        &body(r#"{"nonce":1}"#),
+        Some("minted")
+    ));
+    assert!(!id_token_nonce_binds(
+        &body(r#"{"sub":"x"}"#),
+        Some("minted")
+    ));
 }

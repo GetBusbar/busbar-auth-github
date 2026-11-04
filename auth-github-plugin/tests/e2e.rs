@@ -279,17 +279,24 @@ fn issued_key_from_html(html: &str) -> Option<String> {
     Some(rest[..end].to_string())
 }
 
-fn wait_for_health(client: &reqwest::blocking::Client, url: &str, child: &mut std::process::Child) {
+/// Poll `url` until busbar answers healthy (`true`), or `false` when busbar exited first (its port
+/// may have been taken between the reservation and its bind). Never healthy in time: a panic.
+fn wait_for_health(
+    client: &reqwest::blocking::Client,
+    url: &str,
+    child: &mut std::process::Child,
+) -> bool {
     for _ in 0..150 {
         if let Ok(Some(status)) = child.try_wait() {
-            panic!("busbar exited early during health poll: {status}");
+            eprintln!("busbar exited early during health poll: {status}");
+            return false;
         }
         if client
             .get(url)
             .send()
             .is_ok_and(|r| r.status().is_success())
         {
-            return;
+            return true;
         }
         std::thread::sleep(std::time::Duration::from_millis(100));
     }
@@ -336,11 +343,6 @@ fn github_get_flow_mints_key_via_core_executed_hops() {
         &plugins_dir.join("busbar-auth-github.tar.gz"),
     );
 
-    let data_listener = reserve_port();
-    let admin_listener = reserve_port();
-    let data_port = data_listener.local_addr().unwrap().port();
-    let admin_port = admin_listener.local_addr().unwrap().port();
-    assert_ne!(data_port, admin_port);
     let signing_key = work.join("signing.key");
     {
         let out = std::process::Command::new(&busbar_bin)
@@ -361,48 +363,63 @@ fn github_get_flow_mints_key_via_core_executed_hops() {
     .unwrap();
 
     let config = work.join("config.yaml");
-    std::fs::write(
-        &config,
-        format!(
-            "listen: \"127.0.0.1:{data_port}\"\n\
-             admin_listen: \"127.0.0.1:{admin_port}\"\n\
-             public_url: \"https://gate.busbar.e2e\"\n\
-             store: {{ module: memory }}\n\
-             advanced:\n  allow_destinations: [\"127.0.0.1\", \"localhost\"]\n\
-             identity-providers:\n  admin-tokens: {{ module: admin-tokens, token: {{ env: BUSBAR_ADMIN_TOKEN }} }}\n\
-             \x20 github:\n    module: github\n    browser_login:\n      client_id: \"Iv1.e2eclient\"\n\
-             \x20     client_secret: {{ env: BUSBAR_GH_CLIENT_SECRET }}\n\
-             \x20   settings:\n      token_base: \"{wm}\"\n      api_base: \"{wm}\"\n      authorize_base: \"{wm}\"\n\
-             auth:\n  key_ttl: \"7d\"\n  signing_key: {{ file: \"{signing}\" }}\n  chain:\n    - keys\n\
-             \x20 admin_auth: [admin-tokens]\n\
-             \x20 role_bindings:\n    github:\n      \"github:org/testorg\":\n        group: eng-team\n\
-             plugins:\n  enabled: true\n  dir: {plugins}\n  trust:\n    allow_unsigned: true\n\
-             groups:\n  eng-team:\n    limits:\n      - {{ requests: 1000000, per: day }}\n\
-             \x20   child_default:\n      limits:\n        - {{ budget: 5000, per: month }}\n        - {{ requests: 1000, per: day }}\n\
-             providers:\n  mock:\n    api_key: {{ env: MOCK_KEY }}\n\
-             models:\n  test-model:\n    provider: mock\n",
-            signing = signing_key.display(),
-            plugins = plugins_dir.display(),
-        ),
-    )
-    .unwrap();
-
-    drop((data_listener, admin_listener));
-    let mut child = Busbar(
-        std::process::Command::new(&busbar_bin)
-            .env("BUSBAR_CONFIG", &config)
-            .env("BUSBAR_PROVIDERS", &providers)
-            .env("MOCK_KEY", "unused")
-            .env("BUSBAR_GH_CLIENT_SECRET", "e2e-secret")
-            .env("BUSBAR_ADMIN_TOKEN", "e2e-admin-token")
-            .env("BUSBAR_STATE_FILE", "")
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn()
-            .expect("spawn busbar with identity-providers.github"),
-    );
+    let mut attempts = 0;
+    let (_busbar, data_port, admin_port) = loop {
+        attempts += 1;
+        let data_listener = reserve_port();
+        let admin_listener = reserve_port();
+        let data_port = data_listener.local_addr().unwrap().port();
+        let admin_port = admin_listener.local_addr().unwrap().port();
+        assert_ne!(data_port, admin_port);
+        std::fs::write(
+            &config,
+            format!(
+                "listen: \"127.0.0.1:{data_port}\"\n\
+                 admin_listen: \"127.0.0.1:{admin_port}\"\n\
+                 public_url: \"https://gate.busbar.e2e\"\n\
+                 store: {{ module: memory }}\n\
+                 advanced:\n  allow_destinations: [\"127.0.0.1\", \"localhost\"]\n\
+                 identity-providers:\n  admin-tokens: {{ module: admin-tokens, token: {{ env: BUSBAR_ADMIN_TOKEN }} }}\n\
+                 \x20 github:\n    module: github\n    browser_login:\n      client_id: \"Iv1.e2eclient\"\n\
+                 \x20     client_secret: {{ env: BUSBAR_GH_CLIENT_SECRET }}\n\
+                 \x20   settings:\n      token_base: \"{wm}\"\n      api_base: \"{wm}\"\n      authorize_base: \"{wm}\"\n\
+                 auth:\n  key_ttl: \"7d\"\n  signing_key: {{ file: \"{signing}\" }}\n  chain:\n    - keys\n\
+                 \x20 admin_auth: [admin-tokens]\n\
+                 \x20 role_bindings:\n    github:\n      \"github:org/testorg\":\n        group: eng-team\n\
+                 plugins:\n  enabled: true\n  dir: {plugins}\n  trust:\n    allow_unsigned: true\n\
+                 groups:\n  eng-team:\n    limits:\n      - {{ requests: 1000000, per: day }}\n\
+                 \x20   child_default:\n      limits:\n        - {{ budget: 5000, per: month }}\n        - {{ requests: 1000, per: day }}\n\
+                 providers:\n  mock:\n    api_key: {{ env: MOCK_KEY }}\n\
+                 models:\n  test-model:\n    provider: mock\n",
+                signing = signing_key.display(),
+                plugins = plugins_dir.display(),
+            ),
+        )
+        .unwrap();
+        drop((data_listener, admin_listener));
+        let mut child = Busbar(
+            std::process::Command::new(&busbar_bin)
+                .env("BUSBAR_CONFIG", &config)
+                .env("BUSBAR_PROVIDERS", &providers)
+                .env("MOCK_KEY", "unused")
+                .env("BUSBAR_GH_CLIENT_SECRET", "e2e-secret")
+                .env("BUSBAR_ADMIN_TOKEN", "e2e-admin-token")
+                .env("BUSBAR_STATE_FILE", "")
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::inherit())
+                .spawn()
+                .expect("spawn busbar with identity-providers.github"),
+        );
+        if wait_for_health(
+            &client,
+            &format!("http://127.0.0.1:{data_port}/healthz"),
+            &mut child.0,
+        ) {
+            break (child, data_port, admin_port);
+        }
+        assert!(attempts < 3, "busbar exited early on {attempts} attempts");
+    };
     let base = format!("http://127.0.0.1:{data_port}");
-    wait_for_health(&client, &format!("{base}/healthz"), &mut child.0);
 
     let begin = client
         .get(format!("{base}/auth/token?method=github"))
@@ -463,6 +480,11 @@ fn github_get_flow_mints_key_via_core_executed_hops() {
         Some("e2e-secret")
     );
     assert_eq!(form.get("code").map(String::as_str), Some("e2e-code"));
+    assert_eq!(
+        form.get("redirect_uri").map(String::as_str),
+        Some("https://gate.busbar.e2e/auth/token"),
+        "the token exchange carries the redirect_uri the authorize step used"
+    );
     assert_eq!(
         form.get("code_verifier").map(String::as_str),
         login_cookie["code_verifier"].as_str()

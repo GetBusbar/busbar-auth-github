@@ -516,7 +516,7 @@ fn begin_login_refuses_a_missing_or_non_utf8_field_through_both_doors() {
                 f[which] = bad;
                 let (spoken, url) = begin_with(&p, f[0], f[1], f[2], &[]);
                 assert!(
-                    !spoken.starts_with("Ready"),
+                    spoken.starts_with("Failed"),
                     "{door}: field {which} bad must be refused, got {spoken}"
                 );
                 assert!(url.is_none(), "{door}: field {which} leaked a URL: {url:?}");
@@ -587,83 +587,31 @@ fn a_different_operator_config_is_a_different_transcript() {
     );
 }
 
+/// The auth door loaded as kind `K`, linked and dropped in: refused for its kind, not for any other
+/// reason.
+fn refused_as_another_kind<K: busbar_plugin_loader::dispatch::Kind>(d: &Dispatcher) {
+    use busbar_plugin_loader::dispatch::LoadError;
+    for refused in [
+        load_linked::<K>(&row(), bind(d)).err(),
+        load_dropped::<K>(&cdylib(), &rendering(), bind(d)).err(),
+    ] {
+        assert!(
+            matches!(refused, Some(LoadError::ManifestKind { .. })),
+            "{refused:?}"
+        );
+    }
+}
+
 #[test]
 fn an_auth_door_loaded_as_another_kind_is_refused() {
+    use busbar_plugin_loader::dispatch::kinds;
     let d = dispatcher();
-    assert!(
-        load_linked::<busbar_plugin_loader::dispatch::kinds::secret::Secret>(&row(), bind(&d))
-            .is_err()
-    );
-    assert!(
-        load_dropped::<busbar_plugin_loader::dispatch::kinds::secret::Secret>(
-            &cdylib(),
-            &rendering(),
-            bind(&d)
-        )
-        .is_err()
-    );
-    assert!(
-        load_linked::<busbar_plugin_loader::dispatch::kinds::store::Store>(&row(), bind(&d))
-            .is_err()
-    );
-    assert!(
-        load_dropped::<busbar_plugin_loader::dispatch::kinds::store::Store>(
-            &cdylib(),
-            &rendering(),
-            bind(&d)
-        )
-        .is_err()
-    );
-    assert!(
-        load_linked::<busbar_plugin_loader::dispatch::kinds::hook::Hook>(&row(), bind(&d)).is_err()
-    );
-    assert!(
-        load_dropped::<busbar_plugin_loader::dispatch::kinds::hook::Hook>(
-            &cdylib(),
-            &rendering(),
-            bind(&d)
-        )
-        .is_err()
-    );
-    assert!(
-        load_linked::<busbar_plugin_loader::dispatch::kinds::export::Export>(&row(), bind(&d))
-            .is_err()
-    );
-    assert!(
-        load_dropped::<busbar_plugin_loader::dispatch::kinds::export::Export>(
-            &cdylib(),
-            &rendering(),
-            bind(&d)
-        )
-        .is_err()
-    );
-    assert!(
-        load_linked::<busbar_plugin_loader::dispatch::kinds::plane::Plane>(&row(), bind(&d))
-            .is_err()
-    );
-    assert!(
-        load_dropped::<busbar_plugin_loader::dispatch::kinds::plane::Plane>(
-            &cdylib(),
-            &rendering(),
-            bind(&d)
-        )
-        .is_err()
-    );
-    assert!(
-        load_linked::<busbar_plugin_loader::dispatch::kinds::transport::Transport>(
-            &row(),
-            bind(&d)
-        )
-        .is_err()
-    );
-    assert!(
-        load_dropped::<busbar_plugin_loader::dispatch::kinds::transport::Transport>(
-            &cdylib(),
-            &rendering(),
-            bind(&d)
-        )
-        .is_err()
-    );
+    refused_as_another_kind::<kinds::secret::Secret>(&d);
+    refused_as_another_kind::<kinds::store::Store>(&d);
+    refused_as_another_kind::<kinds::hook::Hook>(&d);
+    refused_as_another_kind::<kinds::export::Export>(&d);
+    refused_as_another_kind::<kinds::plane::Plane>(&d);
+    refused_as_another_kind::<kinds::transport::Transport>(&d);
 }
 
 /// The envelope's log records as the host receives them: `(severity, text)`.
@@ -673,50 +621,6 @@ struct Logs(
     std::sync::Mutex<Vec<Vec<u8>>>,
     std::sync::atomic::AtomicBool,
 );
-
-#[test]
-fn begin_login_requires_each_utf8_binding_field_through_both_doors() {
-    let d = dispatcher();
-    for dropped in [false, true] {
-        let p = if dropped {
-            load_dropped::<Auth>(&cdylib(), &rendering(), bind(&d)).expect("dropped door loads")
-        } else {
-            load_linked::<Auth>(&row(), bind(&d)).expect("linked door loads")
-        };
-        assert_eq!(open(&p, CFG, Some(SECRET)), "Ready lease=false ");
-        let invalid = AbiStr {
-            ptr: b"\xff".as_ptr(),
-            len: 1,
-        };
-        for field in 0..3 {
-            for value in [NO_STR, invalid] {
-                let mut input = BeginLoginIn {
-                    head: in_head(),
-                    redirect_uri: s("https://node.example/auth/token"),
-                    state: s("state"),
-                    nonce: NO_STR,
-                    code_challenge: s("challenge"),
-                    scopes: std::ptr::null(),
-                    scopes_len: 0,
-                };
-                match field {
-                    0 => input.redirect_uri = value,
-                    1 => input.state = value,
-                    _ => input.code_challenge = value,
-                }
-                let mut output: BeginLoginOut = z();
-                output.head = out_head();
-                output.authorize_url = NO_STR;
-                let mut frame = Frame::new(input, output);
-                let called = p.call(auth::slot::BEGIN_LOGIN, &mut frame);
-                assert!(spelled(&called).starts_with("Failed"));
-                assert!(frame.out.authorize_url.is_absent());
-                assert_eq!(frame.out.shape, 0);
-            }
-        }
-        assert_eq!(close(&p), "Ready lease=false ");
-    }
-}
 
 #[test]
 fn unsupported_verify_is_explained_through_both_doors_without_echoing_credentials() {
@@ -956,8 +860,11 @@ fn a_mismatched_statement_is_refused_through_both_doors() {
     );
 }
 
+/// The Statement's needs claim exactly the transports `declares.json` names, and each keeps
+/// exactly the reply fields the login reads (`link`, `retry-after`, `x-ratelimit-remaining`,
+/// `x-ratelimit-reset`) under `KEEP_NAMED`, as rendered into the image the host reads.
 #[test]
-fn github_needs_match_its_declares_file_and_release_profile() {
+fn github_needs_match_its_declares_file_and_keep_the_fields_the_login_reads() {
     let declared: serde_json::Value =
         serde_json::from_str(include_str!("../../auth-github/declares.json")).unwrap();
     let rendered = row().statement;
@@ -978,11 +885,24 @@ fn github_needs_match_its_declares_file_and_release_profile() {
             .map(|v| v.as_str().unwrap())
             .collect::<Vec<_>>()
     );
-    let debug_build = std::hint::black_box(cfg!(debug_assertions));
-    if std::env::var_os("BUSBAR_EXPECT_RELEASE").is_some() {
-        assert!(
-            !debug_build,
-            "BUSBAR_EXPECT_RELEASE requires a release build"
+    assert_eq!(statement.needs.len(), 2);
+    for need in &statement.needs {
+        assert_eq!(
+            need.keep_mode,
+            busbar_contract::abi::host::conn::connector::KEEP_NAMED
+        );
+        assert_eq!(
+            need.keep_response_headers,
+            busbar_auth_github::login::KEPT_REPLY_FIELDS
+        );
+        assert_eq!(
+            need.keep_response_headers,
+            [
+                "link",
+                "retry-after",
+                "x-ratelimit-remaining",
+                "x-ratelimit-reset"
+            ]
         );
     }
 }
@@ -995,7 +915,6 @@ fn github_serving_requires_its_connection_table_through_both_doors() {
         plugin: NAME.to_owned(),
         needs: 2,
     };
-    assert!(expected.to_string().contains(&format!("plugin '{NAME}'")));
     assert_eq!(
         load_linked::<Auth>(
             &row(),

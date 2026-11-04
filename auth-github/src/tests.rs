@@ -320,3 +320,66 @@ fn next_link_reads_the_next_relation_only() {
         assert_eq!(next_link(none), None, "{none}");
     }
 }
+
+/// RFC 8288 §3.3: only a link's first `rel` counts, and a quoted value is one quoted-string (a `;`,
+/// `,`, `<` or `rel=next` inside it is not syntax). A field that cannot be read is told apart from
+/// one with no next link.
+#[test]
+fn next_link_honours_the_first_rel_and_quoted_values_only() {
+    for (link, want) in [
+        (r#"<https://a.example/9>; rel="prev"; rel="next""#, None),
+        (
+            r#"<https://a.example/2>; rel=next; rel="prev""#,
+            Some("https://a.example/2"),
+        ),
+        (
+            r#"<https://a.example/9>; rel="last"; title="x;rel=next", <https://a.example/2>; rel="next""#,
+            Some("https://a.example/2"),
+        ),
+        (
+            r#"<https://a.example/9>; title="<https://evil.example/>; rel=next"; rel="last""#,
+            None,
+        ),
+        (
+            r#"<https://a.example/2>; title="a \"q\" b"; rel="next""#,
+            Some("https://a.example/2"),
+        ),
+        (
+            r#"<https://a.example/2> ; REL = "Next""#,
+            Some("https://a.example/2"),
+        ),
+    ] {
+        assert_eq!(next_link(link), want, "{link}");
+        assert_eq!(read_link(link), Some(want), "{link}");
+    }
+    for unreadable in [
+        "garbage",
+        "<unterminated; rel=\"next\"",
+        r#"<https://a.example/1>; title="open"#,
+        r#"<https://a.example/1>; rel="prev" junk, <https://a.example/2>; rel="next""#,
+        r#"<https://a.example/1>; =x"#,
+    ] {
+        assert_eq!(read_link(unreadable), None, "{unreadable}");
+        assert_eq!(next_link(unreadable), None, "{unreadable}");
+    }
+    assert_eq!(read_link(""), Some(None));
+    assert_eq!(
+        read_link(r#"<https://a.example/1>; rel="prev""#),
+        Some(None)
+    );
+}
+
+/// A `/user/orgs` page holds at most the entries it asked for.
+#[test]
+fn an_org_page_holds_at_most_the_entries_it_asked_for() {
+    let page = |n: usize| {
+        let entries: Vec<String> = (0..n).map(|i| format!(r#"{{"login":"o{i}"}}"#)).collect();
+        format!("[{}]", entries.join(","))
+    };
+    assert_eq!(
+        parse_org_groups(&page(ORGS_PER_PAGE)).map(|g| g.len()),
+        Some(ORGS_PER_PAGE)
+    );
+    assert_eq!(parse_org_groups(&page(ORGS_PER_PAGE + 1)), None);
+    assert!(orgs_endpoint(&cfg()).ends_with("/user/orgs?per_page=100"));
+}

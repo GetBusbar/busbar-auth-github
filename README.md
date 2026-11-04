@@ -41,28 +41,35 @@ selected outbound `http` need, and holds its own confidential-client **secret** 
 | 3 | the `/user` JSON | `GET .../user/orgs` (or identifies now if `fetch_orgs = false`) |
 | 4 | the `/user/orgs` JSON | follows its `Link: rel="next"` page by page (on the API's origin, up to 10 pages), then identifies `github:<login>` + `github:id/<id>` + `github:org/<org>` groups |
 
-Only a credential error is a declined sign-in (a bad credential, 401): the token endpoint's
-`400`/`401` carrying an RFC 6749 §5.2 `error`, its HTTP 200 answer carrying the user's own code
-(`bad_verification_code`, `invalid_grant`, `expired_token`), and a `401` from `/user` or
-`/user/orgs` (the access token is not accepted). Everything else is an outage (503, retryable):
+Only a credential error is a declined sign-in (a bad credential, 401): a callback without a
+`code`, `redirect_uri` or `code_verifier` (or with one empty, as when the user cancels on GitHub's
+consent page; no hop is made), the token endpoint's `400`/`401` carrying an RFC 6749 §5.2 `error`,
+its HTTP 200 answer carrying the user's own code (`bad_verification_code`, `invalid_grant`,
+`expired_token`), and a `401` from `/user` or `/user/orgs` (the access token is not accepted).
+Everything else is an outage (503, retryable):
 GitHub answering `5xx` or `429`, its `403` rate limit (`retry-after` or `x-ratelimit-remaining: 0`),
 a `403` on `/user/orgs` (the token lacks `read:org`: logged at warn as the operator's to fix), a
 redirect, `404`, `408` or any other status; a 200 token error that is the operator's
 (`incorrect_client_credentials`, `redirect_uri_mismatch`, `application_suspended`, logged at warn)
-or unknown; a 2xx with no token, no user or no org list (empty, HTML, malformed JSON); a hop that
-cannot be made (refused, connect, TLS, timeout); a reply past 256 KiB. An outage carries GitHub's
-retry hint (`retry-after` seconds, or the seconds to `x-ratelimit-reset`) for the host. An
+or unknown; a 2xx with no token, no user or no org list (empty, HTML, malformed JSON, a
+`token_type` other than `bearer`, a login with a character GitHub logins never carry, an org page
+past its 100 entries); a hop that cannot be made (refused, connect, TLS, timeout); a reply past
+256 KiB. An outage carries GitHub's retry hint (`retry-after` seconds or HTTP-date, or the seconds
+to `x-ratelimit-reset`) for the host. An
 `id_token` on a hop answer (never from github.com) must carry the nonce minted at begin, else the
 sign-in fails its security check (400).
 
 ## Config
 
-`client_id`, `token_base` and `api_base` are required, **even for github.com**: the hop allowlist
-is built only from the URL strings written in the settings (1.5.5 parity), so `validate`/`open`
-refuse settings that leave either at its default (`settings.token_base: must be written out: the
-hop allowlist is built only from URLs in the settings`). `authorize_base` is a browser redirect, not
-a hop, and may stay at its default. An empty `client_id`, or a base that is not an http(s) URL with
-a host, is refused too. The `client_secret` is **never** in this config — it is
+`client_id`, `token_base` and `api_base` are required, **even for github.com**. The two hop bases
+must be written out because the hop allowlist is built only from the URL strings written in the
+settings (1.5.5 parity): `validate`/`open` refuse settings that leave `token_base` or `api_base` at
+its default (`settings.token_base: must be written out: the hop allowlist is built only from URLs in
+the settings`). `authorize_base` is a browser redirect, not a hop, and may stay at its default. An
+empty `client_id`, a base that is not an http(s) URL with a host, and a `token_base` or `api_base`
+on plain `http` to a host that is not loopback or private (`settings.api_base: plain http to a host
+that is not loopback or private: use https`; the hop guard would refuse every hop to it) are
+refused too. The `client_secret` is **never** in this config — it is
 `browser_login.client_secret`, which the kernel delivers to the plugin.
 
 ```json
@@ -111,6 +118,10 @@ and the REST API at `https://<host>/api/v3`:
 Each org the user belongs to becomes a group string `github:org/<org-login>`, mapped to policy by the
 operator's `auth.role_bindings.github:`.
 The identity also always carries `github:id/<id>`, which stays stable when the GitHub login changes.
+A login (the user's or an org's) is GitHub's own characters only: ASCII letters, digits, `-` and `_`
+(an Enterprise Managed User's `_<shortcode>`), at most 64 bytes; a reply carrying any other login is
+an outage, never an identity. The display name is the profile `name`, or the login when the name
+holds a control, an invisible format character (zero-width joiners included) or a line separator.
 
 ## Build
 
@@ -151,10 +162,14 @@ The `busbar-auth-github` crate (`auth-github/`) is the reusable logic (staticall
   (`LoginFlow`) owns this state, so concurrent logins never share a slot; a finished flow holds
   neither.
 - **Org pages.** `/user/orgs` requests 100 orgs a page, following GitHub's `Link: rel="next"` on the
-  `api_base` origin (a next link anywhere else is an outage, never followed), for at most **10 pages**.
-  Replies are bounded by bytes, with no separate org-entry cap. If a next link remains after the
-  tenth page, the user signs in with the groups read and the plugin logs a WARN that the org list
-  was truncated (fail-safe: fewer roles, never more).
+  `api_base` origin (a next link anywhere else is an outage, never followed, on every page), for at
+  most **10 pages**. A page carrying more than the 100 entries it asked for is an outage. If a next
+  link remains after the tenth page, or a `Link` field cannot be read, the user signs in with the
+  groups read and the plugin logs a WARN that the org list was truncated (fail-safe: fewer roles,
+  never more).
+- **Kept reply fields.** Both needs keep (`KEEP_NAMED`) exactly the reply fields the login reads:
+  `link`, `retry-after`, `x-ratelimit-remaining` and `x-ratelimit-reset`; no other far-end header
+  reaches the plugin.
 - **Reply cap.** Every hop's reply is capped at 256 KiB (`MAX_HOP_REPLY_BYTES`, the exchange's
   `reply_limit`); a reply past it ends the login as an outage.
 
@@ -164,8 +179,9 @@ The `busbar-auth-github` crate (`auth-github/`) is the reusable logic (staticall
 cargo test --workspace --locked
 ```
 
-`auth-github-plugin/tests/conformance.rs` runs busbar's published conformance suite (both doors,
-the far ends in `conformance.json`). `tests/e2e.rs` is the live end-to-end against a real busbar
+`auth-github-plugin/tests/conformance.rs` loads the linked and the dropped-in door through busbar's
+plugin loader and drives both over a host-side connection double (`conformance.json` lists the
+credentials no answer or log may carry). `tests/e2e.rs` is the live end-to-end against a real busbar
 and a wiremock GitHub (CI's `wiremock` service).
 
 ## License

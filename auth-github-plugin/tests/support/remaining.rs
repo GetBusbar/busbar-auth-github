@@ -356,7 +356,6 @@ fn short_answer_capacity_eviction_warns_without_exposing_the_identity() {
         for (_, text) in records.iter() {
             for secret in [
                 "identity-canary",
-                "fixture-token",
                 "gho_conformance_token",
                 "code-canary",
                 "verifier-canary",
@@ -381,6 +380,89 @@ fn short_answer_capacity_eviction_warns_without_exposing_the_identity() {
             );
         }
         drop(sent);
+        assert_eq!(close(&p), "Ready lease=false ");
+    }
+}
+
+/// The short-buffer rule through both doors: an identity that does not fit the host's buffer is
+/// the short FAILED, and the one re-submit on the same ticket, with room, is served the identity
+/// reached, with no hop sent again (the authorization code redeems once).
+#[test]
+fn a_short_answer_is_served_to_its_retry_on_the_same_ticket_through_both_doors() {
+    let d = dispatcher();
+    for dropped in [false, true] {
+        let conns = Arc::new(RateLimited {
+            stream: false,
+            streams: Default::default(),
+            hint: None,
+            success: true,
+            reads: Mutex::new(HashMap::new()),
+            sent: Mutex::new(Vec::new()),
+        });
+        let p = load(
+            dropped,
+            Bind {
+                conns: ConnTable::Host(conns.clone()),
+                ..bind(&d)
+            },
+        );
+        assert_eq!(open(&p, LOCAL, Some(SECRET)), "Ready lease=false ");
+        let ticket = d.mint(0).expect("ticket");
+        let (mut bytes, mut groups) = (vec![0u8; 4096], vec![ABSENT; 16]);
+        let mut verdicts = Vec::new();
+        for room in [false, true] {
+            let mut input: CompleteLoginIn = z();
+            input.head = in_head();
+            input.code = secret_blob(b"conformance-code");
+            input.code_verifier = secret_blob(b"conformance-verifier");
+            input.state = s("conformance-state");
+            input.redirect_uri = s("https://node.example/auth/token");
+            input.out_buf = if room {
+                identity_buf(&mut bytes, &mut groups)
+            } else {
+                identity_buf(&mut [], &mut [])
+            };
+            let done = d
+                .submit(
+                    &p,
+                    ticket,
+                    auth::slot::COMPLETE_LOGIN,
+                    Frame::new(input, identify_out()),
+                    DeadlineClass::Call,
+                    now_ns() + 20_000_000_000,
+                )
+                .wait(Duration::from_secs(30))
+                .expect("login completes");
+            verdicts.push(done.outcome);
+            if room {
+                let output = &done.frame.as_ref().expect("Ready returns the frame").out;
+                assert_eq!(output.verdict, auth::LOGIN_IDENTITY);
+                let span = output.identity.subject;
+                assert_eq!(
+                    std::str::from_utf8(
+                        &bytes[span.offset as usize..(span.offset + span.len) as usize]
+                    )
+                    .unwrap(),
+                    "github:identity-canary"
+                );
+            }
+        }
+        assert_eq!(
+            verdicts,
+            [Outcome::Failed, Outcome::Ready],
+            "dropped={dropped}"
+        );
+        assert_eq!(
+            *conns.sent.lock().unwrap(),
+            [
+                "/login/oauth/access_token",
+                "/user",
+                "/user/orgs?per_page=100",
+                "/user/orgs?page=2"
+            ],
+            "the retry sends no hop"
+        );
+        d.recycle(ticket);
         assert_eq!(close(&p), "Ready lease=false ");
     }
 }
@@ -496,11 +578,11 @@ fn a_successful_login_and_an_empty_code_are_compared_through_both_doors() {
         let text = format!("{:?}", logs.0.lock().unwrap());
         for secret in [
             SECRET,
-            "fixture-token",
+            "gho_conformance_token",
             "conformance-code",
             "conformance-verifier",
         ] {
-            assert!(!text.contains(secret));
+            assert!(!text.contains(secret), "{secret}");
         }
         assert_eq!(close(&p), "Ready lease=false ");
         let lifecycle = load(
