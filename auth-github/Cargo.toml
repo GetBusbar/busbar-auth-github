@@ -21,6 +21,7 @@ tracing = { workspace = true }
 url = { workspace = true }
 
 [dev-dependencies]
+jsonschema = { workspace = true }
 tracing-subscriber = { workspace = true }
 # The chip in this crate's own tests (`abi::sdk::test_support::chip`): a request's sealed head and
 # form body read back as the wire carries them. Dev-only (`test-seal`), never in a shipped image.

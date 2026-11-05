@@ -119,12 +119,18 @@ const TAIL: AuthTail = {
 /// (`max_inflight`).
 const MAX_INFLIGHT: u32 = 64;
 
+/// JSON Schema for the lifecycle settings document, embedded in the signed Statement.
+const SETTINGS_SCHEMA: &[u8] = include_bytes!("../settings.schema.json");
+
 /// This plugin's Statement.
 pub const STATEMENT: Statement = with_tail(
-    statement(NAME, env!("CARGO_PKG_VERSION"), MAX_INFLIGHT)
-        .with_secret_refs(SECRET_REFS)
-        .with_rewrites(REWRITES)
-        .with_needs(NEEDS),
+    Statement {
+        settings_schema: busbar_contract::abi::mechanism::call::Blob::json(SETTINGS_SCHEMA),
+        ..statement(NAME, env!("CARGO_PKG_VERSION"), MAX_INFLIGHT)
+            .with_secret_refs(SECRET_REFS)
+            .with_rewrites(REWRITES)
+            .with_needs(NEEDS)
+    },
     &TAIL,
 );
 
@@ -221,7 +227,10 @@ fn login_from(settings: &[u8], secrets: &[&[u8]]) -> Result<GithubLogin, Refusal
 /// exchanges then omit it, and GitHub refuses them (the operator's to fix, not the user's).
 fn warn_without_secret(secrets: &[&[u8]], verb: &'static str) {
     if secrets.first().is_none_or(|secret| secret.is_empty()) {
-        tracing::warn!(module = "github", "github login: {verb} without a client_secret; token exchanges omit it (check the OAuth App and secret reference if sign-in fails)");
+        tracing::warn!(
+            module = "github",
+            "github login: {verb} without a client_secret; token exchanges omit it (check the OAuth App and secret reference if sign-in fails)"
+        );
     }
 }
 
@@ -570,3 +579,7 @@ pub use table::{door, MACRO_DOOR};
 #[cfg(test)]
 #[path = "door_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "settings_schema_tests.rs"]
+mod settings_schema_tests;

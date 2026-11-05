@@ -1,0 +1,88 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "GitHub login settings",
+  "description": "The lifecycle configuration parsed as GitHubConfig. client_secret is resolved by the host via the Statement secret_refs and lent separately, never accepted in this settings object. Lifecycle validation also checks normalized URL hosts and the plaintext transport policy.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "client_id",
+    "api_base",
+    "token_base"
+  ],
+  "properties": {
+    "client_id": {
+      "type": "string",
+      "minLength": 1,
+      "description": "OAuth client id; an empty string is refused."
+    },
+    "scopes": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "default": [
+        "read:org",
+        "read:user"
+      ],
+      "description": "With fetch_orgs enabled, must include read:org, write:org, admin:org or user."
+    },
+    "api_base": {
+      "type": "string",
+      "pattern": "^https?://",
+      "description": "Must be written explicitly so its host enters the hop allowlist. HTTP is permitted only for a private or loopback host."
+    },
+    "authorize_base": {
+      "type": "string",
+      "pattern": "^https?://",
+      "default": "https://github.com",
+      "description": "HTTP(S) URL with a host; authorize redirects also permit public HTTP."
+    },
+    "token_base": {
+      "type": "string",
+      "pattern": "^https?://",
+      "description": "Must be written explicitly so its host enters the hop allowlist. HTTP is permitted only for a private or loopback host."
+    },
+    "fetch_orgs": {
+      "type": "boolean",
+      "default": true
+    },
+    "ca_cert_pem": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "pattern": "-----BEGIN CERTIFICATE-----",
+      "description": "Optional additional CA certificate PEM; lifecycle requires the BEGIN CERTIFICATE marker."
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "not": {
+          "required": [
+            "fetch_orgs"
+          ],
+          "properties": {
+            "fetch_orgs": {
+              "const": false
+            }
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "scopes": {
+            "contains": {
+              "enum": [
+                "read:org",
+                "write:org",
+                "admin:org",
+                "user"
+              ]
+            }
+          }
+        }
+      }
+    }
+  ]
+}
