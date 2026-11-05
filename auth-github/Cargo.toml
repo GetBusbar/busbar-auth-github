@@ -5,7 +5,7 @@ version = "1.6.0"
 publish.workspace = true
 edition.workspace = true
 rust-version.workspace = true
-description = "The GitHub-OAuth login module for busbar: drive GitHub's authorization-code → opaque-access-token → REST /user → /user/orgs flow and map it to a Principal (github:<login> + github:id/<id> + github:org/<org> groups). The plugin holds its own client secret (resolved by the kernel from browser_login.client_secret) and runs the hops itself over the selected outbound need."
+description = "The GitHub-OAuth login module for busbar: drive GitHub's authorization-code → opaque-access-token → REST /user → /user/orgs flow and map it to a Principal (provider-scoped numeric user and organization identities). The plugin holds its own client secret (resolved by the kernel from browser_login.client_secret) and runs the hops itself over the selected outbound need."
 license.workspace = true
 
 [dependencies]

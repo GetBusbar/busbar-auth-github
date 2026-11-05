@@ -71,3 +71,22 @@ fn settings_schema_matches_github_lifecycle() {
     assert_eq!(props["authorize_base"]["default"], cfg.authorize_base);
     assert_eq!(props["fetch_orgs"]["default"], cfg.fetch_orgs);
 }
+
+#[test]
+fn immutable_identity_declares_the_host_transition_gate() {
+    let schema: Value = serde_json::from_slice(SETTINGS_SCHEMA).unwrap();
+    assert_eq!(schema["x-busbar-principal-format"], "github-v2");
+    assert_eq!(
+        schema["x-busbar-principal-domain-fields"],
+        json!([{"pointer":"/api_base","required":true}])
+    );
+    for base in [
+        "https://u:p@api.github.com",
+        "https://api.github.com?x=1",
+        "https://api.github.com#fragment",
+    ] {
+        let settings =
+            json!({"client_id":"client","api_base":base,"token_base":"https://github.com"});
+        assert!(<Github as Life>::validate(&serde_json::to_vec(&settings).unwrap()).is_err());
+    }
+}

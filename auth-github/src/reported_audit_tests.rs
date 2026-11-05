@@ -57,10 +57,14 @@ fn display_controls_fall_back_to_login_without_changing_identity_or_roles() {
         let mut script = Script::happy().answer(USER_URL, 200, &body);
         let p = identity(run(&login(), &mut script));
         assert_eq!(p.name.as_deref(), Some("octocat"), "{control:?}");
-        assert_eq!(p.id, "github:octocat");
+        assert_eq!(p.id, "github-v2:aHR0cHM6Ly9hcGkuZ2l0aHViLmNvbQ:user:1");
         assert_eq!(
             p.roles,
-            ["github:id/1", "github:org/acme", "github:org/widgets"]
+            [
+                "github-v2:aHR0cHM6Ly9hcGkuZ2l0aHViLmNvbQ:user:1",
+                "github-v2:aHR0cHM6Ly9hcGkuZ2l0aHViLmNvbQ:org:1",
+                "github-v2:aHR0cHM6Ly9hcGkuZ2l0aHViLmNvbQ:org:2"
+            ]
         );
         assert_eq!(script.targets(), [TOKEN_URL, USER_URL, ORGS_URL]);
     }
@@ -136,7 +140,7 @@ fn malformed_percent_escapes_in_form_tokens_are_preserved_on_the_actual_bearer()
             assert_eq!(script.targets(), [TOKEN_URL]);
         } else {
             let p = identity(run(&login(), &mut script));
-            assert_eq!(p.id, "github:octocat");
+            assert_eq!(p.id, "github-v2:aHR0cHM6Ly9hcGkuZ2l0aHViLmNvbQ:user:1");
             let expected = if suffix == "%FF" {
                 b"authorization: Bearer token\xff\r\n".to_vec()
             } else {
@@ -160,7 +164,10 @@ fn trailing_operator_slashes_do_not_change_any_login_endpoint() {
         .begin_login("https://node.example/auth/token", "state", "challenge", &[])
         .starts_with("https://github.com/login/oauth/authorize?"));
     let mut script = Script::happy();
-    assert_eq!(identity(run(&login, &mut script)).id, "github:octocat");
+    assert_eq!(
+        identity(run(&login, &mut script)).id,
+        "github-v2:aHR0cHM6Ly9hcGkuZ2l0aHViLmNvbQ:user:1"
+    );
     assert_eq!(script.targets(), [TOKEN_URL, USER_URL, ORGS_URL]);
 }
 
@@ -175,12 +182,16 @@ fn uppercase_same_origin_pagination_keeps_the_bearer_and_all_roles() {
                 link: Some("<HTTPS://API.GITHUB.COM:443/user/orgs?page=2>; rel=\"next\"".into()),
                 ..ReplyFields::default()
             },
-            r#"[{"login":"acme"}]"#,
+            r#"[{"login":"acme","id":1}]"#,
         )
-        .answer(next, 200, r#"[{"login":"widgets"}]"#);
+        .answer(next, 200, r#"[{"login":"widgets","id":2}]"#);
     let p = identity(run(&login(), &mut script));
-    assert!(p.roles.contains(&"github:org/acme".into()));
-    assert!(p.roles.contains(&"github:org/widgets".into()));
+    assert!(p
+        .roles
+        .contains(&"github-v2:aHR0cHM6Ly9hcGkuZ2l0aHViLmNvbQ:org:1".into()));
+    assert!(p
+        .roles
+        .contains(&"github-v2:aHR0cHM6Ly9hcGkuZ2l0aHViLmNvbQ:org:2".into()));
     assert_eq!(script.targets(), [TOKEN_URL, USER_URL, ORGS_URL, next]);
     assert!(plain(&script.issued[3]).contains(&("authorization".into(), format!("Bearer {TOKEN}"))));
 }

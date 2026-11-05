@@ -26,7 +26,7 @@ use std::time::{Duration, Instant};
 use busbar_contract::abi::auth::{
     AuthTail, BeginLoginIn, BeginLoginOut, CompleteLoginIn, IdentifyOut, IdentityBuf,
     BEGIN_AUTHORIZE, CANCEL_ABANDONED, CAP_LOGIN, LOGIN_BAD_CREDENTIAL, LOGIN_KIND_REDIRECT,
-    LOGIN_OUTAGE, LOGIN_SECURITY_CHECK_FAILED,
+    LOGIN_OUTAGE,
 };
 use busbar_contract::abi::host::conn::connector::{
     Need, DIRECTION_OUTBOUND, EGRESS_DEFAULT, KEEP_NAMED,
@@ -515,7 +515,7 @@ impl SafeSlot for Complete {
             }
             LoginStep::Identity(p) => identify(g, ticket, p, buf, &mut out),
             LoginStep::Outage { retry_after } => login_outage(retry_after, buf, &mut out),
-            other @ (LoginStep::BadCredential | LoginStep::SecurityCheckFailed) => {
+            other @ LoginStep::BadCredential => {
                 out.set(|o| &o.verdict, verdict(&other));
                 Outcome::Ready
             }
@@ -527,7 +527,6 @@ impl SafeSlot for Complete {
 fn verdict(step: &LoginStep) -> u32 {
     match step {
         LoginStep::Outage { .. } => LOGIN_OUTAGE,
-        LoginStep::SecurityCheckFailed => LOGIN_SECURITY_CHECK_FAILED,
         LoginStep::BadCredential => LOGIN_BAD_CREDENTIAL,
         // Neither is terminal: the caller answers them before it asks for a verdict.
         LoginStep::Pending | LoginStep::Identity(_) => LOGIN_OUTAGE,

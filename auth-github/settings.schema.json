@@ -29,7 +29,7 @@
     "api_base": {
       "type": "string",
       "pattern": "^https?://",
-      "description": "Must be written explicitly so its host enters the hop allowlist. HTTP is permitted only for a private or loopback host."
+      "description": "Must be written explicitly so its host enters the hop allowlist. HTTP is permitted only for a private or loopback host. Also defines the immutable identity namespace, including its GHES path. Credentials, query, fragment and whitespace are refused."
     },
     "authorize_base": {
       "type": "string",
@@ -83,6 +83,13 @@
           }
         }
       }
+    }
+  ],
+  "x-busbar-principal-format": "github-v2",
+  "x-busbar-principal-domain-fields": [
+    {
+      "pointer": "/api_base",
+      "required": true
     }
   ]
 }

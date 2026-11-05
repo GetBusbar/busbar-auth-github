@@ -83,7 +83,11 @@ impl Script {
                 &format!(r#"{{"access_token":"{TOKEN}","token_type":"bearer"}}"#),
             )
             .answer(USER_URL, 200, r#"{"login":"octocat","id":1,"name":"Octo"}"#)
-            .answer(ORGS_URL, 200, r#"[{"login":"acme"},{"login":"widgets"}]"#)
+            .answer(
+                ORGS_URL,
+                200,
+                r#"[{"login":"acme","id":1},{"login":"widgets","id":2}]"#,
+            )
     }
     fn targets(&self) -> Vec<&str> {
         self.issued.iter().map(|r| r.target.as_str()).collect()
@@ -161,14 +165,14 @@ fn a_member_signs_in_with_org_groups() {
     let l = login();
     let mut s = Script::happy();
     let p = identity(run(&l, &mut s));
-    assert_eq!(p.id, "github:octocat");
+    assert_eq!(p.id, "github-v2:aHR0cHM6Ly9hcGkuZ2l0aHViLmNvbQ:user:1");
     assert_eq!(p.name.as_deref(), Some("Octo"));
     assert_eq!(
         p.roles,
         vec![
-            "github:id/1".to_string(),
-            "github:org/acme".to_string(),
-            "github:org/widgets".to_string()
+            "github-v2:aHR0cHM6Ly9hcGkuZ2l0aHViLmNvbQ:user:1".to_string(),
+            "github-v2:aHR0cHM6Ly9hcGkuZ2l0aHViLmNvbQ:org:1".to_string(),
+            "github-v2:aHR0cHM6Ly9hcGkuZ2l0aHViLmNvbQ:org:2".to_string()
         ]
     );
     assert_eq!(s.targets(), vec![TOKEN_URL, USER_URL, ORGS_URL]);
@@ -227,25 +231,26 @@ fn the_rest_gets_carry_the_bearer_and_user_agent() {
 #[test]
 fn red_a_non_member_carries_no_group_for_the_org() {
     let l = login();
-    let mut s = Script::happy().answer(ORGS_URL, 200, r#"[{"login":"elsewhere"}]"#);
+    let mut s = Script::happy().answer(ORGS_URL, 200, r#"[{"login":"elsewhere","id":11}]"#);
     let p = identity(run(&l, &mut s));
     assert!(
-        !p.roles.contains(&"github:org/acme".to_string()),
+        !p.roles
+            .contains(&"github-v2:aHR0cHM6Ly9hcGkuZ2l0aHViLmNvbQ:org:1".to_string()),
         "{:?}",
         p.roles
     );
     assert_eq!(
         p.roles,
         vec![
-            "github:id/1".to_string(),
-            "github:org/elsewhere".to_string()
+            "github-v2:aHR0cHM6Ly9hcGkuZ2l0aHViLmNvbQ:user:1".to_string(),
+            "github-v2:aHR0cHM6Ly9hcGkuZ2l0aHViLmNvbQ:org:11".to_string()
         ]
     );
 
     let mut s = Script::happy().answer(ORGS_URL, 200, "[]");
     assert_eq!(
         identity(run(&l, &mut s)).roles,
-        vec!["github:id/1".to_string()]
+        vec!["github-v2:aHR0cHM6Ly9hcGkuZ2l0aHViLmNvbQ:user:1".to_string()]
     );
 }
 
@@ -332,7 +337,10 @@ fn a_form_encoded_token_response_is_accepted() {
         200,
         &format!("access_token={TOKEN}&scope=read%3Aorg&token_type=bearer"),
     );
-    assert_eq!(identity(run(&l, &mut s)).id, "github:octocat");
+    assert_eq!(
+        identity(run(&l, &mut s)).id,
+        "github-v2:aHR0cHM6Ly9hcGkuZ2l0aHViLmNvbQ:user:1"
+    );
 }
 
 #[test]
@@ -397,28 +405,28 @@ fn red_g4_the_org_list_is_followed_past_page_one() {
             ORGS_URL,
             200,
             link_to(Some(&orgs_page(2))),
-            r#"[{"login":"acme"}]"#,
+            r#"[{"login":"acme","id":1}]"#,
         )
         .answer_with(
             &orgs_page(2),
             200,
             link_to(Some(&orgs_page(3))),
-            r#"[{"login":"widgets"}]"#,
+            r#"[{"login":"widgets","id":2}]"#,
         )
         .answer_with(
             &orgs_page(3),
             200,
             link_to(None),
-            r#"[{"login":"gadgets"}]"#,
+            r#"[{"login":"gadgets","id":12}]"#,
         );
     let p = identity(run(&l, &mut s));
     assert_eq!(
         p.roles,
         vec![
-            "github:id/1".to_string(),
-            "github:org/acme".to_string(),
-            "github:org/widgets".to_string(),
-            "github:org/gadgets".to_string(),
+            "github-v2:aHR0cHM6Ly9hcGkuZ2l0aHViLmNvbQ:user:1".to_string(),
+            "github-v2:aHR0cHM6Ly9hcGkuZ2l0aHViLmNvbQ:org:1".to_string(),
+            "github-v2:aHR0cHM6Ly9hcGkuZ2l0aHViLmNvbQ:org:2".to_string(),
+            "github-v2:aHR0cHM6Ly9hcGkuZ2l0aHViLmNvbQ:org:12".to_string(),
         ]
     );
     let (p2, p3) = (orgs_page(2), orgs_page(3));
@@ -442,21 +450,24 @@ fn red_g4_the_org_list_stops_at_ten_pages_with_a_warn() {
         ORGS_URL,
         200,
         link_to(Some(&orgs_page(2))),
-        r#"[{"login":"o1"}]"#,
+        r#"[{"login":"o1","id":1}]"#,
     );
     for n in 2..=12 {
         s = s.answer_with(
             &orgs_page(n),
             200,
             link_to(Some(&orgs_page(n + 1))),
-            &format!(r#"[{{"login":"o{n}"}}]"#),
+            &format!(r#"[{{"login":"o{n}","id":{n}}}]"#),
         );
     }
     let cap = GithubDiagnostics::default();
     let step = tracing::subscriber::with_default(cap.subscriber(), || run(&l, &mut s));
     let p = identity(step);
     assert_eq!(p.roles.len(), 1 + 10, "{:?}", p.roles);
-    assert_eq!(p.roles.last().map(String::as_str), Some("github:org/o10"));
+    assert_eq!(
+        p.roles.last().map(String::as_str),
+        Some("github-v2:aHR0cHM6Ly9hcGkuZ2l0aHViLmNvbQ:org:10")
+    );
     assert_eq!(s.issued.len(), 2 + 10);
     assert!(cap.contains("truncated"), "{:?}", cap.messages());
 }
@@ -470,8 +481,13 @@ fn red_g4_a_next_link_off_the_api_origin_is_never_followed() {
         "https://github.com/user/orgs?page=2",
     ] {
         let mut s = Script::happy()
-            .answer_with(ORGS_URL, 200, link_to(Some(next)), r#"[{"login":"acme"}]"#)
-            .answer(next, 200, r#"[{"login":"injected"}]"#);
+            .answer_with(
+                ORGS_URL,
+                200,
+                link_to(Some(next)),
+                r#"[{"login":"acme","id":1}]"#,
+            )
+            .answer(next, 200, r#"[{"login":"injected","id":13}]"#);
         assert_eq!(run(&l, &mut s), OUTAGE, "{next}");
         assert_eq!(s.targets(), vec![TOKEN_URL, USER_URL, ORGS_URL], "{next}");
     }
@@ -486,7 +502,8 @@ fn red_l11_far_end_strings_enter_the_principal_filtered() {
     for bad in ["octo\ncat", "octo\u{1b}[31m", "octo\u{7f}", &"a".repeat(65)] {
         let mut s = Script::happy().answer(USER_URL, 200, &user(bad, "Octo"));
         assert_eq!(run(&l, &mut s), OUTAGE, "login {bad:?}");
-        let orgs = serde_json::json!([{"login": "acme"}, {"login": bad}]).to_string();
+        let orgs =
+            serde_json::json!([{"login": "acme", "id": 1}, {"login": bad, "id": 2}]).to_string();
         let mut s = Script::happy().answer(ORGS_URL, 200, &orgs);
         assert_eq!(run(&l, &mut s), OUTAGE, "org {bad:?}");
     }
@@ -496,11 +513,13 @@ fn red_l11_far_end_strings_enter_the_principal_filtered() {
         .answer(
             ORGS_URL,
             200,
-            &serde_json::json!([{"login": long}]).to_string(),
+            &serde_json::json!([{"login": long, "id": 2}]).to_string(),
         );
     let p = identity(run(&l, &mut s));
-    assert_eq!(p.id, format!("github:{long}"));
-    assert!(p.roles.contains(&format!("github:org/{long}")));
+    assert_eq!(p.id, "github-v2:aHR0cHM6Ly9hcGkuZ2l0aHViLmNvbQ:user:1");
+    assert!(p
+        .roles
+        .contains(&"github-v2:aHR0cHM6Ly9hcGkuZ2l0aHViLmNvbQ:org:2".to_string()));
 
     let mut s = Script::happy().answer(USER_URL, 200, &user("octocat", "Evil\r\nAdmin"));
     assert_eq!(identity(run(&l, &mut s)).name.as_deref(), Some("octocat"));
@@ -517,7 +536,10 @@ fn fetch_orgs_false_identifies_after_user_with_two_hops() {
     let l = GithubLogin::open(&settings, Some(SECRET)).unwrap();
     let mut s = Script::happy();
     let p = identity(run(&l, &mut s));
-    assert_eq!(p.roles, vec!["github:id/1".to_string()]);
+    assert_eq!(
+        p.roles,
+        vec!["github-v2:aHR0cHM6Ly9hcGkuZ2l0aHViLmNvbQ:user:1".to_string()]
+    );
     assert_eq!(s.targets(), vec![TOKEN_URL, USER_URL]);
 }
 
@@ -574,7 +596,10 @@ fn a_pending_exchange_parks_and_resumes_on_the_same_request() {
         assert!(pendings <= 3, "one pend per hop");
     };
     assert_eq!(pendings, 3);
-    assert_eq!(identity(step).id, "github:octocat");
+    assert_eq!(
+        identity(step).id,
+        "github-v2:aHR0cHM6Ly9hcGkuZ2l0aHViLmNvbQ:user:1"
+    );
 
     assert_eq!(s.issued.len(), 6);
     for pair in s.issued.chunks(2) {
@@ -754,103 +779,6 @@ fn busbar_auth_github_plugin_hop() -> busbar_contract::auth::LoginHop {
     }
 }
 
-/// An unsigned JWT-shaped token whose payload is `claims` (base64url, no padding).
-fn id_token(claims: &str) -> String {
-    const A: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
-    let b = claims.as_bytes();
-    let mut out = String::new();
-    for chunk in b.chunks(3) {
-        let n = chunk.iter().fold(0u32, |a, &x| (a << 8) | x as u32) << (8 * (3 - chunk.len()));
-        for i in 0..=chunk.len() {
-            out.push(A[((n >> (18 - 6 * i)) & 63) as usize] as char);
-        }
-    }
-    format!("eyJhbGciOiJub25lIn0.{out}.sig")
-}
-
-/// 1.5.5's core nonce binding, now the plugin's (WIRE-AUTH: `CompleteLoginIn.nonce`): an id_token
-#[test]
-fn an_id_token_with_a_foreign_nonce_is_refused() {
-    let l = login();
-    for body in [
-        format!(
-            r#"{{"access_token":"gho_x","id_token":"{}"}}"#,
-            id_token(r#"{"nonce":"someone-else"}"#)
-        ),
-        format!(
-            r#"{{"access_token":"gho_x","id_token":"{}"}}"#,
-            id_token(r#"{"sub":"no-nonce"}"#)
-        ),
-        r#"{"access_token":"gho_x","id_token":"a.!!!.c"}"#.to_string(),
-        r#"{"access_token":"gho_x","id_token":"no-dots"}"#.to_string(),
-    ] {
-        let mut s = Script::happy().answer(TOKEN_URL, 200, &body);
-        assert_eq!(run(&l, &mut s), LoginStep::SecurityCheckFailed, "{body}");
-        assert_eq!(s.targets(), vec![TOKEN_URL]);
-    }
-
-    let body = format!(
-        r#"{{"access_token":"gho_x","id_token":"{}"}}"#,
-        id_token(&format!(r#"{{"nonce":"{NONCE}"}}"#))
-    );
-    let mut s = Script::happy().answer(TOKEN_URL, 200, &body);
-    let mut f = l.start(Some("c"), Some("https://node.example/cb"), Some("v"), None);
-    assert_eq!(l.drive(&mut f, &mut s), LoginStep::SecurityCheckFailed);
-}
-
-#[test]
-fn an_id_token_bound_to_the_minted_nonce_passes_the_check() {
-    let l = login();
-    for claims in [
-        format!(r#"{{"nonce":"{NONCE}"}}"#),
-        format!(r#"{{"nonce":"{NONCE}","sub":"x1"}}"#),
-        format!(r#"{{"nonce":"{NONCE}","s":"xy"}}"#),
-    ] {
-        let body = format!(
-            r#"{{"access_token":"{TOKEN}","id_token":"{}"}}"#,
-            id_token(&claims)
-        );
-        let mut s = Script::happy().answer(TOKEN_URL, 200, &body);
-        assert_eq!(identity(run(&l, &mut s)).id, "github:octocat", "{claims}");
-    }
-}
-
-/// The id_token payload is read strictly as base64url without padding, through the real nonce
-#[test]
-fn the_id_token_payload_is_read_strictly_base64url_no_pad() {
-    let (mut padded_seen, mut alphabet_seen) = (false, false);
-    for nonce in ["n", "no", "non", "a?>~", "??>>", "~~~~", "\u{fb}\u{ff}"] {
-        let token = id_token(&serde_json::json!({ "nonce": nonce }).to_string());
-        let seg = token
-            .split('.')
-            .nth(1)
-            .expect("a payload segment")
-            .to_string();
-        let body = |seg: &str| format!(r#"{{"id_token":"h.{seg}.s"}}"#);
-        assert!(id_token_nonce_binds(&body(&seg), Some(nonce)), "{nonce}");
-        if !seg.len().is_multiple_of(4) {
-            padded_seen = true;
-            let padded = format!("{seg}{}", "=".repeat(4 - seg.len() % 4));
-            assert!(
-                !id_token_nonce_binds(&body(&padded), Some(nonce)),
-                "padded {nonce}"
-            );
-        }
-        if seg.contains(['-', '_']) {
-            alphabet_seen = true;
-            let standard = seg.replace('-', "+").replace('_', "/");
-            assert!(
-                !id_token_nonce_binds(&body(&standard), Some(nonce)),
-                "standard {nonce}"
-            );
-        }
-    }
-    assert!(
-        padded_seen && alphabet_seen,
-        "positive controls: a padded and a url-safe case ran"
-    );
-}
-
 /// The hop loop is bounded at [`MAX_HOPS`] exchanges per callback: a flow that has spent them sends
 /// nothing more and ends as an outage, at warn; one with a single hop left sends that one only.
 /// (The step machine itself stops at the tenth org page, so a full chain spends exactly the
@@ -900,7 +828,11 @@ fn red_l1_an_answer_is_read_as_the_answer_of_the_hop_sent() {
             r#"{"access_token":"gho_swapped"}"#,
             vec![TOKEN_URL, USER_URL],
         ),
-        (USER_URL, r#"[{"login":"acme"}]"#, vec![TOKEN_URL, USER_URL]),
+        (
+            USER_URL,
+            r#"[{"login":"acme","id":1}]"#,
+            vec![TOKEN_URL, USER_URL],
+        ),
         (
             ORGS_URL,
             r#"{"login":"someone-else","id":2}"#,
@@ -925,11 +857,11 @@ fn red_l1_an_answer_is_read_as_the_answer_of_the_hop_sent() {
     }
 }
 
-/// The answers the 1.5.5 module, driven by the 1.5.5 core, reached for these bodies (pinned while
+/// Current identity/failure answers for these bodies; immutable subjects replace historical handles.
 #[test]
-fn the_flow_answers_as_the_1_5_5_module_driven_by_the_1_5_5_core() {
+fn the_flow_preserves_current_identity_and_failure_contract() {
     let id = |roles: &[&str]| {
-        let mut p = Principal::from_id("github:octocat");
+        let mut p = Principal::from_id("github-v2:aHR0cHM6Ly9hcGkuZ2l0aHViLmNvbQ:user:1");
         p.name = Some("Octo".to_string());
         p.roles = roles.iter().map(|r| r.to_string()).collect();
         LoginStep::Identity(p)
@@ -937,12 +869,19 @@ fn the_flow_answers_as_the_1_5_5_module_driven_by_the_1_5_5_core() {
     let cases: Vec<(Script, LoginStep, Vec<&str>)> = vec![
         (
             Script::happy(),
-            id(&["github:id/1", "github:org/acme", "github:org/widgets"]),
+            id(&[
+                "github-v2:aHR0cHM6Ly9hcGkuZ2l0aHViLmNvbQ:user:1",
+                "github-v2:aHR0cHM6Ly9hcGkuZ2l0aHViLmNvbQ:org:1",
+                "github-v2:aHR0cHM6Ly9hcGkuZ2l0aHViLmNvbQ:org:2",
+            ]),
             vec![TOKEN_URL, USER_URL, ORGS_URL],
         ),
         (
-            Script::happy().answer(ORGS_URL, 200, r#"[{"login":"elsewhere"}]"#),
-            id(&["github:id/1", "github:org/elsewhere"]),
+            Script::happy().answer(ORGS_URL, 200, r#"[{"login":"elsewhere","id":11}]"#),
+            id(&[
+                "github-v2:aHR0cHM6Ly9hcGkuZ2l0aHViLmNvbQ:user:1",
+                "github-v2:aHR0cHM6Ly9hcGkuZ2l0aHViLmNvbQ:org:11",
+            ]),
             vec![TOKEN_URL, USER_URL, ORGS_URL],
         ),
         (
@@ -966,8 +905,8 @@ fn the_flow_answers_as_the_1_5_5_module_driven_by_the_1_5_5_core() {
             vec![TOKEN_URL, USER_URL],
         ),
     ];
-    for (mut script, legacy, urls) in cases {
-        assert_eq!(run(&login(), &mut script), legacy);
+    for (mut script, expected, urls) in cases {
+        assert_eq!(run(&login(), &mut script), expected);
         assert_eq!(script.targets(), urls);
     }
 }
@@ -1233,7 +1172,10 @@ fn a_user_without_a_login_is_an_outage() {
 #[test]
 fn out_of_order_bodies_fail_closed() {
     let l = login();
-    for body in [r#"[{"login":"acme"}]"#, r#"{"login":"octocat","id":1}"#] {
+    for body in [
+        r#"[{"login":"acme","id":1}]"#,
+        r#"{"login":"octocat","id":1}"#,
+    ] {
         let mut s = Script::happy().answer(TOKEN_URL, 200, body);
         assert_eq!(run(&l, &mut s), OUTAGE, "{body}");
         assert_eq!(s.targets(), vec![TOKEN_URL]);
@@ -1344,13 +1286,16 @@ fn the_v1_5_5_example_provider_loads_and_logs_in_with_the_secret_beside_the_sett
         .answer(
             "https://ghe.example/user/orgs?per_page=100",
             200,
-            r#"[{"login":"testorg"}]"#,
+            r#"[{"login":"testorg","id":7}]"#,
         );
     let p = identity(run(&l, &mut s));
 
-    let mut expected = Principal::from_id("github:octocat");
+    let mut expected = Principal::from_id("github-v2:aHR0cHM6Ly9naGUuZXhhbXBsZQ:user:1");
     expected.name = Some("octocat".to_string());
-    expected.roles = vec!["github:id/1".to_string(), "github:org/testorg".to_string()];
+    expected.roles = vec![
+        "github-v2:aHR0cHM6Ly9naGUuZXhhbXBsZQ:user:1".to_string(),
+        "github-v2:aHR0cHM6Ly9naGUuZXhhbXBsZQ:org:7".to_string(),
+    ];
     assert_eq!(p, expected);
     let body = body_text(&s.issued[0]);
     assert!(body.starts_with("client_id=Iv1.e2eclient&"), "{body}");
@@ -1371,7 +1316,10 @@ fn no_secret_loads_and_drops_the_secret_field_as_1_5_5_did() {
     for secret in [None, Some("")] {
         let l = GithubLogin::open(SETTINGS, secret).expect("loads without a secret");
         let mut s = Script::happy();
-        assert_eq!(identity(run(&l, &mut s)).id, "github:octocat");
+        assert_eq!(
+            identity(run(&l, &mut s)).id,
+            "github-v2:aHR0cHM6Ly9hcGkuZ2l0aHViLmNvbQ:user:1"
+        );
         let body = body_text(&s.issued[0]);
         assert!(!body.contains("client_secret"), "{body}");
         assert!(body.ends_with("&code_verifier=the-verifier"), "{body}");
@@ -1456,7 +1404,10 @@ fn decision_a_reference_written_base_resolved_by_the_kernel_logs_in() {
             200,
             "[]",
         );
-    assert_eq!(identity(run(&l, &mut s)).id, "github:octocat");
+    assert_eq!(
+        identity(run(&l, &mut s)).id,
+        "github-v2:aHR0cHM6Ly9naGUuY29ycC5leGFtcGxlL2FwaS92Mw:user:1"
+    );
 }
 
 #[test]
@@ -1465,11 +1416,13 @@ fn a_poisoned_orgs_array_cannot_swap_the_token_mid_flow() {
     let mut s = Script::happy().answer(
         ORGS_URL,
         200,
-        r#"[{"login":"acme","description":"x&access_token=gho_ATTACKER&y"}]"#,
+        r#"[{"login":"acme","id":1,"description":"x&access_token=gho_ATTACKER&y"}]"#,
     );
     let p = identity(run(&l, &mut s));
-    assert_eq!(p.id, "github:octocat");
-    assert!(p.roles.contains(&"github:org/acme".to_string()));
+    assert_eq!(p.id, "github-v2:aHR0cHM6Ly9hcGkuZ2l0aHViLmNvbQ:user:1");
+    assert!(p
+        .roles
+        .contains(&"github-v2:aHR0cHM6Ly9hcGkuZ2l0aHViLmNvbQ:org:1".to_string()));
     assert_eq!(s.targets(), vec![TOKEN_URL, USER_URL, ORGS_URL]);
 
     for r in &s.issued[1..] {
@@ -1691,7 +1644,10 @@ fn a_hop_reply_over_the_cap_is_an_outage() {
 
     body.pop();
     let mut s = Script::happy().answer(TOKEN_URL, 200, &body);
-    assert_eq!(identity(run(&l, &mut s)).id, "github:octocat");
+    assert_eq!(
+        identity(run(&l, &mut s)).id,
+        "github-v2:aHR0cHM6Ly9hcGkuZ2l0aHViLmNvbQ:user:1"
+    );
 }
 
 mod module_field {
@@ -1762,7 +1718,10 @@ fn a_refresh_mid_flow_resumes_the_parked_hop_unchanged() {
     while step == LoginStep::Pending {
         step = after.drive(&mut f, &mut s);
     }
-    assert_eq!(identity(step).id, "github:octocat");
+    assert_eq!(
+        identity(step).id,
+        "github-v2:aHR0cHM6Ly9hcGkuZ2l0aHViLmNvbQ:user:1"
+    );
     let tokens: Vec<&HopRequest> = s.issued.iter().filter(|r| r.target == TOKEN_URL).collect();
     assert_eq!(tokens.len(), 2, "pended once, re-issued once");
     assert!(
@@ -1776,56 +1735,6 @@ fn a_refresh_mid_flow_resumes_the_parked_hop_unchanged() {
         .all(|r| !body_text(r).contains("rotated-secret")));
 }
 
-/// RED r1-prod0-2: an `id_token` that is no string, or one in a form-shaped token answer, is
-/// still checked against the minted nonce; it never fails open.
-#[test]
-fn the_id_token_is_found_by_the_shape_of_the_answer() {
-    let foreign = id_token(r#"{"nonce":"foreign"}"#);
-    // A non-string member does not bind.
-    assert!(!id_token_nonce_binds(
-        r#"{"access_token":"x","id_token":123}"#,
-        Some("minted")
-    ));
-    // A null member and a repeated member never bind.
-    assert!(!id_token_nonce_binds(
-        r#"{"id_token":null}"#,
-        Some("minted")
-    ));
-    let bound_once = id_token(r#"{"nonce":"minted"}"#);
-    assert!(!id_token_nonce_binds(
-        &format!(r#"{{"id_token":"{bound_once}","id_token":"{bound_once}"}}"#),
-        Some("minted")
-    ));
-    // A malformed object carries no readable id_token; the shape check rules it an outage.
-    assert!(id_token_nonce_binds(r#"{"id_token":"#, Some("minted")));
-    assert!(id_token_nonce_binds("{not json", Some("minted")));
-    // A form-shaped answer carrying a foreign nonce does not bind.
-    assert!(!id_token_nonce_binds(
-        &format!("access_token=x&id_token={foreign}"),
-        Some("minted")
-    ));
-    // The same form answer with the minted nonce binds; one with no id_token binds trivially.
-    let bound = id_token(r#"{"nonce":"minted"}"#);
-    assert!(id_token_nonce_binds(
-        &format!("access_token=x&id_token={bound}"),
-        Some("minted")
-    ));
-    assert!(id_token_nonce_binds(
-        "access_token=x&scope=repo",
-        Some("minted")
-    ));
-    assert!(id_token_nonce_binds(
-        r#"{"access_token":"x"}"#,
-        Some("minted")
-    ));
-    assert!(id_token_nonce_binds(
-        r#"[{"login":"acme"}]"#,
-        Some("minted")
-    ));
-}
-
-/// RED r1-prod0-3: repeated `Link` field lines are one comma-joined list (RFC 9110 5.3), so a
-/// `rel="next"` on a later line is found.
 #[test]
 fn repeated_link_lines_are_one_list() {
     let fields = ReplyFields::kept([
@@ -1883,7 +1792,8 @@ fn a_login_outside_githubs_character_set_is_an_outage() {
         let mut s = Script::happy().answer(USER_URL, 200, &user(bad));
         assert_eq!(run(&l, &mut s), OUTAGE, "login {bad:?}");
         assert_eq!(s.targets(), [TOKEN_URL, USER_URL], "login {bad:?}");
-        let orgs = serde_json::json!([{"login": "acme"}, {"login": bad}]).to_string();
+        let orgs =
+            serde_json::json!([{"login": "acme", "id": 1}, {"login": bad, "id": 2}]).to_string();
         let mut s = Script::happy().answer(ORGS_URL, 200, &orgs);
         assert_eq!(run(&l, &mut s), OUTAGE, "org {bad:?}");
     }
@@ -1895,13 +1805,17 @@ fn a_login_outside_githubs_character_set_is_an_outage() {
         "octo_acme",
         "x1",
     ] {
-        let orgs = serde_json::json!([{ "login": good }]).to_string();
+        let orgs = serde_json::json!([{ "login": good, "id": 2 }]).to_string();
         let mut s = Script::happy()
             .answer(USER_URL, 200, &user(good))
             .answer(ORGS_URL, 200, &orgs);
         let p = identity(run(&l, &mut s));
-        assert_eq!(p.id, format!("github:{good}"));
-        assert!(p.roles.contains(&format!("github:org/{good}")), "{good}");
+        assert_eq!(p.id, "github-v2:aHR0cHM6Ly9hcGkuZ2l0aHViLmNvbQ:user:1");
+        assert!(
+            p.roles
+                .contains(&"github-v2:aHR0cHM6Ly9hcGkuZ2l0aHViLmNvbQ:org:2".to_string()),
+            "{good}"
+        );
     }
 }
 
@@ -1929,7 +1843,11 @@ fn a_token_of_another_type_is_never_presented() {
         format!("access_token={TOKEN}"),
     ] {
         let mut s = Script::happy().answer(TOKEN_URL, 200, &body);
-        assert_eq!(identity(run(&l, &mut s)).id, "github:octocat", "{body}");
+        assert_eq!(
+            identity(run(&l, &mut s)).id,
+            "github-v2:aHR0cHM6Ly9hcGkuZ2l0aHViLmNvbQ:user:1",
+            "{body}"
+        );
     }
 }
 
@@ -1942,7 +1860,7 @@ fn a_foreign_next_link_on_the_last_page_is_still_an_outage() {
         ORGS_URL,
         200,
         link_to(Some(&orgs_page(2))),
-        r#"[{"login":"o1"}]"#,
+        r#"[{"login":"o1","id":1}]"#,
     );
     for n in 2..=10 {
         let next = if n == 10 {
@@ -1954,7 +1872,7 @@ fn a_foreign_next_link_on_the_last_page_is_still_an_outage() {
             &orgs_page(n),
             200,
             link_to(Some(&next)),
-            &format!(r#"[{{"login":"o{n}"}}]"#),
+            &format!(r#"[{{"login":"o{n}","id":{n}}}]"#),
         );
     }
     assert_eq!(run(&l, &mut s), OUTAGE);
@@ -1975,12 +1893,16 @@ fn an_unreadable_link_field_is_logged_and_the_groups_read_stand() {
             link: Some(link.to_string()),
             ..ReplyFields::default()
         };
-        let mut s = Script::happy().answer_with(ORGS_URL, 200, fields, r#"[{"login":"acme"}]"#);
+        let mut s =
+            Script::happy().answer_with(ORGS_URL, 200, fields, r#"[{"login":"acme","id":1}]"#);
         let cap = crate::diagnostics::GithubDiagnostics::default();
         let step = tracing::subscriber::with_default(cap.subscriber(), || run(&l, &mut s));
         assert_eq!(
             identity(step).roles,
-            ["github:id/1", "github:org/acme"],
+            [
+                "github-v2:aHR0cHM6Ly9hcGkuZ2l0aHViLmNvbQ:user:1",
+                "github-v2:aHR0cHM6Ly9hcGkuZ2l0aHViLmNvbQ:org:1"
+            ],
             "{link:?}"
         );
         assert_eq!(s.targets(), [TOKEN_URL, USER_URL, ORGS_URL], "{link:?}");
@@ -2000,7 +1922,7 @@ fn an_org_page_past_its_requested_size_is_an_outage() {
     let page = |n: usize| {
         serde_json::Value::Array(
             (0..n)
-                .map(|i| serde_json::json!({ "login": format!("o{i}") }))
+                .map(|i| serde_json::json!({ "login": format!("o{i}"), "id": i + 1 }))
                 .collect(),
         )
         .to_string()
@@ -2034,29 +1956,120 @@ fn the_token_error_is_read_alone() {
     );
 }
 
-/// The id_token's nonce claim is read alone from an object payload: an array payload, a repeated
-/// or non-string nonce never binds.
 #[test]
-fn the_id_token_nonce_is_read_alone_from_an_object() {
-    let body = |claims: &str| format!(r#"{{"id_token":"{}"}}"#, id_token(claims));
-    assert!(id_token_nonce_binds(
-        &body(r#"{"sub":"x","nonce":"minted"}"#),
-        Some("minted")
-    ));
-    assert!(!id_token_nonce_binds(
-        &body(r#"["minted"]"#),
-        Some("minted")
-    ));
-    assert!(!id_token_nonce_binds(
-        &body(r#"{"nonce":"minted","nonce":"minted"}"#),
-        Some("minted")
-    ));
-    assert!(!id_token_nonce_binds(
-        &body(r#"{"nonce":1}"#),
-        Some("minted")
-    ));
-    assert!(!id_token_nonce_binds(
-        &body(r#"{"sub":"x"}"#),
-        Some("minted")
-    ));
+fn immutable_identity_is_used_by_the_complete_login_hop_chain() {
+    let run_actor = |name: &str, user_id: u64, org_name: &str, org_id: u64| {
+        let mut s = Script::happy()
+            .answer(
+                USER_URL,
+                200,
+                &serde_json::json!({"login":name,"id":user_id}).to_string(),
+            )
+            .answer(
+                ORGS_URL,
+                200,
+                &serde_json::json!([{"login":org_name,"id":org_id}]).to_string(),
+            );
+        identity(run(&login(), &mut s))
+    };
+    let original = run_actor("alice", 1001, "acme", 700);
+    let renamed = run_actor("alice-new", 1001, "acme-new", 700);
+    let reused = run_actor("alice", 90210, "acme", 701);
+    assert_eq!(original.id, renamed.id);
+    assert_eq!(original.roles, renamed.roles);
+    assert_ne!(original.id, reused.id);
+    assert!(original
+        .roles
+        .iter()
+        .all(|role| !reused.roles.contains(role)));
+    for body in [r#"[{"login":"acme"}]"#, r#"[{"login":"acme","id":0}]"#] {
+        let mut s = Script::happy().answer(ORGS_URL, 200, body);
+        assert_eq!(run(&login(), &mut s), OUTAGE);
+    }
+}
+
+#[test]
+fn github_unused_id_token_members_do_not_change_authenticated_identity() {
+    for member in [r#""not-a-jwt""#, "null", "42", r#"{"nonce":"foreign"}"#] {
+        let mut s = Script::happy()
+            .answer(
+                TOKEN_URL,
+                200,
+                &format!(r#"{{"access_token":"{TOKEN}","id_token":{member}}}"#),
+            )
+            .answer(
+                USER_URL,
+                200,
+                &format!(r#"{{"login":"octocat","id":1,"id_token":{member}}}"#),
+            )
+            .answer(
+                ORGS_URL,
+                200,
+                &format!(r#"[{{"login":"acme","id":7,"id_token":{member}}}]"#),
+            );
+        let l = login();
+        let mut f = l.start(
+            Some("code"),
+            Some("https://node.example/auth/token"),
+            Some("verifier"),
+            None,
+        );
+        let p = identity(l.drive(&mut f, &mut s));
+        assert_eq!(p.id, "github-v2:aHR0cHM6Ly9hcGkuZ2l0aHViLmNvbQ:user:1");
+        assert_eq!(
+            p.roles,
+            [
+                p.id.clone(),
+                "github-v2:aHR0cHM6Ly9hcGkuZ2l0aHViLmNvbQ:org:7".into()
+            ]
+        );
+        assert_eq!(s.targets(), [TOKEN_URL, USER_URL, ORGS_URL]);
+    }
+    let mut s = Script::happy().answer(
+        TOKEN_URL,
+        200,
+        &format!("access_token={TOKEN}&id_token=not-a-jwt"),
+    );
+    assert_eq!(
+        identity(run(&login(), &mut s)).id,
+        "github-v2:aHR0cHM6Ly9hcGkuZ2l0aHViLmNvbQ:user:1"
+    );
+}
+
+#[test]
+fn github_unused_id_token_cannot_supply_credentials_or_override_failure_status() {
+    let l = login();
+    for body in [
+        r#"{"id_token":"header.payload.signature"}"#,
+        "id_token=header.payload.signature",
+    ] {
+        let mut s = Script::happy().answer(TOKEN_URL, 200, body);
+        assert_eq!(run(&l, &mut s), OUTAGE);
+        assert_eq!(s.targets(), [TOKEN_URL]);
+    }
+    let mut s = Script::happy().answer(USER_URL, 200, r#"{"id_token":"header.payload.signature"}"#);
+    assert_eq!(run(&l, &mut s), OUTAGE);
+    for target in [TOKEN_URL, USER_URL, ORGS_URL] {
+        let mut s = Script::happy().answer_with(
+            target,
+            503,
+            ReplyFields {
+                retry_after: Some("17".into()),
+                ..ReplyFields::default()
+            },
+            r#"{"id_token":null}"#,
+        );
+        assert_eq!(
+            run(&l, &mut s),
+            LoginStep::Outage {
+                retry_after: Some(17)
+            }
+        );
+    }
+    let mut s = Script::happy().answer(
+        TOKEN_URL,
+        200,
+        r#"{"error":"bad_verification_code","id_token":null}"#,
+    );
+    assert_eq!(run(&l, &mut s), LoginStep::BadCredential);
 }

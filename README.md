@@ -18,7 +18,7 @@ The GitHub-OAuth login module as a droppable busbar plugin: a cdylib exporting t
 
 **GitHub-OAuth login for busbar** — a login-capable auth plugin (the auth kind's door, auth ABI
 v3). A user signs in with GitHub; busbar establishes their identity as
-`github:<login>` with a stable `github:id/<id>` role and `github:org/<org>` group memberships, then resolves those groups to policy
+`github-v2:<domain>:user:<id>` with that same user grant and `github-v2:<domain>:org:<id>` organization grants, then resolves those groups to policy
 through the operator's `auth.role_bindings.github:` bindings.
 
 It is a **separate plugin from `busbar-auth-oidc`**, and independent of the busbar core release.
@@ -39,7 +39,7 @@ selected outbound `http` need, and holds its own confidential-client **secret** 
 | 1 | `complete_login`: `code` + `redirect_uri` + `code_verifier` | `POST .../login/oauth/access_token` with its own `client_secret` |
 | 2 | the token response | `GET .../user` (bearer) |
 | 3 | the `/user` JSON | `GET .../user/orgs` (or identifies now if `fetch_orgs = false`) |
-| 4 | the `/user/orgs` JSON | follows its `Link: rel="next"` page by page (on the API's origin, up to 10 pages), then identifies `github:<login>` + `github:id/<id>` + `github:org/<org>` groups |
+| 4 | the `/user/orgs` JSON | follows its `Link: rel="next"` page by page (on the API's origin, up to 10 pages), then identifies the immutable user subject plus provider-scoped numeric organization grants |
 
 Only a credential error is a declined sign-in (a bad credential, 401): a callback without a
 `code`, `redirect_uri` or `code_verifier` (or with one empty, as when the user cancels on GitHub's
@@ -55,9 +55,9 @@ or unknown; a 2xx with no token, no user or no org list (empty, HTML, malformed 
 `token_type` other than `bearer`, a login with a character GitHub logins never carry, an org page
 past its 100 entries); a hop that cannot be made (refused, connect, TLS, timeout); a reply past
 256 KiB. An outage carries GitHub's retry hint (`retry-after` seconds or HTTP-date, or the seconds
-to `x-ratelimit-reset`) for the host. An
-`id_token` on a hop answer (never from github.com) must carry the nonce minted at begin, else the
-sign-in fails its security check (400).
+to `x-ratelimit-reset`) for the host. GitHub identity is established only by the authenticated
+REST profile. Unused response members such as `id_token` do not establish identity or trigger
+OIDC claim processing. The host still checks browser state and the flow still uses PKCE.
 
 ## Config
 
@@ -113,15 +113,36 @@ and the REST API at `https://<host>/api/v3`:
 }
 ```
 
-### Groups
+### Immutable identity and upgrade
 
-Each org the user belongs to becomes a group string `github:org/<org-login>`, mapped to policy by the
-operator's `auth.role_bindings.github:`.
-The identity also always carries `github:id/<id>`, which stays stable when the GitHub login changes.
-A login (the user's or an org's) is GitHub's own characters only: ASCII letters, digits, `-` and `_`
-(an Enterprise Managed User's `_<shortcode>`), at most 64 bytes; a reply carrying any other login is
-an outage, never an identity. The display name is the profile `name`, or the login when the name
-holds a control, an invisible format character (zero-width joiners included) or a line separator.
+**1.6 changes GitHub identity and grant IDs. Existing deployments require cold reconciliation
+before activation; replacing the plugin alone is not a safe migration.**
+
+The subject and user grant are `github-v2:<domain>:user:<id>`; organization grants are
+`github-v2:<domain>:org:<id>`. IDs are positive unsigned 64-bit integers returned by GitHub.
+`<domain>` is unpadded base64url of the canonical API base: URL-normalized scheme, host and port,
+including the GHES API path, with trailing slashes removed. For example `https://api.github.com`
+encodes to `aHR0cHM6Ly9hcGkuZ2l0aHViLmNvbQ`. API bases with credentials, query, fragment,
+whitespace or control bytes are refused. Different API deployments never share a subject or grant.
+Changing a login or org name with the same numeric ID does not change authorization or accounting.
+Names remain display metadata. Missing, zero, negative, fractional or string IDs refuse the response.
+
+No `github:<login>`, `github:id/<id>` or `github:org/<slug>` identity is emitted as a fallback.
+Bind policy only to the new provider-qualified IDs. The settings schema declares
+`x-busbar-principal-format: github-v2` and required domain field `/api_base` so the host's
+principal-transition gate can refuse activation against unreconciled persistent state.
+
+A one-off cold migration must establish the historical numeric account and organization owners
+from trusted retained evidence. Looking up an old username or organization slug today does not
+prove ownership: both names can be reassigned. Unprovable rows require explicit operator
+reconciliation or remain held; never automatically grant the new owner continuity.
+The migration must reconcile all provider role bindings (including organization/admin grants),
+self-key subjects and revocations, user groups, usage/debt and budget associations. Quiesce senders
+and storage, retain the old evidence/ledger, and use the host's conditional principal-transition
+receipts. The plugin does not modify persistent state or relax the host's transition gate.
+The root migration owner must cover role-binding conversion as well as principal records before
+this patch is integrated for existing deployments; no plugin-only migration claim is made.
+
 
 ## Build
 

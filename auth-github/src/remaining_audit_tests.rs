@@ -70,6 +70,6 @@ fn a_real_null_profile_name_falls_back_to_the_login() {
     let mut s = Script::happy().answer(USER_URL, 200, r#"{"login":"octocat","id":1,"name":null}"#);
     let p = identity(run(&login(), &mut s));
     assert_eq!(p.name.as_deref(), Some("octocat"));
-    assert_eq!(p.id, "github:octocat");
+    assert_eq!(p.id, "github-v2:aHR0cHM6Ly9hcGkuZ2l0aHViLmNvbQ:user:1");
     assert_eq!(s.targets(), [TOKEN_URL, USER_URL, ORGS_URL]);
 }

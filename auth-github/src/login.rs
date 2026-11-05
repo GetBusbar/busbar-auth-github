@@ -18,7 +18,6 @@
 //! | an identity reached | [`LoginStep::Identity`] |
 //! | a credential error, declined (`LOGIN_BAD_CREDENTIAL`) | [`LoginStep::BadCredential`] |
 //! | the IdP not answering, a hop refused or unreachable, the hop limit spent (`LOGIN_OUTAGE`) | [`LoginStep::Outage`] |
-//! | a hop body's `id_token` nonce mismatch (`LOGIN_SECURITY_CHECK_FAILED`) | [`LoginStep::SecurityCheckFailed`] |
 //!
 //! The HTTP status each verdict is answered with is the host's, not this plugin's.
 //!
@@ -40,10 +39,8 @@ use crate::guard::{
 use crate::{
     build_github_authorize_url, build_orgs_get, build_orgs_page_get, build_principal,
     build_token_exchange, build_userinfo_get, parse_access_token, parse_org_groups, parse_user,
-    read_link, GhUser, GitHubConfig,
+    read_link, GhUser, GitHubConfig, IdentityDomain,
 };
-use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-use base64::Engine;
 use busbar_contract::abi::sdk::cred::{self, Cred, FormBody, SettingsError};
 use busbar_contract::abi::sdk::exchange::{Exchange as Wire, Request};
 use busbar_contract::auth::{LoginHop, Principal};
@@ -294,9 +291,6 @@ pub enum LoginStep {
         /// reset), when it named any.
         retry_after: Option<u64>,
     },
-    /// A hop body's `id_token` is not bound to the nonce minted at begin (400
-    /// "Sign-in couldn't be verified"; the auth ABI's `LOGIN_SECURITY_CHECK_FAILED`).
-    SecurityCheckFailed,
 }
 
 /// The state kept per flow between hops, owned by the flow.
@@ -305,7 +299,7 @@ struct FlowState {
     access_token: Option<Cred>,
     user: Option<GhUser>,
     /// The org groups the pages read so far gave.
-    orgs: Vec<String>,
+    orgs: Vec<u64>,
     /// The org pages read so far.
     pages: usize,
     /// The hop the next answer is the answer of (the one sent last).
@@ -333,8 +327,6 @@ pub struct LoginFlow {
     turns: usize,
     inflight: Option<HopRequest>,
     done: Option<LoginStep>,
-    /// The nonce the kernel minted at begin (`CompleteLoginIn.nonce`), bound to any `id_token`.
-    nonce: Option<Zeroizing<String>>,
 }
 
 impl fmt::Debug for LoginFlow {
@@ -350,6 +342,7 @@ impl fmt::Debug for LoginFlow {
 /// The GitHub login, holding its own client secret.
 pub struct GithubLogin {
     cfg: GitHubConfig,
+    domain: IdentityDomain,
     client_secret: Option<Cred>,
     allowed_hosts: HashSet<String>,
 }
@@ -443,6 +436,9 @@ impl GithubLogin {
             }
         }
 
+        let domain = IdentityDomain::from_api_base(&cfg.api_base).ok_or_else(||
+            "settings.api_base: invalid identity domain (no credentials, query, fragment or whitespace)".to_string()
+        )?;
         let client_secret = client_secret.filter(|s| !s.is_empty()).map(|s| {
             Cred::captured(Zeroizing::new(s.as_bytes().to_vec())).require_secure_if(
                 cfg.token_base
@@ -452,6 +448,7 @@ impl GithubLogin {
         });
         Ok(Self {
             cfg,
+            domain,
             client_secret,
             allowed_hosts: collect_allowed_hosts(&raw),
         })
@@ -485,14 +482,15 @@ impl GithubLogin {
         build_github_authorize_url(&self.cfg, redirect_uri, state, code_challenge, scopes)
     }
 
-    /// A new flow for one callback, with the nonce the kernel minted at begin.
+    /// A new GitHub callback flow. The shared ABI nonce is unused: GitHub identity
+    /// comes from authenticated REST /user, not an OIDC ID token.
     #[must_use]
     pub fn start(
         &self,
         code: Option<&str>,
         redirect_uri: Option<&str>,
         code_verifier: Option<&str>,
-        nonce: Option<&str>,
+        _nonce: Option<&str>,
     ) -> LoginFlow {
         LoginFlow {
             req: Callback {
@@ -505,7 +503,6 @@ impl GithubLogin {
             turns: 0,
             inflight: None,
             done: None,
-            nonce: nonce.map(|n| Zeroizing::new(n.to_string())),
         }
     }
 
@@ -570,10 +567,6 @@ impl GithubLogin {
                     }
                     let body = text_of(std::mem::take(&mut *resp.body));
 
-                    if !id_token_nonce_binds(&body, flow.nonce.as_ref().map(|n| n.as_str())) {
-                        tracing::warn!(module = "github", "github login: a hop body's id_token is not bound to the nonce minted at begin");
-                        return finish(flow, LoginStep::SecurityCheckFailed);
-                    }
                     flow.req.answer = Some((
                         resp.status,
                         std::mem::take(&mut resp.fields),
@@ -648,7 +641,7 @@ impl GithubLogin {
                 };
                 if !self.cfg.fetch_orgs {
                     flow.state = FlowState::default();
-                    return Turn::Identify(build_principal(&user, Vec::new()));
+                    return Turn::Identify(build_principal(&self.domain, &user, Vec::new()));
                 }
                 flow.state.user = Some(user);
                 flow.state.hop = Hop::Orgs;
@@ -704,7 +697,7 @@ impl GithubLogin {
                         "github login: the org list is truncated at {MAX_ORG_PAGES} pages: org groups past it are not granted"
                     );
                 }
-                Turn::Identify(build_principal(&user, orgs))
+                Turn::Identify(build_principal(&self.domain, &user, orgs))
             }
         }
     }
@@ -1190,127 +1183,6 @@ fn finish(flow: &mut LoginFlow, step: LoginStep) -> LoginStep {
 fn wipe_hop(hop: &mut LoginHop) {
     for (_, v) in &mut hop.form {
         v.zeroize();
-    }
-}
-
-/// The `id_token` member of a token answer: absent, a string (wiped on drop), or any other value.
-#[derive(Default)]
-enum Member {
-    #[default]
-    Absent,
-    Str(Zeroizing<String>),
-    Other,
-}
-
-#[derive(serde::Deserialize)]
-struct IdTokenMember {
-    #[serde(default, deserialize_with = "member")]
-    id_token: Member,
-}
-
-fn member<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Member, D::Error> {
-    use serde::de::{IgnoredAny, MapAccess, SeqAccess, Visitor};
-    struct V;
-    impl<'de> Visitor<'de> for V {
-        type Value = Member;
-        fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
-            f.write_str("any JSON value")
-        }
-        fn visit_str<E>(self, v: &str) -> Result<Member, E> {
-            Ok(Member::Str(Zeroizing::new(v.to_string())))
-        }
-        fn visit_string<E>(self, v: String) -> Result<Member, E> {
-            Ok(Member::Str(Zeroizing::new(v)))
-        }
-        fn visit_bool<E>(self, _: bool) -> Result<Member, E> {
-            Ok(Member::Other)
-        }
-        fn visit_i64<E>(self, _: i64) -> Result<Member, E> {
-            Ok(Member::Other)
-        }
-        fn visit_u64<E>(self, _: u64) -> Result<Member, E> {
-            Ok(Member::Other)
-        }
-        fn visit_f64<E>(self, _: f64) -> Result<Member, E> {
-            Ok(Member::Other)
-        }
-        fn visit_unit<E>(self) -> Result<Member, E> {
-            Ok(Member::Other)
-        }
-        fn visit_none<E>(self) -> Result<Member, E> {
-            Ok(Member::Other)
-        }
-        fn visit_map<A: MapAccess<'de>>(self, mut m: A) -> Result<Member, A::Error> {
-            while m.next_entry::<IgnoredAny, IgnoredAny>()?.is_some() {}
-            Ok(Member::Other)
-        }
-        fn visit_seq<A: SeqAccess<'de>>(self, mut s: A) -> Result<Member, A::Error> {
-            while s.next_element::<IgnoredAny>()?.is_some() {}
-            Ok(Member::Other)
-        }
-    }
-    d.deserialize_any(V)
-}
-
-/// The nonce binding (a constant-time compare): a body with no `id_token` binds trivially; one
-/// with an `id_token` binds only when its payload's `nonce` claim (base64url, no signature check:
-/// that is the IdP module's job) equals `minted`. A repeated or non-string `id_token` never binds.
-fn id_token_nonce_binds(body: &str, minted: Option<&str>) -> bool {
-    let body = body.trim();
-    if body.starts_with('{') {
-        let parsed = match serde_json::from_str::<IdTokenMember>(body) {
-            Ok(parsed) => parsed,
-            Err(error) => return !error.is_data(),
-        };
-        return match parsed.id_token {
-            Member::Absent => true,
-            Member::Str(token) => token_nonce_binds(&token, minted),
-            Member::Other => false,
-        };
-    }
-
-    if body.starts_with('[') {
-        return true;
-    }
-    for pair in body.split('&') {
-        let (name, value) = pair.split_once('=').unwrap_or((pair, ""));
-        if crate::form_decode(name).as_slice() == b"id_token" {
-            let token = crate::form_decode(value);
-            let Ok(token) = std::str::from_utf8(&token) else {
-                return false;
-            };
-            if !token_nonce_binds(token, minted) {
-                return false;
-            }
-        }
-    }
-    true
-}
-
-/// The `nonce` claim of an `id_token` payload, alone: the other claims are skipped, never copied.
-#[derive(serde::Deserialize)]
-struct NonceClaim {
-    #[serde(default, deserialize_with = "member")]
-    nonce: Member,
-}
-
-/// An actually present id_token must carry the expected nonce, whatever the response encoding. Its
-/// payload must be a JSON object holding exactly one string `nonce`.
-fn token_nonce_binds(id_token: &str, minted: Option<&str>) -> bool {
-    let claimed = id_token
-        .split('.')
-        .nth(1)
-        .and_then(|seg| URL_SAFE_NO_PAD.decode(seg).ok())
-        .map(Zeroizing::new)
-        .filter(|bytes| bytes.trim_ascii_start().starts_with(b"{"))
-        .and_then(|bytes| serde_json::from_slice::<NonceClaim>(&bytes).ok())
-        .and_then(|claims| match claims.nonce {
-            Member::Str(nonce) => Some(nonce),
-            Member::Absent | Member::Other => None,
-        });
-    match (claimed, minted) {
-        (Some(n), Some(m)) => busbar_contract::constant_time_eq(n.as_str(), m),
-        _ => false,
     }
 }
 

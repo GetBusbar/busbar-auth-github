@@ -15,7 +15,7 @@
 //! 3. The token response → `GET .../user`, bearer-authenticated.
 //! 4. The `/user` response → `GET .../user/orgs` (skipped when `fetch_orgs = false`, in which case
 //!    identity is established here).
-//! 5. The `/user/orgs` response → `github:<login>` with `github:id/<id>` and `github:org/<org-login>`
+//! 5. The `/user/orgs` response → provider-scoped numeric user and organization
 //!    groups.
 //!
 //! The module asserts IDENTITY only; busbar's `auth.role_bindings.github:` resolves those groups to
@@ -100,7 +100,7 @@ pub struct GitHubConfig {
     /// `https://<ghes-host>`. Must be written out in the settings, as `api_base`.
     #[serde(default = "default_token_base")]
     pub token_base: String,
-    /// Whether to chain the `/user/orgs` hop and populate `github:org/<org>` groups. Default `true`.
+    /// Whether to chain `/user/orgs` and populate immutable organization grants. Default `true`.
     /// `false` establishes identity from `/user` alone (no groups) and saves a hop.
     #[serde(default = "default_true")]
     pub fetch_orgs: bool,
@@ -373,12 +373,12 @@ pub(crate) fn read_link(link: &str) -> Option<Option<&str>> {
 /// A GitHub `/user` profile, reduced to what identity needs.
 #[derive(Debug, Clone, PartialEq)]
 pub struct GhUser {
-    /// The GitHub username (`login`) — the handle used in the `github:<login>` identity of record.
+    /// The GitHub username (`login`), retained only as display metadata.
     pub login: String,
     /// The IMMUTABLE numeric account id. A `login` can be renamed, released and re-registered by
-    /// someone else; this cannot. Surfaced as the `github:id/<id>` role so operators have something
+    /// someone else; this cannot. Used in the provider-qualified subject and user grant so operators have something
     /// stable to bind to — see [`build_principal`].
-    pub id: i64,
+    pub id: u64,
     /// Optional display name.
     pub name: Option<String>,
 }
@@ -505,7 +505,7 @@ pub fn parse_user(body: &str) -> Option<GhUser> {
         .filter(|s| plain_login(s))?
         .to_string();
 
-    let id = v.get("id").and_then(Value::as_i64)?;
+    let id = v.get("id").and_then(Value::as_u64).filter(|id| *id != 0)?;
     let name = v
         .get("name")
         .and_then(Value::as_str)
@@ -544,57 +544,78 @@ pub fn parse_user(body: &str) -> Option<GhUser> {
     Some(GhUser { login, id, name })
 }
 
-/// Parse a GitHub `/user/orgs` response (a JSON array of org objects) into `github:org/<org-login>`
-/// group strings. Fail-CLOSED: malformed JSON, a non-array body, more than [`ORGS_PER_PAGE`]
-/// entries, or an org `login` no GitHub reply carries (see [`parse_user`]'s login rule) yields
-/// `None` (the caller's outage): a truncated or foreign orgs response must NOT be mistaken for "no
-/// orgs" and silently drop the user's org groups. A VALID empty array is `Some(vec![])` (login
-/// succeeds with zero groups). Every entry must carry a valid string `login`; a foreign entry
-/// refuses the whole response.
-pub fn parse_org_groups(body: &str) -> Option<Vec<String>> {
+/// The provider namespace used by immutable account and organization identities.
+/// API base includes the GHES deployment path; client IDs and mutable names are not domains.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IdentityDomain(String);
+
+impl IdentityDomain {
+    /// Parse a configured API base into its canonical, path-safe identity namespace.
+    /// Credentials, query strings, fragments and control bytes are not identity domains.
+    pub fn from_api_base(base: &str) -> Option<Self> {
+        use base64::Engine;
+        if base.chars().any(|c| c.is_control() || c.is_whitespace()) {
+            return None;
+        }
+        let url = url::Url::parse(base).ok()?;
+        if !matches!(url.scheme(), "http" | "https")
+            || url.host_str().is_none()
+            || !url.username().is_empty()
+            || url.password().is_some()
+            || url.query().is_some()
+            || url.fragment().is_some()
+        {
+            return None;
+        }
+        let canonical = url.as_str().trim_end_matches('/');
+        let length = base64::encoded_len(canonical.len(), false)?.checked_add(36)?;
+        u32::try_from(length).ok()?;
+        Some(Self(
+            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(canonical),
+        ))
+    }
+
+    /// The immutable account subject, also emitted as its explicit user grant identity.
+    pub fn user(&self, id: u64) -> String {
+        format!("github-v2:{}:user:{id}", self.0)
+    }
+
+    /// The immutable organization grant identity.
+    pub fn org(&self, id: u64) -> String {
+        format!("github-v2:{}:org:{id}", self.0)
+    }
+}
+
+/// Parse one bounded organization page into immutable positive numeric IDs.
+/// The login is checked as profile metadata but never emitted as an authorization role.
+/// Any malformed entry refuses the whole page; a valid empty page has no org grants.
+pub fn parse_org_groups(body: &str) -> Option<Vec<u64>> {
     let v: Value = serde_json::from_str(body.trim()).ok()?;
     let orgs = v.as_array().filter(|orgs| orgs.len() <= ORGS_PER_PAGE)?;
     let mut groups = Vec::with_capacity(orgs.len());
     for org in orgs {
-        match org.get("login").and_then(Value::as_str) {
-            Some(login) if plain_login(login) => groups.push(format!("github:org/{login}")),
-            _ => return None,
-        }
+        org.get("login")
+            .and_then(Value::as_str)
+            .filter(|s| plain_login(s))?;
+        groups.push(
+            org.get("id")
+                .and_then(Value::as_u64)
+                .filter(|id| *id != 0)?,
+        );
     }
     Some(groups)
 }
 
-/// Assemble the identity [`Principal`] from the parsed `/user` and org groups: id `github:<login>`,
-/// display name (the profile `name`, falling back to the `login`), and the `github:org/<org>` groups.
-///
-/// The principal id stays `github:<login>`: it is the documented, human-readable identity operators
-/// already bind roles to in `auth.role_bindings.github:`, and changing it would silently break every
-/// existing binding and every persisted `user:github:<login>` group at once.
-///
-/// But a login is NOT a safe thing to anchor identity on. GitHub RELEASES a handle when an account
-/// is renamed or deleted, and anyone may then register it. A departed employee's handle, taken by
-/// an outsider, produces the identical principal id and inherits that person's role bindings,
-/// per-user group, pools and budgets, with nothing anywhere reporting a change of person.
-///
-/// So the stable numeric account id is emitted ALONGSIDE, as the `github:id/<id>` role. That is
-/// purely additive: every existing login binding keeps working untouched, and an operator can bind to
-/// `github:id/12345`. New deployments should prefer it.
-///
-/// What this does and does not fix: it narrows WHO GETS GRANTED (a binding on `github:id/<id>`
-/// cannot be inherited by whoever re-registers the handle, because core matches roles by exact
-/// lookup and the impostor carries a different numeric role). It does NOT separate the BUCKETS: the
-/// enforcement subject is still `principal.id`, so the re-registered handle lands on the same
-/// `user:github:<login>` group, usage ledger and budget as its previous owner. Separating those
-/// means changing the principal id, the breaking change this deliberately avoids.
-///
-/// `github:org/<org>` has the same weakness, being likewise a renameable slug.
-pub fn build_principal(user: &GhUser, org_groups: Vec<String>) -> Principal {
-    let mut p = Principal::from_id(format!("github:{}", user.login));
+/// Assemble immutable, provider-qualified identity and grant IDs. User and organization
+/// logins are display metadata only: no historical handle/slug identity fallback is emitted.
+/// Existing persistent state requires the host's cold principal transition and explicit
+/// organization-binding reconciliation before this format is activated.
+pub fn build_principal(domain: &IdentityDomain, user: &GhUser, org_ids: Vec<u64>) -> Principal {
+    let mut p = Principal::from_id(domain.user(user.id));
     p.name = Some(user.name.clone().unwrap_or_else(|| user.login.clone()));
-
-    p.roles = Vec::with_capacity(org_groups.len() + 1);
-    p.roles.push(format!("github:id/{}", user.id));
-    p.roles.extend(org_groups);
+    p.roles = Vec::with_capacity(org_ids.len() + 1);
+    p.roles.push(p.id.clone());
+    p.roles.extend(org_ids.into_iter().map(|id| domain.org(id)));
     p
 }
 

@@ -236,7 +236,7 @@ fn register_wiremock_stubs(client: &reqwest::blocking::Client, base: &str) {
         serde_json::json!({
             "request": { "method": "GET", "urlPath": "/user/orgs", "headers": { "Authorization": {"equalTo":"Bearer gho_test"}, "Accept": {"equalTo":"application/vnd.github+json"} }, "queryParameters": {"per_page":{"equalTo":"100"}} },
             "response": { "status": 200, "headers": { "Content-Type": "application/json" },
-                "jsonBody": [ { "login": "testorg" } ] }
+                "jsonBody": [ { "login": "testorg", "id": 7 } ] }
         }),
         serde_json::json!({
             "request": {"method":"POST", "urlPath":"/v1/messages"},
@@ -318,6 +318,9 @@ fn github_get_flow_mints_key_via_core_executed_hops() {
         );
         return;
     };
+    let domain = busbar_auth_github::IdentityDomain::from_api_base(&wm).expect("API domain");
+    let subject = domain.user(12345);
+    let org_role = domain.org(7);
     let so_path = github_image::cdylib();
     let (busbar_bin, pack_bin) = build_real_binaries();
 
@@ -385,7 +388,7 @@ fn github_get_flow_mints_key_via_core_executed_hops() {
                  \x20   settings:\n      token_base: \"{wm}\"\n      api_base: \"{wm}\"\n      authorize_base: \"{wm}\"\n\
                  auth:\n  key_ttl: \"7d\"\n  signing_key: {{ file: \"{signing}\" }}\n  chain:\n    - keys\n\
                  \x20 admin_auth: [admin-tokens]\n\
-                 \x20 role_bindings:\n    github:\n      \"github:org/testorg\":\n        group: eng-team\n\
+                 \x20 role_bindings:\n    github:\n      \"{org_role}\":\n        group: eng-team\n\
                  plugins:\n  enabled: true\n  dir: {plugins}\n  trust:\n    allow_unsigned: true\n\
                  groups:\n  eng-team:\n    limits:\n      - {{ requests: 1000000, per: day }}\n\
                  \x20   child_default:\n      limits:\n        - {{ budget: 5000, per: month }}\n        - {{ requests: 1000, per: day }}\n\
@@ -490,32 +493,32 @@ fn github_get_flow_mints_key_via_core_executed_hops() {
         login_cookie["code_verifier"].as_str()
     );
     assert!(
-        page.contains("github:octotest"),
-        "identity github:octotest must appear on the key page: {page}"
+        page.contains(&subject),
+        "identity {subject} must appear on the key page: {page}"
     );
     assert!(
-        page.contains("user:github:octotest"),
-        "group user:github:octotest must appear (role github:org/testorg must have bound)"
+        page.contains(&format!("user:{subject}")),
+        "group user:{subject} must appear (role {org_role} must have bound)"
     );
     let api_key = issued_key_from_html(&page).expect("the key page carries the issued api_key");
 
     let leaf = client
         .get(format!(
-            "http://127.0.0.1:{admin_port}/api/v1/admin/groups/user:github:octotest"
+            "http://127.0.0.1:{admin_port}/api/v1/admin/groups/user:{subject}"
         ))
         .header("x-admin-token", "e2e-admin-token")
         .send()
         .expect("GET the provisioned leaf group");
     assert!(
         leaf.status().is_success(),
-        "the user:github:octotest leaf group exists, got {}",
+        "the user:{subject} leaf group exists, got {}",
         leaf.status()
     );
     let leaf: serde_json::Value = leaf.json().expect("the group view is JSON");
     assert_eq!(
         leaf["parent"].as_str(),
         Some("eng-team"),
-        "role github:org/testorg must bind the sign-in to eng-team: {leaf}"
+        "role {org_role} must bind the sign-in to eng-team: {leaf}"
     );
 
     let chat = client

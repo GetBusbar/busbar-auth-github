@@ -97,11 +97,15 @@ fn separate_link_field_lines_preserve_the_next_org_page() {
     ]);
     let page2 = "https://api.github.com/user/orgs?page=2";
     let mut s = Script::happy()
-        .answer_with(ORGS_URL, 200, fields, r#"[{"login":"first"}]"#)
-        .answer(page2, 200, r#"[{"login":"second"}]"#);
+        .answer_with(ORGS_URL, 200, fields, r#"[{"login":"first","id":8}]"#)
+        .answer(page2, 200, r#"[{"login":"second","id":9}]"#);
     let p = identity(run(&login(), &mut s));
-    assert!(p.roles.contains(&"github:org/first".to_string()));
-    assert!(p.roles.contains(&"github:org/second".to_string()));
+    assert!(p
+        .roles
+        .contains(&"github-v2:aHR0cHM6Ly9hcGkuZ2l0aHViLmNvbQ:org:8".to_string()));
+    assert!(p
+        .roles
+        .contains(&"github-v2:aHR0cHM6Ly9hcGkuZ2l0aHViLmNvbQ:org:9".to_string()));
     assert_eq!(s.targets(), [TOKEN_URL, USER_URL, ORGS_URL, page2]);
 }
 
@@ -112,7 +116,7 @@ fn a_json_array_cannot_supply_an_access_token() {
 }
 
 #[test]
-fn positional_json_arrays_are_neither_access_tokens_nor_id_token_envelopes() {
+fn positional_json_arrays_are_not_access_token_responses() {
     let l = login();
     for target in [TOKEN_URL, USER_URL, ORGS_URL] {
         for status in [200, 503] {
@@ -124,45 +128,6 @@ fn positional_json_arrays_are_neither_access_tokens_nor_id_token_envelopes() {
                 .unwrap();
             assert_eq!(s.targets(), [TOKEN_URL, USER_URL, ORGS_URL][..=last]);
         }
-    }
-}
-
-#[test]
-fn a_present_id_token_must_be_readable_and_nonce_bound_in_json_or_form() {
-    let l = login();
-    for shape in ["null", "false", "42", "{}", "[]"] {
-        let body = format!(r#"{{"access_token":"{TOKEN}","id_token":{shape}}}"#);
-        let mut s = Script::happy().answer(TOKEN_URL, 200, &body);
-        assert_eq!(run(&l, &mut s), LoginStep::SecurityCheckFailed, "{shape}");
-        assert_eq!(s.targets(), [TOKEN_URL]);
-    }
-    let wrong = id_token(r#"{"nonce":"another-login"}"#);
-    let right = id_token(&serde_json::json!({"nonce": NONCE}).to_string());
-    for encoded in [
-        format!("id_token={wrong}"),
-        format!("id%5Ftoken={wrong}"),
-        "id_token=".into(),
-        "id_token=%FF".into(),
-        "id_token".into(),
-        format!("id_token={right}&id_token={wrong}"),
-    ] {
-        let body = format!("access_token={TOKEN}&{encoded}");
-        let mut s = Script::happy().answer(TOKEN_URL, 200, &body);
-        assert_eq!(run(&l, &mut s), LoginStep::SecurityCheckFailed, "{encoded}");
-        assert_eq!(s.targets(), [TOKEN_URL]);
-    }
-    let duplicate =
-        format!(r#"{{"access_token":"{TOKEN}","id_token":"{right}","id_token":"{wrong}"}}"#);
-    let mut s = Script::happy().answer(TOKEN_URL, 200, &duplicate);
-    assert_eq!(run(&l, &mut s), LoginStep::SecurityCheckFailed);
-    for body in [
-        format!("access_token={TOKEN}&id_token={right}"),
-        format!("access_token={TOKEN}&id%5ftoken={right}"),
-        format!(r#"{{"access_token":"{TOKEN}","id_token":"{right}"}}"#),
-    ] {
-        let mut s = Script::happy().answer(TOKEN_URL, 200, &body);
-        assert_eq!(identity(run(&l, &mut s)).id, "github:octocat");
-        assert_eq!(s.targets(), [TOKEN_URL, USER_URL, ORGS_URL]);
     }
 }
 
@@ -186,7 +151,7 @@ fn enterprise_script(next: &str) -> Script {
                 link: Some(format!("<{next}>; rel=\"next\"")),
                 ..ReplyFields::default()
             },
-            r#"[{"login":"first"}]"#,
+            r#"[{"login":"first","id":8}]"#,
         )
 }
 
@@ -209,13 +174,15 @@ fn org_next_links_normalize_default_ports_and_resolve_against_each_current_page(
                     link: Some("<?page=3>; rel=\"next\"".into()),
                     ..ReplyFields::default()
                 },
-                r#"[{"login":"second"}]"#,
+                r#"[{"login":"second","id":9}]"#,
             )
-            .answer(page3, 200, r#"[{"login":"third"}]"#);
+            .answer(page3, 200, r#"[{"login":"third","id":10}]"#);
         let p = identity(run(&l, &mut s));
-        for org in ["first", "second", "third"] {
+        for org in [8, 9, 10] {
             assert!(
-                p.roles.contains(&format!("github:org/{org}")),
+                p.roles.contains(&format!(
+                    "github-v2:aHR0cHM6Ly9naGUuY29ycC9hcGkvdjM:org:{org}"
+                )),
                 "{next}: {org}"
             );
         }
@@ -258,7 +225,10 @@ fn consumed_token_response_is_gone_while_the_next_hop_is_pending() {
         f.req.answer.is_none(),
         "the consumed profile is not retained either"
     );
-    assert_eq!(identity(l.drive(&mut f, &mut s)).id, "github:octocat");
+    assert_eq!(
+        identity(l.drive(&mut f, &mut s)).id,
+        "github-v2:aHR0cHM6Ly9hcGkuZ2l0aHViLmNvbQ:user:1"
+    );
 }
 
 #[test]
@@ -270,13 +240,16 @@ fn malformed_org_entries_refuse_the_whole_reply_at_the_org_hop() {
         r#"[{"message":"foreign"}]"#,
         r#"[{"login":""}]"#,
         r#"[{"login":42}]"#,
-        r#"[{"login":"valid"},{"message":"foreign"}]"#,
+        r#"[{"login":"valid","id":14},{"message":"foreign"}]"#,
     ] {
         let mut s = Script::happy().answer(ORGS_URL, 200, body);
         assert_eq!(run(&l, &mut s), OUTAGE, "{body}");
         assert_eq!(s.targets(), [TOKEN_URL, USER_URL, ORGS_URL]);
     }
     let mut s = Script::happy().answer(ORGS_URL, 200, "[]");
-    assert_eq!(identity(run(&l, &mut s)).roles, ["github:id/1"]);
+    assert_eq!(
+        identity(run(&l, &mut s)).roles,
+        ["github-v2:aHR0cHM6Ly9hcGkuZ2l0aHViLmNvbQ:user:1"]
+    );
     assert_eq!(s.targets(), [TOKEN_URL, USER_URL, ORGS_URL]);
 }

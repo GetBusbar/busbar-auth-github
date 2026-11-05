@@ -18,7 +18,11 @@ fn principal(user_body: &str, orgs_body: Option<&str>) -> Option<Principal> {
         Some(body) => parse_org_groups(body)?,
         None => Vec::new(),
     };
-    Some(build_principal(&user, groups))
+    Some(build_principal(
+        &IdentityDomain::from_api_base("https://api.github.com")?,
+        &user,
+        groups,
+    ))
 }
 
 fn cfg() -> GitHubConfig {
@@ -131,18 +135,18 @@ fn parse_access_token_reads_both_shapes_and_refuses_an_empty_or_missing_token() 
 #[test]
 fn complete_login_after_userinfo_identifies() {
     let user = r#"{"login":"octocat","id":583231,"name":"The Octocat"}"#;
-    let orgs = r#"[{"login":"github"},{"login":"octo-org"}]"#;
+    let orgs = r#"[{"login":"github","id":3},{"login":"octo-org","id":4}]"#;
 
     let p = principal(user, Some(orgs)).expect("identifies");
-    assert_eq!(p.id, "github:octocat");
+    assert_eq!(p.id, "github-v2:aHR0cHM6Ly9hcGkuZ2l0aHViLmNvbQ:user:583231");
     assert_eq!(p.name.as_deref(), Some("The Octocat"));
 
     assert_eq!(
         p.roles,
         vec![
-            "github:id/583231".to_string(),
-            "github:org/github".to_string(),
-            "github:org/octo-org".to_string()
+            "github-v2:aHR0cHM6Ly9hcGkuZ2l0aHViLmNvbQ:user:583231".to_string(),
+            "github-v2:aHR0cHM6Ly9hcGkuZ2l0aHViLmNvbQ:org:3".to_string(),
+            "github-v2:aHR0cHM6Ly9hcGkuZ2l0aHViLmNvbQ:org:4".to_string()
         ]
     );
 }
@@ -188,12 +192,12 @@ fn ghes_base_urls_config() {
 
 #[test]
 fn parse_org_groups_maps_valid_entries_and_refuses_foreign_entries() {
-    let groups = parse_org_groups(r#"[{"login":"a"},{"login":"b"}]"#);
-    assert_eq!(
-        groups,
-        Some(vec!["github:org/a".to_string(), "github:org/b".to_string()])
-    );
-    assert!(parse_org_groups(r#"[{"login":"a"},{"id":1},{"login":""},{"login":"b"}]"#).is_none());
+    let groups = parse_org_groups(r#"[{"login":"a","id":5},{"login":"b","id":6}]"#);
+    assert_eq!(groups, Some(vec![5, 6]));
+    assert!(parse_org_groups(
+        r#"[{"login":"a","id":5},{"id":1},{"login":""},{"login":"b","id":6}]"#
+    )
+    .is_none());
 
     assert_eq!(parse_org_groups("[]"), Some(Vec::new()));
 
@@ -209,13 +213,19 @@ fn identity_malformed_orgs_rejects_but_empty_array_identifies() {
     assert_eq!(principal(user, Some("[{bad")), None);
 
     let p = principal(user, Some("[]")).expect("identifies");
-    assert_eq!(p.id, "github:octocat");
-    assert_eq!(p.roles, vec!["github:id/1".to_string()]);
-
-    let p = principal(user, Some(r#"[{"login":"acme"}]"#)).expect("identifies");
+    assert_eq!(p.id, "github-v2:aHR0cHM6Ly9hcGkuZ2l0aHViLmNvbQ:user:1");
     assert_eq!(
         p.roles,
-        vec!["github:id/1".to_string(), "github:org/acme".to_string()]
+        vec!["github-v2:aHR0cHM6Ly9hcGkuZ2l0aHViLmNvbQ:user:1".to_string()]
+    );
+
+    let p = principal(user, Some(r#"[{"login":"acme","id":1}]"#)).expect("identifies");
+    assert_eq!(
+        p.roles,
+        vec![
+            "github-v2:aHR0cHM6Ly9hcGkuZ2l0aHViLmNvbQ:user:1".to_string(),
+            "github-v2:aHR0cHM6Ly9hcGkuZ2l0aHViLmNvbQ:org:1".to_string()
+        ]
     );
 }
 
@@ -255,20 +265,26 @@ fn the_stable_numeric_id_distinguishes_two_accounts_sharing_one_handle() {
     let a = principal(original, None).expect("identifies");
     let b = principal(impostor, None).expect("identifies");
 
-    assert_eq!(a.id, b.id, "the handle is the same, so the id is the same");
+    assert_ne!(
+        a.id, b.id,
+        "different numeric accounts never share an enforcement subject"
+    );
 
     assert!(
-        a.roles.contains(&"github:id/1001".to_string()),
+        a.roles
+            .contains(&"github-v2:aHR0cHM6Ly9hcGkuZ2l0aHViLmNvbQ:user:1001".to_string()),
         "{:?}",
         a.roles
     );
     assert!(
-        b.roles.contains(&"github:id/90210".to_string()),
+        b.roles
+            .contains(&"github-v2:aHR0cHM6Ly9hcGkuZ2l0aHViLmNvbQ:user:90210".to_string()),
         "{:?}",
         b.roles
     );
     assert!(
-        !b.roles.contains(&"github:id/1001".to_string()),
+        !b.roles
+            .contains(&"github-v2:aHR0cHM6Ly9hcGkuZ2l0aHViLmNvbQ:user:1001".to_string()),
         "the impostor must not carry the original's stable id: {:?}",
         b.roles
     );
@@ -276,10 +292,10 @@ fn the_stable_numeric_id_distinguishes_two_accounts_sharing_one_handle() {
 
 #[test]
 fn an_orgs_array_with_an_embedded_access_token_pair_is_not_a_token_response() {
-    let poisoned = r#"[{"login":"acme","description":"x&access_token=gho_ATTACKER&y"}]"#;
+    let poisoned = r#"[{"login":"acme","id":1,"description":"x&access_token=gho_ATTACKER&y"}]"#;
     assert!(parse_access_token(poisoned).is_none());
 
-    let truncated = r#"[{"login":"acme","description":"x&access_token=gho_ATTACKER&"#;
+    let truncated = r#"[{"login":"acme","id":1,"description":"x&access_token=gho_ATTACKER&"#;
     assert!(parse_access_token(truncated).is_none());
 }
 
@@ -373,7 +389,9 @@ fn next_link_honours_the_first_rel_and_quoted_values_only() {
 #[test]
 fn an_org_page_holds_at_most_the_entries_it_asked_for() {
     let page = |n: usize| {
-        let entries: Vec<String> = (0..n).map(|i| format!(r#"{{"login":"o{i}"}}"#)).collect();
+        let entries: Vec<String> = (0..n)
+            .map(|i| format!(r#"{{"login":"o{i}","id":{}}}"#, i + 1))
+            .collect();
         format!("[{}]", entries.join(","))
     };
     assert_eq!(
@@ -382,4 +400,83 @@ fn an_org_page_holds_at_most_the_entries_it_asked_for() {
     );
     assert_eq!(parse_org_groups(&page(ORGS_PER_PAGE + 1)), None);
     assert!(orgs_endpoint(&cfg()).ends_with("/user/orgs?per_page=100"));
+}
+
+#[test]
+fn immutable_identity_survives_rename_and_rejects_recycled_names() {
+    let before = principal(
+        r#"{"login":"alice","id":1001}"#,
+        Some(r#"[{"login":"acme","id":700}]"#),
+    )
+    .unwrap();
+    let renamed = principal(
+        r#"{"login":"renamed","id":1001}"#,
+        Some(r#"[{"login":"new-org-name","id":700}]"#),
+    )
+    .unwrap();
+    let recycled = principal(
+        r#"{"login":"alice","id":90210}"#,
+        Some(r#"[{"login":"acme","id":701}]"#),
+    )
+    .unwrap();
+    assert_eq!(before.id, renamed.id);
+    assert_eq!(before.roles, renamed.roles);
+    assert_ne!(before.id, recycled.id);
+    assert!(before
+        .roles
+        .iter()
+        .all(|role| !recycled.roles.contains(role)));
+    assert!(before.roles.iter().all(|role| !role.starts_with("github:")));
+}
+
+#[test]
+fn immutable_identity_domains_are_canonical_and_deployment_scoped() {
+    let public = IdentityDomain::from_api_base("https://api.github.com").unwrap();
+    assert_eq!(
+        public,
+        IdentityDomain::from_api_base("https://API.GITHUB.COM:443///").unwrap()
+    );
+    assert_eq!(
+        public.user(1),
+        "github-v2:aHR0cHM6Ly9hcGkuZ2l0aHViLmNvbQ:user:1"
+    );
+    for base in [
+        "https://ghe.example/api/v3",
+        "https://ghe.example/other",
+        "https://api.github.com:8443",
+    ] {
+        let other = IdentityDomain::from_api_base(base).unwrap();
+        assert_ne!(public.user(1), other.user(1));
+        assert_ne!(public.org(1), other.org(1));
+    }
+    for base in [
+        "https://u:p@api.github.com",
+        "https://api.github.com?x=1",
+        "https://api.github.com#x",
+        "https://api.github.com/\n",
+        "ftp://api.github.com",
+    ] {
+        assert!(IdentityDomain::from_api_base(base).is_none(), "{base}");
+    }
+}
+
+#[test]
+fn immutable_ids_require_positive_u64_without_name_fallback() {
+    for id in ["null", "0", "-1", "1.5", "\"123\"", "18446744073709551616"] {
+        assert!(
+            parse_user(&format!(r#"{{"login":"alice","id":{id}}}"#)).is_none(),
+            "{id}"
+        );
+        assert!(
+            parse_org_groups(&format!(r#"[{{"login":"acme","id":{id}}}]"#)).is_none(),
+            "{id}"
+        );
+    }
+    assert!(parse_org_groups(r#"[{"login":"acme"}]"#).is_none());
+    let user = parse_user(r#"{"login":"alice","id":18446744073709551615}"#).unwrap();
+    assert_eq!(user.id, u64::MAX);
+    assert_eq!(
+        parse_org_groups(r#"[{"login":"acme","id":18446744073709551615}]"#),
+        Some(vec![u64::MAX])
+    );
 }
