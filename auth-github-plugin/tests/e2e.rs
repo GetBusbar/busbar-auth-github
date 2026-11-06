@@ -137,6 +137,9 @@ fn build_real_binaries() -> (std::path::PathBuf, std::path::PathBuf) {
 #[path = "support/github_image.rs"]
 mod github_image;
 
+#[path = "support/fresh_namespace.rs"]
+mod fresh_namespace;
+
 /// Pack the plugin cdylib into a real tarball via the real `busbar-plugin-pack` (alias `github`).
 fn pack_github(pack_bin: &std::path::Path, so: &std::path::Path, out: &std::path::Path) {
     let status = std::process::Command::new(pack_bin)
@@ -338,6 +341,7 @@ fn github_get_flow_mints_key_via_core_executed_hops() {
             .unwrap()
             .as_nanos()
     )));
+    std::fs::create_dir(&work.0).expect("exclusively create the fixture directory");
     let plugins_dir = work.join("plugins");
     std::fs::create_dir_all(&plugins_dir).unwrap();
     pack_github(
@@ -400,14 +404,16 @@ fn github_get_flow_mints_key_via_core_executed_hops() {
         )
         .unwrap();
         drop((data_listener, admin_listener));
+        let mut command = std::process::Command::new(&busbar_bin);
+        command
+            .env("BUSBAR_CONFIG", &config)
+            .env("BUSBAR_PROVIDERS", &providers)
+            .env("MOCK_KEY", "unused")
+            .env("BUSBAR_GH_CLIENT_SECRET", "e2e-secret")
+            .env("BUSBAR_ADMIN_TOKEN", "e2e-admin-token")
+            .env("BUSBAR_STATE_FILE", "");
         let mut child = Busbar(
-            std::process::Command::new(&busbar_bin)
-                .env("BUSBAR_CONFIG", &config)
-                .env("BUSBAR_PROVIDERS", &providers)
-                .env("MOCK_KEY", "unused")
-                .env("BUSBAR_GH_CLIENT_SECRET", "e2e-secret")
-                .env("BUSBAR_ADMIN_TOKEN", "e2e-admin-token")
-                .env("BUSBAR_STATE_FILE", "")
+            fresh_namespace::initialize_and_serve(command, &work, attempts)
                 .stdout(std::process::Stdio::null())
                 .stderr(std::process::Stdio::inherit())
                 .spawn()

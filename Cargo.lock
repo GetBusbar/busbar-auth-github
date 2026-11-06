@@ -167,6 +167,7 @@ dependencies = [
  "busbar-plugin-loader",
  "reqwest",
  "serde_json",
+ "sha2",
 ]
 
 [[package]]
