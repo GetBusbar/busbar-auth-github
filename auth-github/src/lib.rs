@@ -132,7 +132,7 @@ fn user_endpoint(cfg: &GitHubConfig) -> String {
 }
 /// The `/user/orgs` endpoint URL (`{api_base}/user/orgs?per_page=100`): its first page. GitHub
 /// paginates this list (30 entries a page by default; `per_page=100` is its most). The login follows
-/// each page's `Link: rel="next"` ([`next_link`]) on the API's origin, up to
+/// each page's `Link: rel="next"` ([`read_link`]) on the API's origin, up to
 /// [`login::MAX_ORG_PAGES`] pages, each subject to the reply byte cap and to [`ORGS_PER_PAGE`]
 /// entries; past that the org list is logged as truncated.
 fn orgs_endpoint(cfg: &GitHubConfig) -> String {
@@ -286,24 +286,18 @@ pub fn build_orgs_page_get(url: &str) -> LoginHop {
     }
 }
 
-/// The target of an RFC 8288 `Link` field's `rel="next"` link (`<url>; rel="next", ...`), if any.
-/// A `rel` may list several relation types (`rel="next last"`); its name and value are matched
-/// ASCII case-insensitively. Only a link's FIRST `rel` parameter counts (RFC 8288 §3.3), and a
-/// quoted value is read as one quoted-string (a `;`, `,` or `<` inside it is not syntax). A field
-/// that cannot be read is no next link here; [`login`] tells it apart through `read_link`.
-pub fn next_link(link: &str) -> Option<&str> {
-    read_link(link).flatten()
-}
-
-/// An RFC 7230 `tchar`: what a link-param name or bare value is made of.
+/// An RFC 7230 `tchar` ([`guard::is_tchar`]): what a link-param name or bare value is made of.
 fn is_tchar(c: char) -> bool {
-    c.is_ascii_alphanumeric() || "!#$%&'*+-.^_`|~".contains(c)
+    u8::try_from(c).is_ok_and(guard::is_tchar)
 }
 
-/// Read an RFC 8288 `Link` field: `Some(Some(target))` at the first link whose first `rel` names
-/// `next`, `Some(None)` when the field is read to its end with none, `None` when it cannot be read
-/// before a next link is found (not `<URI-Reference>` link-values with `;` params, separated by
-/// `,`).
+/// Read an RFC 8288 `Link` field for its `rel="next"` link (`<url>; rel="next", ...`):
+/// `Some(Some(target))` at the first link whose first `rel` names `next`, `Some(None)` when the
+/// field is read to its end with none, `None` when it cannot be read before a next link is found
+/// (not `<URI-Reference>` link-values with `;` params, separated by `,`). A `rel` may list several
+/// relation types (`rel="next last"`); its name and value are matched ASCII case-insensitively.
+/// Only a link's FIRST `rel` parameter counts (RFC 8288 §3.3), and a quoted value is read as one
+/// quoted-string (a `;`, `,` or `<` inside it is not syntax).
 pub(crate) fn read_link(link: &str) -> Option<Option<&str>> {
     const OWS: [char; 2] = [' ', '\t'];
     let mut rest = link;
@@ -544,6 +538,10 @@ pub fn parse_user(body: &str) -> Option<GhUser> {
     Some(GhUser { login, id, name })
 }
 
+/// The bytes an identity adds around its domain at most: `github-v2:` and `:user:` (16) plus a
+/// `u64` id's 20 digits. A domain whose identity could not be measured in a `u32` is refused.
+const MAX_IDENTITY_FRAME: usize = "github-v2:".len() + ":user:".len() + 20;
+
 /// The provider namespace used by immutable account and organization identities.
 /// API base includes the GHES deployment path; client IDs and mutable names are not domains.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -568,7 +566,8 @@ impl IdentityDomain {
             return None;
         }
         let canonical = url.as_str().trim_end_matches('/');
-        let length = base64::encoded_len(canonical.len(), false)?.checked_add(36)?;
+        let length =
+            base64::encoded_len(canonical.len(), false)?.checked_add(MAX_IDENTITY_FRAME)?;
         u32::try_from(length).ok()?;
         Some(Self(
             base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(canonical),

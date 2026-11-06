@@ -44,10 +44,16 @@ fn display_controls_fall_back_to_login_without_changing_identity_or_roles() {
         '\u{202d}',
         '\u{202e}',
         '\u{2060}',
+        '\u{2061}',
+        '\u{2062}',
+        '\u{2063}',
+        '\u{2064}',
         '\u{2066}',
         '\u{2067}',
         '\u{2068}',
         '\u{2069}',
+        '\u{206a}',
+        '\u{206f}',
         '\u{feff}',
     ] {
         let body = serde_json::json!({

@@ -25,6 +25,11 @@ fn principal(user_body: &str, orgs_body: Option<&str>) -> Option<Principal> {
     ))
 }
 
+/// The `rel="next"` target of a `Link` field, an unreadable field read as none.
+fn next_link(link: &str) -> Option<&str> {
+    read_link(link).flatten()
+}
+
 fn cfg() -> GitHubConfig {
     GitHubConfig {
         client_id: "Iv1.client".to_string(),
@@ -479,4 +484,45 @@ fn immutable_ids_require_positive_u64_without_name_fallback() {
         parse_org_groups(r#"[{"login":"acme","id":18446744073709551615}]"#),
         Some(vec![u64::MAX])
     );
+}
+
+/// Every authorize-URL value is percent-encoded: a reserved character in the client id, the state or
+/// the challenge can never end its parameter or start another.
+#[test]
+fn the_authorize_url_encodes_the_client_id_state_and_challenge() {
+    let mut c = cfg();
+    c.client_id = "Iv1.a&scope=admin:org".to_string();
+    let url = build_github_authorize_url(&c, "https://busbar.example/cb", "s t#&x=1", "c+h/=", &[]);
+    let query = url.split_once('?').expect("a query").1;
+    let params: Vec<&str> = query.split('&').collect();
+    assert_eq!(
+        params,
+        [
+            "response_type=code",
+            "client_id=Iv1.a%26scope%3Dadmin%3Aorg",
+            "redirect_uri=https%3A%2F%2Fbusbar.example%2Fcb",
+            "scope=read%3Aorg%20read%3Auser",
+            "state=s%20t%23%26x%3D1",
+            "code_challenge=c%2Bh%2F%3D",
+            "code_challenge_method=S256",
+        ]
+    );
+    assert!(!url.contains('#'), "{url}");
+}
+
+/// A form token answer that repeats `access_token` keeps the first non-empty one.
+#[test]
+fn a_repeated_form_access_token_keeps_the_first() {
+    assert!(holds(
+        parse_access_token("access_token=gho_first&access_token=gho_second"),
+        "gho_first"
+    ));
+    assert!(!holds(
+        parse_access_token("access_token=gho_first&access_token=gho_second"),
+        "gho_second"
+    ));
+    assert!(holds(
+        parse_access_token("access_token=&access_token=gho_second"),
+        "gho_second"
+    ));
 }

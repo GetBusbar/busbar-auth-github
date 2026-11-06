@@ -52,7 +52,12 @@ pub(super) fn cdylib() -> PathBuf {
                 <= built
         );
     }
-    for file in ["Cargo.toml", "Cargo.lock", ".busbar-ref"] {
+    for file in [
+        "Cargo.toml",
+        "Cargo.lock",
+        ".busbar-ref",
+        "auth-github/settings.schema.json",
+    ] {
         assert!(
             std::fs::metadata(root.join(file))
                 .unwrap()

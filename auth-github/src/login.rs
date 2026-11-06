@@ -44,6 +44,7 @@ use crate::{
 use busbar_contract::abi::sdk::cred::{self, Cred, FormBody, SettingsError};
 use busbar_contract::abi::sdk::exchange::{Exchange as Wire, Request};
 use busbar_contract::auth::{LoginHop, Principal};
+use busbar_contract::net::scheme_is;
 use serde_json::Value;
 use std::collections::HashSet;
 use std::fmt;
@@ -341,7 +342,7 @@ impl fmt::Debug for LoginFlow {
 
 /// The GitHub login, holding its own client secret.
 pub struct GithubLogin {
-    cfg: GitHubConfig,
+    pub(crate) cfg: GitHubConfig,
     domain: IdentityDomain,
     client_secret: Option<Cred>,
     allowed_hosts: HashSet<String>,
@@ -440,11 +441,8 @@ impl GithubLogin {
             "settings.api_base: invalid identity domain (no credentials, query, fragment or whitespace)".to_string()
         )?;
         let client_secret = client_secret.filter(|s| !s.is_empty()).map(|s| {
-            Cred::captured(Zeroizing::new(s.as_bytes().to_vec())).require_secure_if(
-                cfg.token_base
-                    .split_once("://")
-                    .is_some_and(|(scheme, _)| scheme.eq_ignore_ascii_case("https")),
-            )
+            Cred::captured(Zeroizing::new(s.as_bytes().to_vec()))
+                .require_secure_if(scheme_is(&cfg.token_base, "https"))
         });
         Ok(Self {
             cfg,
@@ -462,12 +460,6 @@ impl GithubLogin {
             .ca_cert_pem
             .as_deref()
             .is_some_and(|p| !p.trim().is_empty())
-    }
-
-    /// The parsed config.
-    #[must_use]
-    pub fn config(&self) -> &GitHubConfig {
-        &self.cfg
     }
 
     /// Start a login: the GitHub authorize URL.
@@ -617,12 +609,7 @@ impl GithubLogin {
                 };
                 flow.state = FlowState {
                     access_token: Some(
-                        token.require_secure_if(
-                            self.cfg
-                                .api_base
-                                .split_once("://")
-                                .is_some_and(|(scheme, _)| scheme.eq_ignore_ascii_case("https")),
-                        ),
+                        token.require_secure_if(scheme_is(&self.cfg.api_base, "https")),
                     ),
                     hop: Hop::User,
                     ..FlowState::default()

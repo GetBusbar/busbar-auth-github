@@ -17,7 +17,7 @@ fn wiremock_url() -> Option<String> {
 fn busbar_root() -> std::path::PathBuf {
     let dir = std::env::var_os("BUSBAR_CHECKOUT").expect(
         "BUSBAR_CHECKOUT is unset: the live e2e builds the real busbar binaries from a checkout of \
-         GetBusbar/busbar at .busbar-ref (ci.yml `e2e` sets it)",
+         GetBusbar/busbar at .busbar-ref (the ModernCI plugin job sets it)",
     );
     std::path::PathBuf::from(dir)
         .canonicalize()

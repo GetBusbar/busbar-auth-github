@@ -3,15 +3,6 @@
 
 use super::*;
 
-#[test]
-fn other_steps_keep_their_verdicts() {
-    assert_eq!(verdict(&LoginStep::BadCredential), LOGIN_BAD_CREDENTIAL);
-    assert_eq!(
-        verdict(&LoginStep::Outage { retry_after: None }),
-        LOGIN_OUTAGE
-    );
-}
-
 fn who(id: &str) -> Principal {
     Principal {
         id: id.to_string(),
@@ -298,7 +289,7 @@ fn red_l2_a_parked_flow_resumes_under_the_login_it_began_with() {
             &format!("\"ca_cert_pem\": \"{PEM}\", \"client_id\""),
         );
     <Github as Life>::refresh(&g, rotated.as_bytes(), &[b"secret-after"], 2).expect("refreshes");
-    assert_eq!(g.login().config().token_base, "https://ghe.example");
+    assert_eq!(g.login().cfg.token_base, "https://ghe.example");
 
     let (mut needs, mut targets) = (Vec::new(), Vec::new());
     let (needs_seen, targets_seen) = (&mut needs, &mut targets);

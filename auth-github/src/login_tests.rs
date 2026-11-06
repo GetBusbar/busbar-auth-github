@@ -1352,7 +1352,7 @@ fn begin_login_is_the_1_5_5_authorize_url() {
     assert_eq!(
         url,
         build_github_authorize_url(
-            l.config(),
+            &l.cfg,
             "https://node.example/auth/token",
             "st",
             "ch",
@@ -1676,7 +1676,7 @@ mod module_field {
 fn the_hop_bodies_are_wiped_on_drop() {
     fn wipes<T: zeroize::ZeroizeOnDrop>(_: &T) {}
     let mut hop = build_token_exchange(
-        login().config(),
+        &login().cfg,
         "code-canary",
         "https://node.example/auth/token",
         "verifier-canary",
@@ -1751,7 +1751,7 @@ fn repeated_link_lines_are_one_list() {
     ]);
     let link = fields.link.as_deref().expect("a link");
     assert_eq!(
-        crate::next_link(link),
+        crate::read_link(link).flatten(),
         Some("https://api.github.com/user/orgs?page=3")
     );
     assert_eq!(fields.retry_after.as_deref(), Some("5"));
@@ -2072,4 +2072,26 @@ fn github_unused_id_token_cannot_supply_credentials_or_override_failure_status()
         r#"{"error":"bad_verification_code","id_token":null}"#,
     );
     assert_eq!(run(&l, &mut s), LoginStep::BadCredential);
+}
+
+/// An RFC 850 date's two-digit year below 70 is read as 20xx (RFC 9110 §5.6.7), and the clock
+/// fields are bounded: day 01-31, minute 00-59, second 00-60.
+#[test]
+fn an_rfc850_year_below_70_is_this_century_and_the_clock_fields_are_bounded() {
+    assert_eq!(
+        http_date("Wednesday, 04-Nov-26 12:00:00 GMT"),
+        Some(1_793_793_600)
+    );
+    assert_eq!(http_date("Thursday, 01-Jan-70 00:00:00 GMT"), Some(0));
+    assert_eq!(
+        http_date("Wed, 04 Nov 2026 12:00:60 GMT"),
+        Some(1_793_793_660)
+    );
+    for bad in [
+        "Sun, 00 Nov 1994 08:49:37 GMT",
+        "Sun, 06 Nov 1994 08:60:37 GMT",
+        "Sun, 06 Nov 1994 08:49:61 GMT",
+    ] {
+        assert_eq!(http_date(bad), None, "{bad:?}");
+    }
 }

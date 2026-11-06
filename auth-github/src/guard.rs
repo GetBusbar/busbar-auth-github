@@ -110,8 +110,9 @@ pub fn sanitize_hop_header(name: &str, value: &str) -> Result<(String, String), 
     Ok((name.to_ascii_lowercase(), value.to_string()))
 }
 
-/// An RFC 7230 `tchar` (what `http::HeaderName` accepts).
-fn is_tchar(b: u8) -> bool {
+/// An RFC 7230 `tchar` (what `http::HeaderName` accepts): the one definition, also what a `Link`
+/// parameter name or bare value is made of.
+pub(crate) fn is_tchar(b: u8) -> bool {
     b.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&b)
 }
 
