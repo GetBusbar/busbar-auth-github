@@ -1007,6 +1007,10 @@ fn red_g1_the_rest_hops_decline_only_a_401() {
 /// RFC 9110 forms) as the seconds to it, then a spent rate limit's reset.
 #[test]
 fn the_retry_hint_reads_seconds_dates_and_resets_against_the_clock() {
+    let http_date = |value| {
+        busbar_contract::abi::auth::http_date_unix(value, 1_793_793_600)
+            .and_then(|at| u64::try_from(at).ok())
+    };
     // 1994-11-06T08:49:37Z, and the same date in each HTTP-date form.
     const AT: u64 = 784_111_777;
     let after = |v: &str| ReplyFields {
@@ -2074,24 +2078,51 @@ fn github_unused_id_token_cannot_supply_credentials_or_override_failure_status()
     assert_eq!(run(&l, &mut s), LoginStep::BadCredential);
 }
 
-/// An RFC 850 date's two-digit year below 70 is read as 20xx (RFC 9110 §5.6.7), and the clock
-/// fields are bounded: day 01-31, minute 00-59, second 00-60.
+/// RFC 850 uses a rolling fifty-year window, and invalid calendar dates are refused.
 #[test]
-fn an_rfc850_year_below_70_is_this_century_and_the_clock_fields_are_bounded() {
+fn retry_dates_use_the_shared_calendar_and_rolling_century() {
+    let http_date = |value| {
+        busbar_contract::abi::auth::http_date_unix(value, 1_793_793_600)
+            .and_then(|at| u64::try_from(at).ok())
+    };
     assert_eq!(
         http_date("Wednesday, 04-Nov-26 12:00:00 GMT"),
         Some(1_793_793_600)
     );
-    assert_eq!(http_date("Thursday, 01-Jan-70 00:00:00 GMT"), Some(0));
+    assert_eq!(
+        http_date("Thursday, 01-Jan-70 00:00:00 GMT"),
+        http_date("Wed, 01 Jan 2070 00:00:00 GMT")
+    );
     assert_eq!(
         http_date("Wed, 04 Nov 2026 12:00:60 GMT"),
         Some(1_793_793_660)
     );
     for bad in [
         "Sun, 00 Nov 1994 08:49:37 GMT",
+        "Wed, 31 Apr 2026 00:00:00 GMT",
+        "Sun, 29 Feb 2026 00:00:00 GMT",
         "Sun, 06 Nov 1994 08:60:37 GMT",
         "Sun, 06 Nov 1994 08:49:61 GMT",
     ] {
         assert_eq!(http_date(bad), None, "{bad:?}");
     }
+}
+
+#[test]
+fn retry_hint_calendar_failure_preserves_reset_fallback_and_overflow_policy() {
+    let now = 1_793_793_600;
+    let mut fields = ReplyFields {
+        retry_after: Some("Wed, 31 Apr 2026 00:00:00 GMT".into()),
+        ratelimit_remaining: Some("0".into()),
+        ratelimit_reset: Some((now + 17).to_string()),
+        ..ReplyFields::default()
+    };
+    assert_eq!(retry_hint(&fields, now), Some(17));
+    fields.retry_after = Some("18446744073709551616".into());
+    assert_eq!(retry_hint(&fields, now), Some(17));
+    fields.retry_after = Some("Thursday, 01-Jan-70 00:00:00 GMT".into());
+    assert_eq!(
+        retry_hint(&fields, now),
+        busbar_contract::abi::auth::retry_after_secs(b"Wed, 01 Jan 2070 00:00:00 GMT", now)
+    );
 }

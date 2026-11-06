@@ -526,3 +526,19 @@ fn a_repeated_form_access_token_keeps_the_first() {
         "gho_second"
     ));
 }
+
+#[test]
+fn parse_access_token_guarded_json_preserves_escapes_and_rejects_ambiguous_fields() {
+    assert!(holds(
+        parse_access_token(r#"{"access\u005ftoken":"gho_\u0061","token_type":"BEARER"}"#),
+        "gho_a"
+    ));
+    for body in [
+        r#"{"access_token":"secret","access\u005ftoken":"other"}"#,
+        r#"{"access_token":"secret","token_type":false}"#,
+        r#"{"access_token":"secret","unknown":"bad\q"}"#,
+        r#"{"access_token":"secret"} trailing"#,
+    ] {
+        assert!(parse_access_token(body).is_none());
+    }
+}

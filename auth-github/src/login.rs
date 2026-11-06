@@ -842,7 +842,9 @@ fn retry_hint(fields: &ReplyFields, now: u64) -> Option<u64> {
         if let Some(after) = secs(after) {
             return Some(after);
         }
-        if let Some(at) = http_date(after) {
+        if let Some(at) = busbar_contract::abi::auth::http_date_unix(after, now)
+            .and_then(|at| u64::try_from(at).ok())
+        {
             return Some(at.saturating_sub(now));
         }
     }
@@ -861,81 +863,6 @@ fn secs(v: &str) -> Option<u64> {
     (!v.is_empty() && v.bytes().all(|b| b.is_ascii_digit()))
         .then(|| v.parse::<u64>().ok())
         .flatten()
-}
-
-/// An RFC 9110 §5.6.7 HTTP-date as Unix seconds: the IMF-fixdate (`Sun, 06 Nov 1994 08:49:37 GMT`)
-/// and the two obsolete forms a recipient must read, RFC 850 (`Sunday, 06-Nov-94 08:49:37 GMT`,
-/// a two-digit year below 70 read as 20xx) and asctime (`Sun Nov  6 08:49:37 1994`). Anything
-/// else, or a date before 1970, is `None`.
-fn http_date(v: &str) -> Option<u64> {
-    const DAYS: [&str; 7] = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
-    const LONG_DAYS: [&str; 7] = [
-        "Monday",
-        "Tuesday",
-        "Wednesday",
-        "Thursday",
-        "Friday",
-        "Saturday",
-        "Sunday",
-    ];
-    const MONTHS: [&str; 12] = [
-        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
-    ];
-    let number = |s: &str, len: std::ops::RangeInclusive<usize>| {
-        (len.contains(&s.len()) && s.bytes().all(|b| b.is_ascii_digit()))
-            .then(|| s.parse::<u64>().ok())
-            .flatten()
-    };
-    let month = |s: &str| MONTHS.iter().position(|m| *m == s).map(|m| m as u64 + 1);
-    let time = |s: &str| {
-        let mut it = s.split(':');
-        let (h, m, sec) = (it.next()?, it.next()?, it.next()?);
-        if it.next().is_some() {
-            return None;
-        }
-        Some((number(h, 2..=2)?, number(m, 2..=2)?, number(sec, 2..=2)?))
-    };
-    let parts: Vec<&str> = v.split_ascii_whitespace().collect();
-    let (year, mon, day, (h, m, sec)) = match *parts.as_slice() {
-        [wd, day, mon, year, t, "GMT"] if DAYS.iter().any(|d| wd.strip_suffix(',') == Some(*d)) => {
-            (
-                number(year, 4..=4)?,
-                month(mon)?,
-                number(day, 2..=2)?,
-                time(t)?,
-            )
-        }
-        [wd, date, t, "GMT"] if LONG_DAYS.iter().any(|d| wd.strip_suffix(',') == Some(*d)) => {
-            let mut it = date.split('-');
-            let (day, mon, yy) = (it.next()?, it.next()?, it.next()?);
-            if it.next().is_some() {
-                return None;
-            }
-            let yy = number(yy, 2..=2)?;
-            let year = if yy < 70 { 2000 + yy } else { 1900 + yy };
-            (year, month(mon)?, number(day, 2..=2)?, time(t)?)
-        }
-        [wd, mon, day, t, year] if DAYS.contains(&wd) => (
-            number(year, 4..=4)?,
-            month(mon)?,
-            number(day, 1..=2)?,
-            time(t)?,
-        ),
-        _ => return None,
-    };
-    if !(1970..=9999).contains(&year) || !(1..=31).contains(&day) || h > 23 || m > 59 || sec > 60 {
-        return None;
-    }
-    let (y, mp) = if mon <= 2 {
-        (year - 1, mon + 9)
-    } else {
-        (year, mon - 3)
-    };
-    let (era, yoe) = (y / 400, y % 400);
-    let doy = (153 * mp + 2) / 5 + day - 1;
-    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
-    let days = (era * 146_097 + doe).checked_sub(719_468)?;
-    Some(days * 86_400 + h * 3_600 + m * 60 + sec)
 }
 
 /// The IdP's retry hint at the wall-clock time `at`. Absolute times (an HTTP-date `retry-after`, a

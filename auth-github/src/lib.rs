@@ -37,7 +37,7 @@ pub mod door;
 pub mod guard;
 pub mod login;
 
-use busbar_contract::abi::sdk::cred::{json_reply, Cred};
+use busbar_contract::abi::sdk::cred::{json_text_members, Cred};
 use busbar_contract::auth::{LoginHop, Principal};
 use serde::Deserialize;
 use serde_json::Value;
@@ -380,7 +380,7 @@ pub struct GhUser {
 /// Parse the access token out of a token-endpoint response body, accepting BOTH the JSON shape
 /// (`{"access_token": "..."}`) and the `application/x-www-form-urlencoded` shape
 /// (`access_token=...&scope=...&token_type=bearer`) GitHub returns without an `Accept: application/json`
-/// header. The token is captured into the chip's [`Cred`] as it is read; the enclosing response is
+/// header. The SDK decodes the token into a wiping holder, then captures it as [`Cred`]; the response is
 /// wiped when its step consumes it, before the next hop. Returns `None` when absent, which covers
 /// GitHub's fail-CLOSED case where the token endpoint answers `HTTP 200` with an `{"error": "..."}`
 /// body (a bad/expired code), so a missing token is never a success with an empty token. A JSON
@@ -391,25 +391,19 @@ pub struct GhUser {
 /// understand and so never presents (RFC 6749 §7.1): `None`. An absent `token_type` keeps GitHub's
 /// bearer meaning.
 pub fn parse_access_token(body: &str) -> Option<Cred> {
-    /// Only `access_token` (captured as the parser meets it) and `token_type` are read.
-    #[derive(Deserialize)]
-    struct TokenReply {
-        access_token: Option<Cred>,
-        token_type: Option<String>,
-    }
     let trimmed = body.trim();
     if trimmed.starts_with('[') {
         return None;
     }
     if trimmed.starts_with('{') {
-        let reply = json_reply::<TokenReply>(trimmed.as_bytes()).ok()?;
-        if reply
-            .token_type
-            .is_some_and(|t| !t.eq_ignore_ascii_case("bearer"))
-        {
+        let [token, token_type] =
+            json_text_members(trimmed.as_bytes(), ["access_token", "token_type"]).ok()?;
+        if token_type.is_some_and(|t| !t.eq_ignore_ascii_case("bearer")) {
             return None;
         }
-        return reply.access_token.filter(|t| !t.is_empty());
+        return token.filter(|t| !t.is_empty()).map(|mut token| {
+            Cred::captured(Zeroizing::new(std::mem::take(&mut *token).into_bytes()))
+        });
     }
     let mut token = None;
     for pair in trimmed.split('&') {
