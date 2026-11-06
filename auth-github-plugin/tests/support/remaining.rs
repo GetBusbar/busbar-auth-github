@@ -76,7 +76,7 @@ impl Conns for RateLimited {
                 "/login/oauth/access_token" => r#"{"access_token":"gho_conformance_token"}"#,
                 "/user" => r#"{"login":"identity-canary","id":42}"#,
                 "/user/orgs?per_page=100" => "[]",
-                "/user/orgs?page=2" => r#"[{"login":"second-page-canary"}]"#,
+                "/user/orgs?page=2" => r#"[{"login":"second-page-canary","id":7}]"#,
                 other => panic!("unexpected target {other}"),
             }
         });
@@ -443,7 +443,7 @@ fn a_short_answer_is_served_to_its_retry_on_the_same_ticket_through_both_doors()
                         &bytes[span.offset as usize..(span.offset + span.len) as usize]
                     )
                     .unwrap(),
-                    "github:identity-canary"
+                    "github-v2:aHR0cDovLzEyNy4wLjAuMTo4MDgw:user:42"
                 );
             }
         }
@@ -548,7 +548,7 @@ fn a_successful_login_and_an_empty_code_are_compared_through_both_doors() {
                     &bytes[span.offset as usize..(span.offset + span.len) as usize],
                 )
                 .unwrap();
-                assert_eq!(subject, "github:identity-canary");
+                assert_eq!(subject, "github-v2:aHR0cDovLzEyNy4wLjAuMTo4MDgw:user:42");
                 let spans = &groups[..output.identity.groups_len as usize];
                 let roles: Vec<_> = spans
                     .iter()
@@ -560,7 +560,13 @@ fn a_successful_login_and_an_empty_code_are_compared_through_both_doors() {
                         .to_owned()
                     })
                     .collect();
-                assert_eq!(roles, ["github:id/42", "github:org/second-page-canary"]);
+                assert_eq!(
+                    roles,
+                    [
+                        "github-v2:aHR0cDovLzEyNy4wLjAuMTo4MDgw:user:42",
+                        "github-v2:aHR0cDovLzEyNy4wLjAuMTo4MDgw:org:7"
+                    ]
+                );
                 leg.push(format!("{subject} {roles:?}"));
                 assert_eq!(
                     &conns.sent.lock().unwrap()[before..],
