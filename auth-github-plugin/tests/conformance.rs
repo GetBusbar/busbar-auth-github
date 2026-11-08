@@ -26,8 +26,8 @@ use busbar_plugin_loader::dispatch::{
 use busbar_plugin_loader::sign::{sign, Manifest, SigningKey, TrustPolicy};
 
 /// The plugin's registry name and alias (what an operator's `auth.chain` names).
-const NAME: &str = busbar_auth_github::door::NAME;
-const ALIAS: &str = busbar_auth_github::door::ALIAS;
+const NAME: &str = "busbar-auth-github";
+const ALIAS: &str = "github";
 
 /// The operator config both arms are opened with (the hop bases written out, as `open` requires).
 const CFG: &str = r#"{"client_id":"Iv1.conformance","fetch_orgs":true,"token_base":"https://github.com","api_base":"https://api.github.com"}"#;
@@ -42,11 +42,14 @@ fn release() -> SigningKey {
 
 /// The process's dispatcher, as the composition root builds one.
 fn dispatcher() -> Arc<Dispatcher> {
-    Arc::new(Dispatcher::new(DispatchConfig {
-        workers: 2,
-        watchdog_period: Duration::from_millis(20),
-        ..DispatchConfig::default()
-    }))
+    Arc::new(Dispatcher::new(
+        DispatchConfig {
+            workers: 2,
+            watchdog_period: Duration::from_millis(20),
+            ..DispatchConfig::default()
+        },
+        busbar_contract::services::test_caller_binding(),
+    ))
 }
 
 fn bind(d: &Dispatcher) -> Bind {
@@ -62,7 +65,7 @@ fn bind(d: &Dispatcher) -> Bind {
 
 /// THE LINKED DOOR: the logic crate's door as a compiled-in row.
 fn row() -> LinkedRow {
-    LinkedRow::of_macro(busbar_auth_github::door::MACRO_DOOR).expect("the door states its row")
+    LinkedRow::of_macro(busbar_auth_github::MACRO_DOOR).expect("the door states its row")
 }
 
 fn linked(d: &Dispatcher) -> Plugin<Auth> {
@@ -607,7 +610,7 @@ fn an_auth_door_loaded_as_another_kind_is_refused() {
     use busbar_plugin_loader::dispatch::kinds;
     let d = dispatcher();
     refused_as_another_kind::<kinds::secret::Secret>(&d);
-    refused_as_another_kind::<kinds::store::Store>(&d);
+    refused_as_another_kind::<kinds::store_v4::StoreV4>(&d);
     refused_as_another_kind::<kinds::hook::Hook>(&d);
     refused_as_another_kind::<kinds::export::Export>(&d);
     refused_as_another_kind::<kinds::plane::Plane>(&d);
@@ -827,13 +830,13 @@ fn malformed_github_headers_and_a_failing_ready_are_refused() {
     )
     .unwrap();
     assert_eq!(open(&p, CFG, Some(SECRET)), "Ready lease=false ");
-    let before_ready = p.inner.crossings.load(Ordering::Relaxed);
+    let before_ready = p.test_invocations().0;
     assert_eq!(
         p.ready(&d, Duration::from_secs(5)).unwrap_err(),
         format!("plugin '{NAME}' ready failed: github test: discovery refused")
     );
     assert_eq!(READY_CALLS.load(Ordering::SeqCst), 1);
-    assert_eq!(p.inner.crossings.load(Ordering::Relaxed) - before_ready, 1);
+    assert_eq!(p.test_invocations().0 - before_ready, 1);
     assert_eq!(close(&p), "Ready lease=false ");
 }
 
@@ -893,10 +896,6 @@ fn github_needs_match_its_declares_file_and_keep_the_fields_the_login_reads() {
         );
         assert_eq!(
             need.keep_response_headers,
-            busbar_auth_github::login::KEPT_REPLY_FIELDS
-        );
-        assert_eq!(
-            need.keep_response_headers,
             [
                 "link",
                 "retry-after",
@@ -949,12 +948,10 @@ fn github_lifecycle_crosses_once_and_undeclared_outbound_slots_refuse() {
     use busbar_contract::abi::auth::{
         FieldsIn, FieldsOut, OpenOutboundIn, OpenOutboundOut, OutboundReadyIn, OutboundReadyOut,
     };
-    use std::sync::atomic::Ordering;
     let d = dispatcher();
     for is_dropped in [false, true] {
         let p = if is_dropped { dropped(&d) } else { linked(&d) };
-        let count =
-            || p.inner.crossings.load(Ordering::Relaxed) - p.inner.resumes.load(Ordering::Relaxed);
+        let count = || p.test_invocations().0 - p.test_invocations().1;
         assert_eq!(count(), 0);
         assert_eq!(p.max_inflight(), 64);
         assert_eq!(p.name(), NAME);

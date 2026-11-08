@@ -33,9 +33,9 @@
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
 
-pub mod door;
-pub mod guard;
-pub mod login;
+pub(crate) mod door;
+pub(crate) mod guard;
+pub(crate) mod login;
 
 use busbar_contract::abi::sdk::cred::{json_text_members, Cred};
 use busbar_contract::auth::{LoginHop, Principal};
@@ -79,7 +79,7 @@ fn default_true() -> bool {
 /// resolves `browser_login.client_secret` and hands it to the plugin beside the settings.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct GitHubConfig {
+pub(crate) struct GitHubConfig {
     /// The GitHub OAuth App / GitHub App **client id** (required). Presented on the authorize URL and
     /// the token exchange. The matching client SECRET is never here.
     pub client_id: String,
@@ -145,7 +145,7 @@ fn orgs_endpoint(cfg: &GitHubConfig) -> String {
 /// The org entries one `/user/orgs` page is asked for (`per_page`, GitHub's most). A page that
 /// carries more is no answer GitHub gives to that request: [`parse_org_groups`] refuses it, which
 /// bounds the groups one login can assert at [`login::MAX_ORG_PAGES`] pages of this many.
-pub const ORGS_PER_PAGE: usize = 100;
+pub(crate) const ORGS_PER_PAGE: usize = 100;
 
 /// Percent-encode `s` for a URL QUERY-component value (RFC 3986 unreserved kept literal, everything
 /// else `%`-escaped). Used only for the authorize URL; the token-exchange form is encoded by the
@@ -188,7 +188,7 @@ fn scope_value(cfg: &GitHubConfig, extra: &[String]) -> String {
 /// GitHub supports S256 PKCE on the web authorization-code flow (2024+); the `code_challenge` the
 /// kernel minted is always sent. A GitHub OAuth App that has not opted into PKCE simply ignores it, and the
 /// paired `code_verifier` still rides the token exchange harmlessly. See the crate README's PKCE note.
-pub fn build_github_authorize_url(
+pub(crate) fn build_github_authorize_url(
     cfg: &GitHubConfig,
     redirect_uri: &str,
     state: &str,
@@ -215,7 +215,7 @@ pub fn build_github_authorize_url(
 /// `Accept: application/json`, which this hop sends. [`parse_access_token`] still reads BOTH shapes,
 /// for a GitHub App or GHES that answers the form anyway. The form is 1.5.5's, byte for byte (no
 /// `grant_type`: GitHub's endpoint does not ask for it).
-pub fn build_token_exchange(
+pub(crate) fn build_token_exchange(
     cfg: &GitHubConfig,
     code: &str,
     redirect_uri: &str,
@@ -240,7 +240,7 @@ pub fn build_token_exchange(
 /// The public request headers of an authenticated GitHub REST hop: the mandatory `User-Agent`
 /// (GitHub rejects a UA-less request) and the `Accept` GitHub recommends. Its `Authorization:
 /// Bearer <token>` is the chip's, sealed in ahead of them when the hop is rendered.
-pub fn userinfo_headers() -> Vec<(String, String)> {
+pub(crate) fn userinfo_headers() -> Vec<(String, String)> {
     vec![
         ("User-Agent".to_string(), "busbar".to_string()),
         (
@@ -252,7 +252,7 @@ pub fn userinfo_headers() -> Vec<(String, String)> {
 
 /// Build the `/user` profile GET hop, with the `User-Agent` + `Accept` headers
 /// ([`userinfo_headers`]); the bearer is sealed in when it is rendered.
-pub fn build_userinfo_get(cfg: &GitHubConfig) -> LoginHop {
+pub(crate) fn build_userinfo_get(cfg: &GitHubConfig) -> LoginHop {
     LoginHop {
         method: "GET".to_string(),
         url: user_endpoint(cfg),
@@ -263,7 +263,7 @@ pub fn build_userinfo_get(cfg: &GitHubConfig) -> LoginHop {
 }
 
 /// Build the `/user/orgs` GET hop, with the same headers as [`build_userinfo_get`].
-pub fn build_orgs_get(cfg: &GitHubConfig) -> LoginHop {
+pub(crate) fn build_orgs_get(cfg: &GitHubConfig) -> LoginHop {
     LoginHop {
         method: "GET".to_string(),
         url: orgs_endpoint(cfg),
@@ -276,7 +276,7 @@ pub fn build_orgs_get(cfg: &GitHubConfig) -> LoginHop {
 /// Build the GET hop of a later `/user/orgs` page: `url` is the previous page's `Link: rel="next"`
 /// (the login checks it is on the API's origin; the hop guard vets it as every hop), with the same
 /// headers as [`build_orgs_get`].
-pub fn build_orgs_page_get(url: &str) -> LoginHop {
+pub(crate) fn build_orgs_page_get(url: &str) -> LoginHop {
     LoginHop {
         method: "GET".to_string(),
         url: url.to_string(),
@@ -366,7 +366,7 @@ pub(crate) fn read_link(link: &str) -> Option<Option<&str>> {
 
 /// A GitHub `/user` profile, reduced to what identity needs.
 #[derive(Debug, Clone, PartialEq)]
-pub struct GhUser {
+pub(crate) struct GhUser {
     /// The GitHub username (`login`), retained only as display metadata.
     pub login: String,
     /// The IMMUTABLE numeric account id. A `login` can be renamed, released and re-registered by
@@ -390,7 +390,7 @@ pub struct GhUser {
 /// A `token_type` other than `bearer` (ASCII case-insensitive) is a token this plugin does not
 /// understand and so never presents (RFC 6749 §7.1): `None`. An absent `token_type` keeps GitHub's
 /// bearer meaning.
-pub fn parse_access_token(body: &str) -> Option<Cred> {
+pub(crate) fn parse_access_token(body: &str) -> Option<Cred> {
     let trimmed = body.trim();
     if trimmed.starts_with('[') {
         return None;
@@ -461,9 +461,9 @@ fn form_decode(s: &str) -> Zeroizing<Vec<u8>> {
 
 /// The most bytes a GitHub login (a user's or an org's) may hold here; GitHub's own limit is 39 (an
 /// Enterprise Managed User's login adds a `_<shortcode>` suffix to it).
-pub const MAX_LOGIN_BYTES: usize = 64;
+pub(crate) const MAX_LOGIN_BYTES: usize = 64;
 /// The most characters of a profile `name` kept; a longer one is cut.
-pub const MAX_NAME_CHARS: usize = 256;
+pub(crate) const MAX_NAME_CHARS: usize = 256;
 
 /// Whether `login` is one a GitHub reply can carry: non-empty, at most [`MAX_LOGIN_BYTES`], and
 /// only GitHub's login characters: ASCII letters, digits, `-` and `_` (the `_` of an Enterprise
@@ -485,7 +485,7 @@ fn plain_login(login: &str) -> bool {
 /// character (`General_Category=Cf`, so also the invisible ZWNJ/ZWJ joiners: the name is display
 /// text an admin compares by eye) or a line/paragraph separator is not taken (the login is shown
 /// instead); a longer one than [`MAX_NAME_CHARS`] is cut.
-pub fn parse_user(body: &str) -> Option<GhUser> {
+pub(crate) fn parse_user(body: &str) -> Option<GhUser> {
     let v: Value = serde_json::from_str(body.trim()).ok()?;
     let login = v
         .get("login")
@@ -539,7 +539,7 @@ const MAX_IDENTITY_FRAME: usize = "github-v2:".len() + ":user:".len() + 20;
 /// The provider namespace used by immutable account and organization identities.
 /// API base includes the GHES deployment path; client IDs and mutable names are not domains.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct IdentityDomain(String);
+pub(crate) struct IdentityDomain(String);
 
 impl IdentityDomain {
     /// Parse a configured API base into its canonical, path-safe identity namespace.
@@ -582,7 +582,7 @@ impl IdentityDomain {
 /// Parse one bounded organization page into immutable positive numeric IDs.
 /// The login is checked as profile metadata but never emitted as an authorization role.
 /// Any malformed entry refuses the whole page; a valid empty page has no org grants.
-pub fn parse_org_groups(body: &str) -> Option<Vec<u64>> {
+pub(crate) fn parse_org_groups(body: &str) -> Option<Vec<u64>> {
     let v: Value = serde_json::from_str(body.trim()).ok()?;
     let orgs = v.as_array().filter(|orgs| orgs.len() <= ORGS_PER_PAGE)?;
     let mut groups = Vec::with_capacity(orgs.len());
@@ -603,7 +603,11 @@ pub fn parse_org_groups(body: &str) -> Option<Vec<u64>> {
 /// logins are display metadata only: no historical handle/slug identity fallback is emitted.
 /// Existing persistent state requires the host's cold principal transition and explicit
 /// organization-binding reconciliation before this format is activated.
-pub fn build_principal(domain: &IdentityDomain, user: &GhUser, org_ids: Vec<u64>) -> Principal {
+pub(crate) fn build_principal(
+    domain: &IdentityDomain,
+    user: &GhUser,
+    org_ids: Vec<u64>,
+) -> Principal {
     let mut p = Principal::from_id(domain.user(user.id));
     p.name = Some(user.name.clone().unwrap_or_else(|| user.login.clone()));
     p.roles = Vec::with_capacity(org_ids.len() + 1);
@@ -617,3 +621,6 @@ mod tests;
 
 #[cfg(test)]
 mod diagnostics;
+
+/// The validated plugin entry and its generated registration descriptor.
+pub use door::{door, MACRO_DOOR};

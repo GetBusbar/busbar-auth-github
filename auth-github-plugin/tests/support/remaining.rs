@@ -504,8 +504,7 @@ fn a_successful_login_and_an_empty_code_are_compared_through_both_doors() {
             input.redirect_uri = s("https://node.example/auth/token");
             input.out_buf = identity_buf(&mut bytes, &mut groups);
             let before = conns.sent.lock().unwrap().len();
-            let crossings = p.inner.crossings.load(std::sync::atomic::Ordering::Relaxed)
-                - p.inner.resumes.load(std::sync::atomic::Ordering::Relaxed);
+            let crossings = p.test_invocations().0 - p.test_invocations().1;
             let ticket = d.mint(0).unwrap();
             let done = d
                 .submit(
@@ -521,9 +520,7 @@ fn a_successful_login_and_an_empty_code_are_compared_through_both_doors() {
             assert_eq!(done.outcome, Outcome::Ready);
             assert_eq!(done.lease, 0);
             assert_eq!(
-                p.inner.crossings.load(std::sync::atomic::Ordering::Relaxed)
-                    - p.inner.resumes.load(std::sync::atomic::Ordering::Relaxed)
-                    - crossings,
+                p.test_invocations().0 - p.test_invocations().1 - crossings,
                 1
             );
             leg.push(format!(
@@ -665,7 +662,7 @@ mod custody {
         // SAFETY: the local input, exclusive output, nested buffers and strings live through this crossing.
         let raw = unsafe {
             f(
-                p.inner.ctx(),
+                p.test_host_context(),
                 std::ptr::from_ref(&i).cast::<c_void>(),
                 &mut o,
             )
@@ -690,7 +687,7 @@ mod custody {
         // SAFETY: the local input, exclusive output, nested buffers and strings live through this crossing.
         let raw = unsafe {
             f.expect("the host offers READ and WRITE")(
-                p.inner.ctx(),
+                p.test_host_context(),
                 std::ptr::from_ref(&i).cast::<c_void>(),
                 &mut o,
             )
@@ -707,7 +704,7 @@ mod custody {
         // SAFETY: the local input, exclusive output, nested buffers and strings live through this crossing.
         let raw = unsafe {
             CONN_SLOTS.close.expect("the host offers CLOSE")(
-                p.inner.ctx(),
+                p.test_host_context(),
                 std::ptr::from_ref(&i).cast::<c_void>(),
                 &mut o,
             )

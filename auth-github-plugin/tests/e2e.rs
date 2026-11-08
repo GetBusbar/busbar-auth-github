@@ -321,9 +321,12 @@ fn github_get_flow_mints_key_via_core_executed_hops() {
         );
         return;
     };
-    let domain = busbar_auth_github::IdentityDomain::from_api_base(&wm).expect("API domain");
-    let subject = domain.user(12345);
-    let org_role = domain.org(7);
+    use base64::Engine as _;
+    let canonical = reqwest::Url::parse(&wm).expect("API URL");
+    let domain = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .encode(canonical.as_str().trim_end_matches('/'));
+    let subject = format!("github-v2:{domain}:user:12345");
+    let org_role = format!("github-v2:{domain}:org:7");
     let so_path = github_image::cdylib();
     let (busbar_bin, pack_bin) = build_real_binaries();
 

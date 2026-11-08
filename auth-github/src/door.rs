@@ -234,6 +234,7 @@ fn warn_without_secret(secrets: &[&[u8]], verb: &'static str) {
 }
 
 impl Life for Github {
+    type Kind = busbar_contract::plugin::markers::AuthKind;
     const CANCEL: u32 = CANCEL_ABANDONED;
 
     fn validate(settings: &[u8]) -> Result<(), Refusal> {
@@ -291,11 +292,12 @@ fn blob_text(b: Lent<'_, Blob>) -> Option<&str> {
 pub struct Begin;
 
 impl SafeSlot for Begin {
+    type Kind = busbar_contract::plugin::markers::AuthKind;
     type In = BeginLoginIn;
     type Out = BeginLoginOut;
     type State = Held<Github>;
     fn call(
-        instance: Instance<'_, Held<Github>>,
+        instance: Instance<'_, Held<Github>, busbar_contract::plugin::markers::AuthKind>,
         input: Lent<'_, BeginLoginIn>,
         mut out: Out<'_, BeginLoginOut>,
     ) -> Outcome {
@@ -355,7 +357,7 @@ fn drive_parked<'p, E: Exchange>(
 
 /// The hop exchange over the instance's connector: one framed `exchange()` per hop on the login's need (anchored or public, see `need_of`).
 struct Over<'c, 'h> {
-    c: Connector<'h>,
+    c: Connector<'h, busbar_contract::plugin::markers::AuthKind>,
     need: u32,
     wire: &'c mut Option<Wire>,
     base: &'c mut u32,
@@ -447,11 +449,12 @@ fn identify(
 pub struct Complete;
 
 impl SafeSlot for Complete {
+    type Kind = busbar_contract::plugin::markers::AuthKind;
     type In = CompleteLoginIn;
     type Out = IdentifyOut;
     type State = Held<Github>;
     fn call(
-        instance: Instance<'_, Held<Github>>,
+        instance: Instance<'_, Held<Github>, busbar_contract::plugin::markers::AuthKind>,
         input: Lent<'_, CompleteLoginIn>,
         mut out: Out<'_, IdentifyOut>,
     ) -> Outcome {
@@ -527,10 +530,15 @@ impl SafeSlot for Complete {
 pub struct NotServed<I, O>(PhantomData<(I, O)>);
 
 impl<I: AbiIn, O: AbiOut> SafeSlot for NotServed<I, O> {
+    type Kind = busbar_contract::plugin::markers::AuthKind;
     type In = I;
     type Out = O;
     type State = Held<Github>;
-    fn call(_: Instance<'_, Held<Github>>, _: Lent<'_, I>, _: Out<'_, O>) -> Outcome {
+    fn call(
+        _: Instance<'_, Held<Github>, busbar_contract::plugin::markers::AuthKind>,
+        _: Lent<'_, I>,
+        _: Out<'_, O>,
+    ) -> Outcome {
         refused(
             "unsupported-operation",
             "this plugin serves GitHub login operations only; verify and outbound auth are not supported",
