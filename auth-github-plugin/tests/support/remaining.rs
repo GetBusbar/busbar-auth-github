@@ -743,30 +743,32 @@ mod custody {
             assert_ne!(owner.instance(), other.instance());
             assert_eq!(open(&owner, LOCAL, Some(SECRET)), "Ready lease=false ");
             assert_eq!(open(&other, LOCAL, Some(SECRET)), "Ready lease=false ");
-            let (outcome, stream, text) = establish(&owner, 1, "127.0.0.1:8080");
-            assert_eq!(outcome, Outcome::Ready, "{text}");
-            assert_eq!(io(&owner, stream, true).0, Outcome::Ready);
-            for need in [2, u32::MAX] {
-                let (outcome, _, text) = establish(&owner, need, "127.0.0.1:8080");
-                assert_eq!(
-                    (outcome, text.as_str()),
-                    (Outcome::Refused, ConnError::UndeclaredNeed.text())
-                );
-            }
-            for answer in [
-                io(&other, stream, true),
-                io(&other, stream, false),
-                close_stream(&other, stream),
-            ] {
-                assert_eq!(
-                    (answer.0, answer.2.as_str()),
-                    (Outcome::Refused, ConnError::NotOwner.text())
-                );
-            }
-            assert_eq!(io(&owner, stream, true).0, Outcome::Ready);
-            assert_eq!(close_stream(&owner, stream).0, Outcome::Ready);
-            assert_eq!(close(&other), "Ready lease=false ");
-            assert_eq!(close(&owner), "Ready lease=false ");
+            owner.test_in_host_operation(|| {
+                let (outcome, stream, text) = establish(&owner, 1, "127.0.0.1:8080");
+                assert_eq!(outcome, Outcome::Ready, "{text}");
+                assert_eq!(io(&owner, stream, true).0, Outcome::Ready);
+                for need in [2, u32::MAX] {
+                    let (outcome, _, text) = establish(&owner, need, "127.0.0.1:8080");
+                    assert_eq!(
+                        (outcome, text.as_str()),
+                        (Outcome::Refused, ConnError::UndeclaredNeed.text())
+                    );
+                }
+                for answer in [
+                    io(&other, stream, true),
+                    io(&other, stream, false),
+                    close_stream(&other, stream),
+                ] {
+                    assert_eq!(
+                        (answer.0, answer.2.as_str()),
+                        (Outcome::Refused, ConnError::NotOwner.text())
+                    );
+                }
+                assert_eq!(io(&owner, stream, true).0, Outcome::Ready);
+                assert_eq!(close_stream(&owner, stream).0, Outcome::Ready);
+                assert_eq!(close(&other), "Ready lease=false ");
+                assert_eq!(close(&owner), "Ready lease=false ");
+            });
         }
     }
 }
