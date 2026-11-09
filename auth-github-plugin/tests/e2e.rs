@@ -352,6 +352,11 @@ fn github_get_flow_mints_key_via_core_executed_hops() {
         &plugins_dir.join("busbar-auth-github.tar.gz"),
     );
 
+    // Bind startup validation to the exact archive packed by this fixture.
+    let archive_pin = busbar_contract::redacted::sha256_hex(
+        &std::fs::read(plugins_dir.join("busbar-auth-github.tar.gz")).unwrap(),
+    );
+
     let signing_key = work.join("signing.key");
     {
         let out = std::process::Command::new(&busbar_bin)
@@ -395,7 +400,7 @@ fn github_get_flow_mints_key_via_core_executed_hops() {
                  auth:\n  key_ttl: \"7d\"\n  signing_key: {{ file: \"{signing}\" }}\n  chain:\n    - keys\n\
                  \x20 admin_auth: [admin-tokens]\n\
                  \x20 role_bindings:\n    github:\n      \"{org_role}\":\n        group: eng-team\n\
-                 plugins:\n  enabled: true\n  dir: {plugins}\n  trust:\n    allow_unsigned: true\n\
+                 plugins:\n  enabled: true\n  dir: {plugins}\n  fetch:\n    - url: \"https://plugins.example/busbar-auth-github.tar.gz\"\n      sha256: \"{archive_pin}\"\n  trust:\n    allow_unsigned: true\n\
                  groups:\n  eng-team:\n    limits:\n      - {{ requests: 1000000, per: day }}\n\
                  \x20   child_default:\n      limits:\n        - {{ budget: 5000, per: month }}\n        - {{ requests: 1000, per: day }}\n\
                  providers:\n  mock:\n    api_key: {{ env: MOCK_KEY }}\n\
