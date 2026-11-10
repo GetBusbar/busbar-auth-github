@@ -13,6 +13,16 @@ use busbar_plugin_loader::dispatch::{now_ns, ConnTable};
 use std::collections::HashMap;
 use std::sync::Mutex;
 
+fn host_table(conns: Arc<dyn DeclaredConns>) -> ConnTable {
+    ConnTable::Host(
+        busbar_contract::conn::admissions::AdmissionAuthority::issue(
+            &busbar_contract::caps::KernelSeal::acquire_for_kernel(),
+            conns,
+            busbar_contract::secret_ref::Sugars::default(),
+        ),
+    )
+}
+
 const LOCAL: &str = r#"{"client_id":"Iv1.conformance","token_base":"http://127.0.0.1:8080","api_base":"http://127.0.0.1:8080"}"#;
 struct RateLimited {
     stream: bool,
@@ -206,7 +216,7 @@ fn retry_hint_reaches_host_owned_extensions_through_both_doors() {
             let p = load(
                 dropped,
                 Bind {
-                    conns: ConnTable::Host(conns.clone()),
+                    conns: host_table(conns.clone()),
                     ..bind(&d)
                 },
             );
@@ -316,7 +326,7 @@ fn short_answer_capacity_eviction_warns_without_exposing_the_identity() {
         let p = load(
             dropped,
             Bind {
-                conns: ConnTable::Host(conns.clone()),
+                conns: host_table(conns.clone()),
                 sink: logs.clone(),
                 ..bind(&d)
             },
@@ -402,7 +412,7 @@ fn a_short_answer_is_served_to_its_retry_on_the_same_ticket_through_both_doors()
         let p = load(
             dropped,
             Bind {
-                conns: ConnTable::Host(conns.clone()),
+                conns: host_table(conns.clone()),
                 ..bind(&d)
             },
         );
@@ -484,7 +494,7 @@ fn a_successful_login_and_an_empty_code_are_compared_through_both_doors() {
         let p = load(
             dropped,
             Bind {
-                conns: ConnTable::Host(conns.clone()),
+                conns: host_table(conns.clone()),
                 sink: logs.clone(),
                 ..bind(&d)
             },
@@ -728,7 +738,7 @@ mod custody {
                 dropped,
                 Bind {
                     instance: Arc::from("github-custody-owner"),
-                    conns: ConnTable::Host(table.clone()),
+                    conns: host_table(table.clone()),
                     ..bind(&d)
                 },
             );
@@ -736,7 +746,7 @@ mod custody {
                 dropped,
                 Bind {
                     instance: Arc::from("github-custody-other"),
-                    conns: ConnTable::Host(table.clone()),
+                    conns: host_table(table.clone()),
                     ..bind(&d)
                 },
             );
