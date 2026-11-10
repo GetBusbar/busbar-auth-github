@@ -385,6 +385,19 @@ impl GithubLogin {
             return Err("settings.client_id: empty".to_string());
         }
 
+        // RFC 6749 §3.3: scope-token = 1*( %x21 / %x23-5B / %x5D-7E ).
+        for scope in &cfg.scopes {
+            if scope.is_empty()
+                || !scope
+                    .bytes()
+                    .all(|b| b == 0x21 || (0x23..=0x5B).contains(&b) || (0x5D..=0x7E).contains(&b))
+            {
+                return Err(format!(
+                    "settings.scopes: {:?} is not a valid OAuth scope token (no spaces, quotes, backslashes or control characters)",
+                    scope
+                ));
+            }
+        }
         if cfg.fetch_orgs
             && !cfg
                 .scopes
@@ -818,11 +831,16 @@ impl Hop {
 }
 
 /// Resolve a next-page reference against the page that supplied it, then require the API's
-/// scheme, host and effective port. Userinfo is never accepted from an untrusted next link.
+/// scheme, host, effective port AND a path under the API base. Userinfo is never accepted from
+/// an untrusted next link.
 fn next_on_origin(next: &str, request: &str, base: &str) -> Option<url::Url> {
     let mut next = url::Url::parse(request).ok()?.join(next).ok()?;
     let base = url::Url::parse(base).ok()?;
     if next.origin() != base.origin() || !next.username().is_empty() || next.password().is_some() {
+        return None;
+    }
+    let base_path = base.path().trim_end_matches('/');
+    if !base_path.is_empty() && !next.path().starts_with(base_path) {
         return None;
     }
     next.set_fragment(None);
@@ -903,9 +921,9 @@ fn loggable(code: &str) -> &str {
 /// declined sign-in):
 ///
 /// * any hop: a 5xx or 429 is the IdP unavailable, an outage carrying its retry hint;
-/// * the token endpoint: a 400/401 carrying a §5.2 `error` (JSON or form) is declined, unless the
-///   code is the operator's ([`OPERATOR_TOKEN_ERRORS`], an outage at warn); anything else is an
-///   outage;
+/// * the token endpoint: a 400/401 carrying a §5.2 `error` or a GitHub user-error code
+///   ([`USER_TOKEN_ERRORS`]) is declined, unless the code is the operator's
+///   ([`OPERATOR_TOKEN_ERRORS`], an outage at warn); anything else is an outage;
 /// * `/user`, `/user/orgs`: a 401 (the token is not accepted) is declined; a 403 that is GitHub's
 ///   rate limit is an outage carrying its retry hint; any other 403 on `/user/orgs` is the token
 ///   lacking `read:org`, the operator's to fix (an outage, at warn); anything else is an outage.
@@ -968,6 +986,15 @@ fn refused_answer(hop: Hop, status: u16, fields: &ReplyFields, body: &str) -> Tu
                 }
                 return Turn::Decline;
             }
+            if let Some(code) = code.filter(|code| USER_TOKEN_ERRORS.contains(code)) {
+                tracing::info!(
+                    module = "github",
+                    status,
+                    error = code,
+                    "github login: declined, the token endpoint refused the code"
+                );
+                return Turn::Decline;
+            }
             tracing::warn!(
                 module = "github",
                 status,
@@ -1024,7 +1051,7 @@ fn github_error(body: &str) -> Option<String> {
     trimmed
         .split('&')
         .find_map(|p| p.strip_prefix("error="))
-        .map(str::to_string)
+        .map(|v| String::from_utf8_lossy(&crate::form_decode(v)).into_owned())
 }
 
 /// The RFC 6749 §5.2 error codes a `400`/`401` token answer declines the sign-in with.

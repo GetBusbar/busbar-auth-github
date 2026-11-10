@@ -152,7 +152,9 @@ fn sweep(map: &mut Answered, now: Instant) -> usize {
 
 /// The identity a short answer reached for `ticket`, taken for its retry, if it is not stale.
 fn take(map: &mut Answered, now: Instant, ticket: Ticket) -> Option<Principal> {
-    sweep(map, now);
+    if !map.is_empty() {
+        sweep(map, now);
+    }
     map.remove(&ticket).map(|(_, p)| p)
 }
 
@@ -160,7 +162,7 @@ fn take(map: &mut Answered, now: Instant, ticket: Ticket) -> Option<Principal> {
 /// at the cap the OLDEST entry goes, never the rest (an in-flight short answer awaiting its retry
 /// must survive).
 fn keep(map: &mut Answered, max: usize, at: Instant, ticket: Ticket, p: Principal) -> usize {
-    let mut evicted = sweep(map, at);
+    let mut evicted = if map.is_empty() { 0 } else { sweep(map, at) };
     if map.len() >= max && !map.contains_key(&ticket) {
         let oldest = map.iter().min_by_key(|(_, (at, _))| *at).map(|(t, _)| *t);
         if let Some(oldest) = oldest {
