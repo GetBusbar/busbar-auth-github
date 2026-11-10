@@ -387,11 +387,7 @@ impl GithubLogin {
 
         // RFC 6749 §3.3: scope-token = 1*( %x21 / %x23-5B / %x5D-7E ).
         for scope in &cfg.scopes {
-            if scope.is_empty()
-                || !scope
-                    .bytes()
-                    .all(|b| b == 0x21 || (0x23..=0x5B).contains(&b) || (0x5D..=0x7E).contains(&b))
-            {
+            if !crate::is_scope_token(scope) {
                 return Err(format!(
                     "settings.scopes: {:?} is not a valid OAuth scope token (no spaces, quotes, backslashes or control characters)",
                     scope
@@ -668,9 +664,9 @@ impl GithubLogin {
                         tracing::warn!(
                             module = "github",
                             pages,
-                            "github login: /user/orgs answered a Link field that cannot be read: org groups past this page are not granted"
+                            "github login: /user/orgs answered a Link field that cannot be read; login cannot finish"
                         );
-                        None
+                        return Turn::Outage { retry_after: None };
                     }
                 };
                 if let Some(next) = next {
@@ -840,8 +836,14 @@ fn next_on_origin(next: &str, request: &str, base: &str) -> Option<url::Url> {
         return None;
     }
     let base_path = base.path().trim_end_matches('/');
-    if !base_path.is_empty() && !next.path().starts_with(base_path) {
-        return None;
+    if !base_path.is_empty() {
+        let np = next.path();
+        // Segment-boundary check: the next path must equal the base or continue with '/'.
+        let on_base = np == base_path
+            || (np.starts_with(base_path) && np.as_bytes().get(base_path.len()) == Some(&b'/'));
+        if !on_base {
+            return None;
+        }
     }
     next.set_fragment(None);
     Some(next)

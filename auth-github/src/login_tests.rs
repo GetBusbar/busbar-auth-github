@@ -1883,10 +1883,10 @@ fn a_foreign_next_link_on_the_last_page_is_still_an_outage() {
     assert_eq!(s.issued.len(), 2 + 10, "the foreign link is never followed");
 }
 
-/// A `Link` field that cannot be read is said at warn, and the user signs in with the groups read
-/// (fail-safe: fewer roles, never more); it is never silently taken as the last page.
+/// A `Link` field that cannot be read is an outage (fail-closed: the login cannot finish with a
+/// non-deterministic group set); it is never silently taken as the last page.
 #[test]
-fn an_unreadable_link_field_is_logged_and_the_groups_read_stand() {
+fn an_unreadable_link_field_is_an_outage() {
     let l = login();
     for link in [
         "<https://api.github.com/user/orgs?page=2; rel=\"next\"",
@@ -1901,14 +1901,7 @@ fn an_unreadable_link_field_is_logged_and_the_groups_read_stand() {
             Script::happy().answer_with(ORGS_URL, 200, fields, r#"[{"login":"acme","id":1}]"#);
         let cap = crate::diagnostics::GithubDiagnostics::default();
         let step = tracing::subscriber::with_default(cap.subscriber(), || run(&l, &mut s));
-        assert_eq!(
-            identity(step).roles,
-            [
-                "github-v2:aHR0cHM6Ly9hcGkuZ2l0aHViLmNvbQ:user:1",
-                "github-v2:aHR0cHM6Ly9hcGkuZ2l0aHViLmNvbQ:org:1"
-            ],
-            "{link:?}"
-        );
+        assert_eq!(step, OUTAGE, "{link:?}");
         assert_eq!(s.targets(), [TOKEN_URL, USER_URL, ORGS_URL], "{link:?}");
         assert!(
             cap.contains("cannot be read"),

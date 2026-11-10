@@ -168,12 +168,21 @@ fn pct(s: &str) -> String {
     out
 }
 
+/// Whether `s` is a valid RFC 6749 S3.3 scope-token: `1*( %x21 / %x23-5B / %x5D-7E )`.
+pub(crate) fn is_scope_token(s: &str) -> bool {
+    !s.is_empty()
+        && s.bytes()
+            .all(|b| b == 0x21 || (0x23..=0x5B).contains(&b) || (0x5D..=0x7E).contains(&b))
+}
+
 /// The space-delimited `scope` value: the configured scopes plus `extra` (the host's requested scopes),
-/// order preserved and de-duplicated.
+/// order preserved and de-duplicated. An extra scope that is not a valid RFC 6749 scope-token is
+/// silently dropped (defence-in-depth: the host is trusted, but a malformed scope must not reach
+/// the authorize URL).
 fn scope_value(cfg: &GitHubConfig, extra: &[String]) -> String {
     let mut scopes: Vec<String> = Vec::new();
     for s in cfg.scopes.iter().chain(extra.iter()) {
-        if !s.is_empty() && !scopes.iter().any(|x| x == s) {
+        if is_scope_token(s) && !scopes.iter().any(|x| x == s) {
             scopes.push(s.clone());
         }
     }
