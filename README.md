@@ -207,3 +207,11 @@ and a wiremock GitHub (CI's `wiremock` service).
 ## License
 
 Apache-2.0. See [LICENSE](LICENSE).
+
+The live GitHub e2e builds the admitted `BUSBAR_CHECKOUT` distribution and plugin
+packer in `CARGO_TARGET_DIR/debug`. Native CI runs `testing/native/prepare.sh`
+before nextest so cold compilation does not consume the login test's runtime
+limit. The test invokes the same locked Cargo builds again to check source
+freshness before using those binaries. WireMock and busbar readiness requests
+have bounded timeouts; the full callback, core-executed hops and issued-key
+assertions still run.

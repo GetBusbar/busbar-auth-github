@@ -13,123 +13,28 @@ fn wiremock_url() -> Option<String> {
     }
 }
 
-/// The busbar checkout the live e2e builds the REAL `busbar` and `busbar-plugin-pack` binaries from:
-fn busbar_root() -> std::path::PathBuf {
-    let dir = std::env::var_os("BUSBAR_CHECKOUT").expect(
-        "BUSBAR_CHECKOUT is unset: the live e2e builds the real busbar binaries from a checkout of \
-         GetBusbar/busbar at .busbar-ref (the ModernCI plugin job sets it)",
-    );
-    std::path::PathBuf::from(dir)
-        .canonicalize()
-        .expect("BUSBAR_CHECKOUT names an existing busbar checkout")
-}
-
-/// Build (cargo-cached) and return the real `busbar` + `busbar-plugin-pack` binaries from the sibling.
-// Nested builds inherit the coordinator's bounded CARGO_BUILD_JOBS budget.
+/// Build the actual admitted sources. Native CI runs this same owner preparation hook before
+/// nextest; the cached invocation here still asks Cargo to verify source freshness before reuse.
 fn build_real_binaries() -> (std::path::PathBuf, std::path::PathBuf) {
-    let root = busbar_root();
     let target = std::path::PathBuf::from(
         std::env::var_os("CARGO_TARGET_DIR")
             .expect("CARGO_TARGET_DIR must name the assigned native target directory"),
     );
+    let prepare = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .join("testing/native/prepare.sh");
+    let status = std::process::Command::new("bash")
+        .arg(prepare)
+        .status()
+        .expect("run the owner preparation hook for the actual busbar binaries");
     assert!(
-        target.is_absolute() && target.is_dir(),
-        "CARGO_TARGET_DIR must be an existing absolute assigned target: {}",
-        target.display()
+        status.success(),
+        "building the actual busbar binaries failed"
     );
-
-    let metadata = std::process::Command::new("cargo")
-        .args([
-            "+1.98.0",
-            "metadata",
-            "--locked",
-            "--no-deps",
-            "--format-version",
-            "1",
-            "--manifest-path",
-        ])
-        .arg(root.join("Cargo.toml"))
-        .current_dir(&root)
-        .output()
-        .expect("read the selected busbar checkout's package targets");
-    assert!(
-        metadata.status.success(),
-        "locked busbar metadata failed: {}",
-        String::from_utf8_lossy(&metadata.stderr)
-    );
-    let metadata: serde_json::Value =
-        serde_json::from_slice(&metadata.stdout).expect("Cargo metadata JSON");
-    let mut owners = Vec::new();
-    for package in metadata["packages"].as_array().expect("metadata packages") {
-        for binary in package["targets"].as_array().expect("package targets") {
-            if binary["name"].as_str() == Some("busbar-plugin-pack")
-                && binary["kind"]
-                    .as_array()
-                    .expect("target kinds")
-                    .iter()
-                    .any(|kind| kind.as_str() == Some("bin"))
-            {
-                owners.push((package, binary));
-            }
-        }
-    }
-    assert_eq!(
-        owners.len(),
-        1,
-        "the selected busbar checkout must declare exactly one busbar-plugin-pack binary owner"
-    );
-    let (owner, binary) = owners[0];
-    let mut pack_args = vec![
-        "+1.98.0".to_owned(),
-        "build".to_owned(),
-        "--locked".to_owned(),
-        "--release".to_owned(),
-        "-p".to_owned(),
-        owner["name"]
-            .as_str()
-            .expect("owner package name")
-            .to_owned(),
-        "--bin".to_owned(),
-        "busbar-plugin-pack".to_owned(),
-    ];
-    if let Some(required) = binary.get("required-features") {
-        let features = required
-            .as_array()
-            .expect("required feature names")
-            .iter()
-            .map(|feature| feature.as_str().expect("required feature name"))
-            .collect::<Vec<_>>();
-        if !features.is_empty() {
-            pack_args.extend(["--features".to_owned(), features.join(",")]);
-        }
-    }
-    let busbar_args = [
-        "+1.98.0",
-        "build",
-        "--locked",
-        "--release",
-        "--manifest-path",
-        "dist/default/Cargo.toml",
-        "--bin",
-        "busbar",
-    ]
-    .into_iter()
-    .map(str::to_owned)
-    .collect::<Vec<_>>();
-    for args in [busbar_args, pack_args] {
-        let status = std::process::Command::new("cargo")
-            .args(&args)
-            .current_dir(&root)
-            .status()
-            .expect("run cargo build for busbar / busbar-plugin-pack");
-        assert!(
-            status.success(),
-            "building the real busbar + busbar-plugin-pack binaries must succeed ({args:?})"
-        );
-    }
     (
-        target.join("release/busbar"),
-        target.join("release/busbar-plugin-pack"),
+        target.join("debug/busbar"),
+        target.join("debug/busbar-plugin-pack"),
     )
 }
 
@@ -202,7 +107,8 @@ fn reserve_port() -> std::net::TcpListener {
 /// Register the GitHub stub mappings on WireMock over its admin API (equivalent to the JSON files under
 fn register_wiremock_stubs(client: &reqwest::blocking::Client, base: &str) {
     let mut ready = false;
-    for _ in 0..60 {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    while std::time::Instant::now() < deadline {
         if client
             .get(format!("{base}/__admin/mappings"))
             .send()
@@ -288,7 +194,8 @@ fn wait_for_health(
     url: &str,
     child: &mut std::process::Child,
 ) -> bool {
-    for _ in 0..150 {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+    while std::time::Instant::now() < deadline {
         if let Ok(Some(status)) = child.try_wait() {
             eprintln!("busbar exited early during health poll: {status}");
             return false;
@@ -331,6 +238,8 @@ fn github_get_flow_mints_key_via_core_executed_hops() {
 
     let client = reqwest::blocking::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
+        .connect_timeout(std::time::Duration::from_secs(2))
+        .timeout(std::time::Duration::from_secs(10))
         .build()
         .unwrap();
     register_wiremock_stubs(&client, &wm);
