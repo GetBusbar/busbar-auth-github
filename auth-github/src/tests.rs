@@ -125,12 +125,12 @@ fn the_userinfo_hop_carries_the_public_headers_and_no_bearer() {
 #[test]
 fn parse_access_token_reads_both_shapes_and_refuses_an_empty_or_missing_token() {
     assert!(holds(
-        parse_access_token("access_token=gho_form&x=1"),
-        "gho_form"
+        parse_access_token("access_token=synthetic_form&x=1"),
+        "synthetic_form"
     ));
     assert!(holds(
-        parse_access_token(r#"{"access_token":"gho_json"}"#),
-        "gho_json"
+        parse_access_token(r#"{"access_token":"synthetic_json"}"#),
+        "synthetic_json"
     ));
     assert!(parse_access_token(r#"{"error":"bad_verification_code"}"#).is_none());
     assert!(parse_access_token(r#"{"access_token":""}"#).is_none());
@@ -297,10 +297,11 @@ fn the_stable_numeric_id_distinguishes_two_accounts_sharing_one_handle() {
 
 #[test]
 fn an_orgs_array_with_an_embedded_access_token_pair_is_not_a_token_response() {
-    let poisoned = r#"[{"login":"acme","id":1,"description":"x&access_token=gho_ATTACKER&y"}]"#;
+    let poisoned =
+        r#"[{"login":"acme","id":1,"description":"x&access_token=synthetic_ATTACKER&y"}]"#;
     assert!(parse_access_token(poisoned).is_none());
 
-    let truncated = r#"[{"login":"acme","id":1,"description":"x&access_token=gho_ATTACKER&"#;
+    let truncated = r#"[{"login":"acme","id":1,"description":"x&access_token=synthetic_ATTACKER&"#;
     assert!(parse_access_token(truncated).is_none());
 }
 
@@ -308,8 +309,8 @@ fn an_orgs_array_with_an_embedded_access_token_pair_is_not_a_token_response() {
 #[test]
 fn parse_access_token_form_decodes_percent_and_plus() {
     assert!(holds(
-        parse_access_token("access_token=gho%5Fab+c&scope=x"),
-        "gho_ab c"
+        parse_access_token("access_token=synthetic%5Fab+c&scope=x"),
+        "synthetic_ab c"
     ));
     assert!(holds(
         parse_access_token("scope=x&access_token=a%2Bb%3D"),
@@ -514,24 +515,24 @@ fn the_authorize_url_encodes_the_client_id_state_and_challenge() {
 #[test]
 fn a_repeated_form_access_token_keeps_the_first() {
     assert!(holds(
-        parse_access_token("access_token=gho_first&access_token=gho_second"),
-        "gho_first"
+        parse_access_token("access_token=synthetic_first&access_token=synthetic_second"),
+        "synthetic_first"
     ));
     assert!(!holds(
-        parse_access_token("access_token=gho_first&access_token=gho_second"),
-        "gho_second"
+        parse_access_token("access_token=synthetic_first&access_token=synthetic_second"),
+        "synthetic_second"
     ));
     assert!(holds(
-        parse_access_token("access_token=&access_token=gho_second"),
-        "gho_second"
+        parse_access_token("access_token=&access_token=synthetic_second"),
+        "synthetic_second"
     ));
 }
 
 #[test]
 fn parse_access_token_guarded_json_preserves_escapes_and_rejects_ambiguous_fields() {
     assert!(holds(
-        parse_access_token(r#"{"access\u005ftoken":"gho_\u0061","token_type":"BEARER"}"#),
-        "gho_a"
+        parse_access_token(r#"{"access\u005ftoken":"synthetic_\u0061","token_type":"BEARER"}"#),
+        "synthetic_a"
     ));
     for body in [
         r#"{"access_token":"secret","access\u005ftoken":"other"}"#,
